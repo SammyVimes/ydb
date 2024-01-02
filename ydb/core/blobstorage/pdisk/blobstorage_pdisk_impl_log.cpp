@@ -74,8 +74,8 @@ bool TPDisk::InitCommonLogger() {
         }
         CommonLogger->SwitchToNewChunk(TReqId(TReqId::InitCommonLoggerSwitchToNewChunk, 0), nullptr);
 
-        // Log chunk can be collected as soon as noone needs it
-        ChunkState[chunkIdx].CommitState = TChunkState::DATA_COMMITTED;
+        // Log chunk can be collected as soon as no one needs it
+        ChunkState[chunkIdx].SetCommitState(TChunkState::DATA_COMMITTED);
     }
     bool isOk = LogNonceJump(InitialPreviousNonce);
     return isOk;
@@ -236,6 +236,7 @@ bool TPDisk::ProcessChunk0(const NPDisk::TEvReadLogResult &readLogResult, TStrin
             << " Marker# BPD48");
         return false;
     }
+    
     TSysLogRecord *sysLogRecord = (TSysLogRecord*)(lastSysLogRecord.data());
 
     if (sysLogRecord->Version < PDISK_SYS_LOG_RECORD_INCOMPATIBLE_VERSION_1000) {
@@ -313,24 +314,24 @@ bool TPDisk::ProcessChunk0(const NPDisk::TEvReadLogResult &readLogResult, TStrin
         ChunkState[i].OwnerId = owner;
         if (IsOwnerAllocated(owner)) {
             if (IsOwnerUser(owner)) {
-                ChunkState[i].CommitState = TChunkState::DATA_COMMITTED;
+                ChunkState[i].SetCommitState(TChunkState::DATA_COMMITTED);
                 Mon.CommitedDataChunks->Inc();
                 LOG_DEBUG(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32
                     " ++CommitedDataChunks# %" PRIi64 " chunkIdx# %" PRIu32 " ownerId# %" PRIu32,
                     (ui32)PDiskId, (i64)Mon.CommitedDataChunks->Val(), (ui32)i,
                     (ui32)owner);
             } else {
-                ChunkState[i].CommitState = TChunkState::LOG_COMMITTED;
+                ChunkState[i].SetCommitState(TChunkState::LOG_COMMITTED);
             }
         } else {
-            ChunkState[i].CommitState = TChunkState::FREE;
+            ChunkState[i].SetCommitState(TChunkState::FREE);
         }
         ChunkState[i].Nonce = chunkOwners[i].Nonce;
     }
 
     // TODO: check for log/data chunk intersections while parsing common log, giving priority to syslog as chunks
     if (IsOwnerUser(ChunkState[SysLogRecord.LogHeadChunkIdx].OwnerId) &&
-            ChunkState[SysLogRecord.LogHeadChunkIdx].CommitState == TChunkState::DATA_COMMITTED) {
+            ChunkState[SysLogRecord.LogHeadChunkIdx].GetCommitState() == TChunkState::DATA_COMMITTED) {
         Mon.CommitedDataChunks->Dec();
         LOG_DEBUG(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32
             " Line# %" PRIu32 " --CommitedDataChunks# %" PRIi64 " chunkIdx# %" PRIu32 " prev ownerId# %" PRIu32,
@@ -345,7 +346,7 @@ bool TPDisk::ProcessChunk0(const NPDisk::TEvReadLogResult &readLogResult, TStrin
             << " Previous ownerId# " << (ui32)ChunkState[SysLogRecord.LogHeadChunkIdx].OwnerId
             << " Marker# BPD52");
     ChunkState[SysLogRecord.LogHeadChunkIdx].OwnerId = OwnerSystem;
-    ChunkState[SysLogRecord.LogHeadChunkIdx].CommitState = TChunkState::DATA_COMMITTED;
+    ChunkState[SysLogRecord.LogHeadChunkIdx].SetCommitState(TChunkState::DATA_COMMITTED);
     ChunkState[SysLogRecord.LogHeadChunkIdx].PreviousNonce = SysLogRecord.LogHeadChunkPreviousNonce;
     LoggedNonces = SysLogRecord.Nonces;
 
@@ -522,10 +523,9 @@ TRcBuf TPDisk::ProcessReadSysLogResult(ui64 &outWritePosition, ui64 &outLsn,
 }
 
 void TPDisk::ReadAndParseMainLog(const TActorId &pDiskActor) {
-    TVector<TLogChunkItem> chunksToRead;
     TIntrusivePtr<TLogReaderBase> logReader(new TLogReader(true, this, ActorSystem, pDiskActor, 0, TLogPosition{0, 0},
                 EOwnerGroupType::Static, TLogPosition{0, 0}, (ui64)-1, SysLogRecord.LogHeadChunkPreviousNonce, 0, 0,
-                TReqId(TReqId::ReadAndParseMainLog, 0), std::move(chunksToRead), 0, 0, TVDiskID::InvalidId));
+                TReqId(TReqId::ReadAndParseMainLog, 0), TVector<TLogChunkItem>(), 0, 0, TVDiskID::InvalidId));
     TVector<ui64> badOffsets;
     // Emits subrequests TCompletionLogReadPart which contains TIntrusivePtr to logReader
     logReader->Exec(0, badOffsets, ActorSystem);
@@ -633,9 +633,9 @@ void TPDisk::WriteSysLogRestorePoint(TCompletionAction *action, TReqId reqId, NW
     TVector<TChunkTrimInfo> chunkIsTrimmed(TChunkTrimInfo::RecordsForChunkCount(chunkCount), TChunkTrimInfo(0));
     for (ui32 i = 0; i < chunkCount; ++i) {
         if (ChunkState.size() > i
-                && (ChunkState[i].CommitState == TChunkState::DATA_COMMITTED
-                    || ChunkState[i].CommitState == TChunkState::DATA_COMMITTED_DELETE_IN_PROGRESS
-                    || ChunkState[i].CommitState == TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE)
+                && (ChunkState[i].GetCommitState() == TChunkState::DATA_COMMITTED
+                    || ChunkState[i].GetCommitState() == TChunkState::DATA_COMMITTED_DELETE_IN_PROGRESS
+                    || ChunkState[i].GetCommitState() == TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE)
                 && IsOwnerUser(ChunkState[i].OwnerId)) {
             chunkOwners[i].OwnerId = ChunkState[i].OwnerId;
             chunkOwners[i].Nonce = ChunkState[i].Nonce;
@@ -828,7 +828,7 @@ bool TPDisk::AllocateLogChunks(ui32 chunksNeeded, ui32 chunksContainingPayload, 
         Y_VERIFY_S(ChunkState[chunkIdx].OwnerId == OwnerUnallocated ||
                 ChunkState[chunkIdx].OwnerId == OwnerUnallocatedTrimmed, "PDiskId# " << PDiskId <<
                 " Unexpected ownerId# " << ui32(ChunkState[chunkIdx].OwnerId));
-        ChunkState[chunkIdx].CommitState = TChunkState::LOG_RESERVED;
+        ChunkState[chunkIdx].SetCommitState(TChunkState::LOG_RESERVED);
         LOG_INFO_S(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# " << PDiskId
                 << " AllocateLogChunks for owner# " << (ui32)owner
                 << " Lsn# " << lsn << " chunkIdx# " << chunkIdx << " LogChunks.size()# " << LogChunks.size());
@@ -998,7 +998,7 @@ NKikimrProto::EReplyStatus TPDisk::BeforeLoggingCommitRecord(const TLogWrite &lo
     }
 
     for (ui32 chunkIdx : logWrite.CommitRecord.CommitChunks) {
-        if (ChunkState[chunkIdx].CommitState == TChunkState::DATA_RESERVED) {
+        if (ChunkState[chunkIdx].GetCommitState() == TChunkState::DATA_RESERVED) {
             Mon.UncommitedDataChunks->Dec();
             Mon.CommitedDataChunks->Inc();
             LOG_INFO(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32
@@ -1011,14 +1011,14 @@ NKikimrProto::EReplyStatus TPDisk::BeforeLoggingCommitRecord(const TLogWrite &lo
     if (logWrite.CommitRecord.DeleteToDecommitted) {
         for (ui32 chunkIdx : logWrite.CommitRecord.DeleteChunks) {
             TChunkState& state = ChunkState[chunkIdx];
-            switch (state.CommitState) {
+            switch (state.GetCommitState()) {
             case TChunkState::DATA_RESERVED:
-                state.CommitState = TChunkState::DATA_RESERVED_DECOMMIT_IN_PROGRESS;
+                state.SetCommitState(TChunkState::DATA_RESERVED_DECOMMIT_IN_PROGRESS);
                 break;
             case TChunkState::DATA_COMMITTED:
                 Mon.CommitedDataChunks->Dec();
                 Mon.UncommitedDataChunks->Inc();
-                state.CommitState = TChunkState::DATA_COMMITTED_DECOMMIT_IN_PROGRESS;
+                state.SetCommitState(TChunkState::DATA_COMMITTED_DECOMMIT_IN_PROGRESS);
                 break;
             default:
                 Y_FAIL_S("PDiskID# " << PDiskId << " can't delete to decomitted chunkIdx# " << chunkIdx
@@ -1031,17 +1031,17 @@ NKikimrProto::EReplyStatus TPDisk::BeforeLoggingCommitRecord(const TLogWrite &lo
         for (ui32 chunkIdx : logWrite.CommitRecord.DeleteChunks) {
             TChunkState& state = ChunkState[chunkIdx];
             if (state.HasAnyOperationsInProgress()) {
-                switch (state.CommitState) {
+                switch (state.GetCommitState()) {
                 case TChunkState::DATA_RESERVED:
                     Mon.UncommitedDataChunks->Dec();
-                    state.CommitState = TChunkState::DATA_RESERVED_DELETE_ON_QUARANTINE;
+                    state.SetCommitState(TChunkState::DATA_RESERVED_DELETE_ON_QUARANTINE);
                     break;
                 case TChunkState::DATA_COMMITTED:
                     Mon.CommitedDataChunks->Dec();
                     LOG_DEBUG(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32
                             " Line# %" PRIu32 " --CommitedDataChunks# %" PRIi64 " chunkIdx# %" PRIu32 " Marker# BPD10",
                             (ui32)PDiskId, (ui32)__LINE__, (i64)Mon.CommitedDataChunks->Val(), (ui32)chunkIdx);
-                    state.CommitState = TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE;
+                    state.SetCommitState(TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE);
                     break;
                 default:
                     Y_FAIL_S("PDiskID# " << PDiskId << " can't delete chunkIdx# " << chunkIdx
@@ -1056,12 +1056,12 @@ NKikimrProto::EReplyStatus TPDisk::BeforeLoggingCommitRecord(const TLogWrite &lo
                         << " ownerId# " << logWrite.Owner
                         << " state# " << state.ToString()
                         << " Marker# BPD78");
-            } else if (state.CommitState == TChunkState::DATA_RESERVED) {
+            } else if (state.GetCommitState() == TChunkState::DATA_RESERVED) {
                 Mon.UncommitedDataChunks->Dec();
-                state.CommitState = TChunkState::DATA_RESERVED_DELETE_IN_PROGRESS;
-            } else if (state.CommitState == TChunkState::DATA_COMMITTED) {
+                state.SetCommitState(TChunkState::DATA_RESERVED_DELETE_IN_PROGRESS);
+            } else if (state.GetCommitState() == TChunkState::DATA_COMMITTED) {
                 Mon.CommitedDataChunks->Dec();
-                state.CommitState = TChunkState::DATA_COMMITTED_DELETE_IN_PROGRESS;
+                state.SetCommitState(TChunkState::DATA_COMMITTED_DELETE_IN_PROGRESS);
             } else {
                 Y_FAIL_S("PDiskID# " << PDiskId << " can't delete chunkIdx# " << chunkIdx
                     << " request ownerId# " << logWrite.Owner
@@ -1093,11 +1093,11 @@ bool TPDisk::ValidateCommitChunk(ui32 chunkIdx, TOwner owner, TStringStream& out
         LOG_ERROR_S(*ActorSystem, NKikimrServices::BS_PDISK, outErrorReason.Str());
         return false;
     }
-    if (ChunkState[chunkIdx].CommitState != TChunkState::DATA_RESERVED
-            && ChunkState[chunkIdx].CommitState != TChunkState::DATA_COMMITTED) {
+    if (ChunkState[chunkIdx].GetCommitState() != TChunkState::DATA_RESERVED
+            && ChunkState[chunkIdx].GetCommitState() != TChunkState::DATA_COMMITTED) {
         outErrorReason << "PDiskId# " << PDiskId
             << " Can't commit chunkIdx# " << chunkIdx
-            << " in CommitState# " << ChunkState[chunkIdx].CommitState
+            << " in CommitState# " << ChunkState[chunkIdx].GetCommitState()
             << " ownerId# " << owner << " Marker# BPD83";
         LOG_ERROR_S(*ActorSystem, NKikimrServices::BS_PDISK, outErrorReason.Str());
         return false;
@@ -1112,11 +1112,11 @@ void TPDisk::CommitChunk(ui32 chunkIdx) {
     Y_ABORT_UNLESS(state.CommitsInProgress > 0);
     --state.CommitsInProgress;
 
-    switch (state.CommitState) {
+    switch (state.GetCommitState()) {
     case TChunkState::DATA_RESERVED:
         [[fallthrough]];
     case TChunkState::DATA_COMMITTED:
-        state.CommitState = TChunkState::DATA_COMMITTED;
+        state.SetCommitState(TChunkState::DATA_COMMITTED);
         break;
     case TChunkState::DATA_RESERVED_DECOMMIT_IN_PROGRESS:
         [[fallthrough]];
@@ -1158,11 +1158,11 @@ bool TPDisk::ValidateDeleteChunk(ui32 chunkIdx, TOwner owner, TStringStream& out
         LOG_ERROR_S(*ActorSystem, NKikimrServices::BS_PDISK, outErrorReason.Str());
         return false;
     }
-    if (ChunkState[chunkIdx].CommitState != TChunkState::DATA_RESERVED
-            && ChunkState[chunkIdx].CommitState != TChunkState::DATA_COMMITTED) {
+    if (ChunkState[chunkIdx].GetCommitState() != TChunkState::DATA_RESERVED
+            && ChunkState[chunkIdx].GetCommitState() != TChunkState::DATA_COMMITTED) {
         outErrorReason << "PDiskId# " << (ui32)PDiskId
             << " Can't delete chunkIdx# " << (ui32)chunkIdx
-            << " in CommitState# " << ChunkState[chunkIdx].CommitState
+            << " in CommitState# " << ChunkState[chunkIdx].GetCommitState()
             << " ownerId# " << (ui32)owner << " Marker# BPD82";
         LOG_ERROR_S(*ActorSystem, NKikimrServices::BS_PDISK, outErrorReason.Str());
         return false;
@@ -1178,7 +1178,7 @@ bool TPDisk::ValidateDeleteChunk(ui32 chunkIdx, TOwner owner, TStringStream& out
 void TPDisk::DeleteChunk(ui32 chunkIdx, TOwner owner) {
     TGuard<TMutex> guard(StateMutex);
     TChunkState &state = ChunkState[chunkIdx];
-    switch (state.CommitState) {
+    switch (state.GetCommitState()) {
     // Chunk will be freed in TPDisk::ForceDeleteChunk() and may be released already
     case TChunkState::DATA_ON_QUARANTINE:
         break;
@@ -1192,23 +1192,23 @@ void TPDisk::DeleteChunk(ui32 chunkIdx, TOwner owner) {
                 (ui32)PDiskId, (ui32)chunkIdx, (ui32)state.OwnerId, (ui32)OwnerUnallocated);
         Y_ABORT_UNLESS(state.OwnerId == owner); // TODO DELETE
         state.OwnerId = OwnerUnallocated;
-        state.CommitState = TChunkState::FREE;
+        state.SetCommitState(TChunkState::FREE);
         Keeper.PushFreeOwnerChunk(owner, chunkIdx);
         break;
     case TChunkState::DATA_COMMITTED_DELETE_ON_QUARANTINE:
         // Mark chunk as quarantine, so it will be released through default quarantine way
         Y_ABORT_UNLESS(state.OwnerId == owner); // TODO DELETE
-        state.CommitState = TChunkState::DATA_ON_QUARANTINE;
+        state.SetCommitState(TChunkState::DATA_ON_QUARANTINE);
         break;
     case TChunkState::DATA_RESERVED_DELETE_ON_QUARANTINE:
         // Mark chunk as quarantine, so it will be released through default quarantine way
         Y_ABORT_UNLESS(state.OwnerId == owner); // TODO DELETE
-        state.CommitState = TChunkState::DATA_ON_QUARANTINE;
+        state.SetCommitState(TChunkState::DATA_ON_QUARANTINE);
         break;
     case TChunkState::DATA_COMMITTED_DECOMMIT_IN_PROGRESS:
         [[fallthrough]];
     case TChunkState::DATA_RESERVED_DECOMMIT_IN_PROGRESS:
-        state.CommitState = TChunkState::DATA_DECOMMITTED;
+        state.SetCommitState(TChunkState::DATA_DECOMMITTED);
         break;
 
     default:
@@ -1261,7 +1261,7 @@ void TPDisk::OnLogCommitDone(TLogCommitDone &req) {
     if (isChunkReleased) {
         THolder<TCompletionEventSender> completion(new TCompletionEventSender(this));
         if (ReleaseUnusedLogChunks(completion.Get())) {
-            WriteSysLogRestorePoint(completion.Release(), req.ReqId, {}); // FIXME: wilson
+            WriteSysLogRestorePoint(completion.Release(), req.ReqId, {});
         }
     }
     TryTrimChunk(false, 0, req.Span);
@@ -1271,6 +1271,8 @@ void TPDisk::MarkChunksAsReleased(TReleaseChunks& req) {
     TGuard<TMutex> guard(StateMutex);
 
     for (const auto& chunkIdx : req.ChunksToRelease) {
+        LogRecoveryState.Readers.erase(chunkIdx);
+
         BlockDevice->EraseCacheRange(
             Format.Offset(chunkIdx, 0),
             Format.Offset(chunkIdx + 1, 0));
@@ -1305,6 +1307,28 @@ void TPDisk::MarkChunksAsReleased(TReleaseChunks& req) {
         IsLogChunksReleaseInflight = false;
 
         TryTrimChunk(false, 0, req.Span);
+    }
+}
+
+void TPDisk::NotifyLogChunkRead(ui32 chunkIdx, TOwner reader) {
+    TGuard<TMutex> guard(StateMutex);
+    auto iter = LogRecoveryState.Readers.find(chunkIdx);
+
+    if (iter == LogRecoveryState.Readers.end()) {
+        return;
+    }
+
+    auto &readers = iter->second;
+
+    if (readers.any()) {
+        // If there's at least one registered reader.
+        readers.set(reader, false);
+
+        if (readers.none()) {
+            LogRecoveryState.Readers.erase(iter);
+
+            BlockDevice->EraseCacheRange(Format.Offset(chunkIdx, 0), Format.Offset(chunkIdx + 1, 0));
+        }
     }
 }
 
@@ -1355,6 +1379,7 @@ void TPDisk::ProcessReadLogResult(const NPDisk::TEvReadLogResult &evReadLogResul
     switch (InitPhase) {
         case EInitPhase::ReadingSysLog:
         {
+            // Finished reading sys log.
             TString errorReason;
             bool success = ProcessChunk0(evReadLogResult, errorReason);
 
@@ -1376,6 +1401,7 @@ void TPDisk::ProcessReadLogResult(const NPDisk::TEvReadLogResult &evReadLogResul
         }
         case EInitPhase::ReadingLog:
         {
+            // Finished reading main log.
             InitialLogPosition = evReadLogResult.NextPosition;
             if (InitialLogPosition == TLogPosition{0, 0}) {
                 *Mon.PDiskState = NKikimrBlobStorage::TPDiskState::InitialCommonLogParseError;
@@ -1451,6 +1477,7 @@ void TPDisk::ProcessReadLogResult(const NPDisk::TEvReadLogResult &evReadLogResul
                         if (OwnerData[ownerId].IsStaticGroupOwner()) {
                             params.HasStaticGroups = true;
                         }
+                        LogRecoveryState.InitialOwners.set(ownerId, true);
                     }
                 }
 
@@ -1464,6 +1491,17 @@ void TPDisk::ProcessReadLogResult(const NPDisk::TEvReadLogResult &evReadLogResul
                     *Mon.PDiskDetailedState = TPDiskMon::TPDisk::ErrorCalculatingChunkQuotas;
                     ActorSystem->Send(pDiskActor, new TEvLogInitResult(false, errorReason));
                     return;
+                }
+
+                // For every log chunk build a list of readers. These readers will be reading this chunk.
+                for (auto it = LogChunks.begin(); it != LogChunks.end(); ++it) {
+                    auto &readers = LogRecoveryState.Readers[it->ChunkIdx];
+
+                    for (ui32 owner = 0; owner < it->OwnerLsnRange.size(); ++owner) {
+                        if (it->OwnerLsnRange.size() > owner && it->OwnerLsnRange[owner].IsPresent) {
+                            readers.set(owner, true);
+                        }
+                    }
                 }
             }
 

@@ -23,7 +23,7 @@ enum class EInitPhase {
 };
 
 enum EOwner {
-    OwnerSystem = 0, // Chunk0, SysLog chunks and CommonLog + just common log tracking, mens "for dynamic" in requests
+    OwnerSystem = 0, // Chunk0, SysLog chunks and CommonLog + just common log tracking, means "for dynamic" in requests
     OwnerUnallocated = 1, // Unallocated chunks, Trim scheduling, Slay commands
     OwnerBeginUser = 2,
     OwnerEndUser = 241,
@@ -69,7 +69,7 @@ struct TOwnerData {
     ui64 CurrentFirstLsnToKeep = 0;
     ui64 LastWrittenCommitLsn = 0;
     TActorId CutLogId;
-    TLogEndPosition LogEndPosition {0, 0};
+    TLogEndPosition LogEndPosition = TLogEndPosition(0, 0);
     TActorId WhiteboardProxyId;
     ui64 LogRecordsInitiallyRead = 0;
     ui64 LogRecordsConsequentlyRead = 0;
@@ -201,6 +201,10 @@ struct TOwnerData {
         LogRecordsConsequentlyRead = 0;
         OwnerRound = 0;
         AskedToCutLogAt = TInstant();
+        AskedFreeUpToLsn = 0;
+        LogChunkCountBeforeCut = 0;
+        AskedLogChunkToCut = 0;
+        LogEndPosition = TLogEndPosition(0, 0);
         CutLogAt = TInstant();
         LastSeenLsn = 0;
         HasAlreadyLoggedThisIncarnation = false;
@@ -241,7 +245,6 @@ struct TChunkState {
     ui64 PreviousNonce;
     std::atomic<i64> OperationsInProgress;
     TOwner OwnerId;
-    ECommitState CommitState;
     ui64 CommitsInProgress;
 
     TChunkState()
@@ -250,12 +253,25 @@ struct TChunkState {
         , PreviousNonce(0)
         , OperationsInProgress(0)
         , OwnerId(OwnerUnallocated)
-        , CommitState(FREE)
         , CommitsInProgress(0)
+        , CommitState_(FREE)
     {}
 
     bool HasAnyOperationsInProgress() const {
         return OperationsInProgress || CommitsInProgress;
+    }
+
+    void SetCommitState(ECommitState commitState) {
+        CommitState_ = commitState;
+        CommitStateSeqNo_++;
+    }
+
+    ECommitState GetCommitState() const {
+        return CommitState_;
+    }
+
+    ui64 GetCommitStateSeqNo() const {
+        return CommitStateSeqNo_;
     }
 
 #ifdef OUT_VAR
@@ -270,12 +286,16 @@ struct TChunkState {
         OUT_VAR(PreviousNonce);
         OUT_VAR(OperationsInProgress.load());
         OUT_VAR(OwnerId);
-        OUT_VAR(CommitState);
+        OUT_VAR(CommitState_);
         OUT_VAR(CommitsInProgress);
         str << "}";
         return str.Str();
     }
 #undef OUT_VAR
+private:
+    ECommitState CommitState_;
+
+    ui64 CommitStateSeqNo_ = 0;
 };
 
 struct TLogChunkInfo {
@@ -346,6 +366,17 @@ struct TLogChunkInfo {
         }
         str << "}}";
         return str.Str();
+    }
+};
+
+struct TLogRecoveryState {
+    TMap<TChunkIdx, std::bitset<OwnerCount>> Readers; // Per-chunk information about future readers.
+
+    std::bitset<OwnerCount> InitialOwners; // Presence of owners during the initial read of log. 
+
+    void Clear() {
+        Readers.clear();
+        InitialOwners.reset();
     }
 };
 

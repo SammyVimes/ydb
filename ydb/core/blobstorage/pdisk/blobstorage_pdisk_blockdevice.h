@@ -46,6 +46,7 @@ public:
             TReqId reqId, NWilson::TTraceId *traceId) = 0;
     virtual void CachedPreadAsync(void *data, ui32 size, ui64 offset, TCompletionAction *completionAction,
             TReqId reqId, NWilson::TTraceId *traceId) = 0;
+    virtual void DisableCache() = 0;
     virtual void ClearCache() = 0;
     virtual void EraseCacheRange(ui64 begin, ui64 end) = 0; // erases offsets range [begin, end)
     virtual void FlushAsync(TCompletionAction *completionAction, TReqId reqId) = 0;

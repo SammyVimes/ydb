@@ -8,46 +8,82 @@ namespace NKikimr {
 namespace NPDisk {
 
 /**
- * Key-value LRU cache without automatic eviction, but able to erase range of keys.
- **/
+ * Key-value cache without automatic eviction, but able to erase range of keys.
+ * Entries do not intersect with each other.
+ */
 class TLogCache {
-public:
+private:
     struct TCacheRecord {
         ui64 Offset = 0;
         TRcBuf Data;
+        ui64 CommitStateSeqNo;
         TVector<ui64> BadOffsets;
 
         TCacheRecord() = default;
         TCacheRecord(TCacheRecord&&);
-        TCacheRecord(ui64 offset, TRcBuf data, TVector<ui64> badOffsets);
+        TCacheRecord(ui64 offset, TRcBuf data, ui64 commitStateSeqNo, TVector<ui64> badOffsets);
     };
 
-private:
-    struct TItem : public TIntrusiveListItem<TItem> {
-        TCacheRecord Value;
-
-        // custom constructors ignoring TIntrusiveListItem
-        TItem(TItem&& other);
-        explicit TItem(TCacheRecord&& value);
-    };
-
-    using TListType = TIntrusiveList<TItem>;
-    using TIndex = TMap<ui64, TItem>;
+    using TIndex = TMap<ui64, TCacheRecord>;
 
 public:
+    /**
+     * Gets the current size of the cache.
+     */
     size_t Size() const;
-    const TCacheRecord* Find(ui64 offset);
-    const TCacheRecord* FindWithoutPromote(ui64 offset) const;
 
-    bool Pop();
-    bool Insert(TCacheRecord&& value);
-    size_t Erase(ui64 offset);
-    size_t EraseRange(ui64 begin, ui64 end);  // erases range [begin, end)
+    /**
+     * Finds a cache record by its offset and a specified size, copies the data to the buffer.
+     * @param offset The offset key to search for.
+     * @param size The size of data to copy.
+     * @param commitStateSeqNo Commit state sequence number of the chunk which owns the data.
+     * @param buffer The buffer to store the copied data.
+     * @return True if the cache record is found and data is copied; otherwise, false. If true, then tuple's second value is a populated vector of bad offsets.
+     */
+    std::tuple<bool, TVector<ui64>> Find(ui64 offset, ui32 size, ui64 commitStateSeqNo, char* buffer);
+
+    /**
+     * Inserts a new cache record into the cache.
+     * @param dataPtr Pointer to the data to be inserted.
+     * @param offset The offset key for the new cache record.
+     * @param size The size of the data.
+     * @param commitStateSeqNo Commit state sequence number of the chunk which owns the data.
+     * @param badOffsets Optional vector of bad offsets associated with the cache record.
+     * @return True if the insertion was successful; otherwise, false (e.g., due to data being already cached).
+     */
+    bool Insert(const char* dataPtr, ui64 offset, ui32 size, ui64 commitStateSeqNo, const TVector<ui64>& badOffsets = {});
+
+    /**
+     * Erases a range of cache records from the cache.
+     * @param begin The beginning of the range (inclusive).
+     * @param end The end of the range (exclusive).
+     * @return The number of cache records erased.
+     */
+    size_t EraseRange(ui64 begin, ui64 end);
+
+    /**
+     * Clears the entire cache, removing all cache records.
+     */
     void Clear();
 
+    /**
+     * Clears and disables the cache.
+     */
+    void Disable();
+
 private:
-    TListType List;
-    TIndex Index;
+    TIndex Index_;
+
+    bool Disabled_ = false;
+
+    /**
+     * Prepares for insertion of a new cache record and calculates the left and right paddings for the data being inserted if parts of the data
+     * is already in the cache.
+     * @param offset The offset key for the new cache record.
+     * @param size The size of the data.
+     * @return A pair of i64 values representing left and right data paddings.
+     */
+    std::pair<i64, i64> PrepareInsertion(ui64 offset, ui32 size);
 };
 
 } // NPDisk

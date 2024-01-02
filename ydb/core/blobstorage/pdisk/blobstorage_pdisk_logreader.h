@@ -37,7 +37,7 @@ class TPDisk;
 struct TLogChunkItem {
     TChunkIdx ChunkIdx;
     bool IsPreviousChunkDropped;
-    bool IsPreviousChunkCut;;
+    bool IsPreviousChunkCut;
 
     TLogChunkItem(TChunkIdx chunkIdx, bool isPreviousChunkDropped, bool isPreviousChunkCut)
         : ChunkIdx(chunkIdx)

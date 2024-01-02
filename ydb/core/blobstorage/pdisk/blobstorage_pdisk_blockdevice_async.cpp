@@ -1234,15 +1234,23 @@ class TCachedBlockDevice : public TRealBlockDevice {
         for (auto it = ReadsForOffset.begin(); it != ReadsForOffset.end(); it = nextIt) {
             nextIt++;
             TRead &read = it->second;
-            const TLogCache::TCacheRecord* cached = Cache.Find(read.Offset);
-            if (cached) {
-                if (read.Size <= cached->Data.Size()) {
-                    memcpy(read.Data, cached->Data.GetData(), read.Size);
+
+            ui64 chunkIdx = read.Offset / PDisk->Format.ChunkSize;
+            Y_ABORT_UNLESS(chunkIdx < PDisk->ChunkState.size());
+
+            TChunkState &chunkState = PDisk->ChunkState[chunkIdx];
+
+            if (TChunkState::LOG_COMMITTED == chunkState.GetCommitState() && !chunkState.HasAnyOperationsInProgress()) {
+                auto [foundInCache, badOffsets] = Cache.Find(read.Offset, read.Size, chunkState.GetCommitStateSeqNo(), static_cast<char*>(read.Data));
+                
+                if (foundInCache) {
                     Mon.DeviceReadCacheHits->Inc();
                     Y_ABORT_UNLESS(read.CompletionAction);
-                    for (size_t i = 0; i < cached->BadOffsets.size(); ++i) {
-                        read.CompletionAction->RegisterBadOffset(cached->BadOffsets[i]);
+
+                    for (ui64 badOffset : badOffsets) {
+                        read.CompletionAction->RegisterBadOffset(badOffset);
                     }
+
                     NoopAsyncHackForLogReader(read.CompletionAction, read.ReqId);
                     ReadsForOffset.erase(it);
                 }
@@ -1282,6 +1290,7 @@ public:
         Y_ASSERT(PDisk);
         TStackVec<TCompletionAction*, 32> pendingActions;
         {
+            TGuard<TMutex> pdiskStateGuard(PDisk->StateMutex);
             TGuard<TMutex> guard(CacheMutex);
             ui64 offset = completion->GetOffset();
             auto currentReadIt = CurrentReads.find(offset);
@@ -1290,22 +1299,23 @@ public:
 
             ui64 chunkIdx = offset / PDisk->Format.ChunkSize;
             Y_ABORT_UNLESS(chunkIdx < PDisk->ChunkState.size());
-            if (TChunkState::DATA_COMMITTED == PDisk->ChunkState[chunkIdx].CommitState) {
+
+            const char* dataPtr = static_cast<const char*>(completion->GetData());
+
+            TChunkState &chunkState = PDisk->ChunkState[chunkIdx];
+
+            if (TChunkState::LOG_COMMITTED == chunkState.GetCommitState() && !chunkState.HasAnyOperationsInProgress()) {
                 if ((offset % PDisk->Format.ChunkSize) + completion->GetSize() > PDisk->Format.ChunkSize) {
                     // TODO: split buffer if crossing chunk boundary instead of completely discarding it
                     LOG_INFO_S(
                         *ActorSystem, NKikimrServices::BS_DEVICE,
                         "Skip caching log read due to chunk boundary crossing");
                 } else {
-                    if (Cache.Size() >= MaxCount) {
-                        Cache.Pop();
+                    Cache.EraseRange(completion->GetOffset(), completion->GetOffset() + completion->GetSize());
+
+                    if (Cache.Size() < MaxCount) {
+                        Cache.Insert(dataPtr, completion->GetOffset(), completion->GetSize(), chunkState.GetCommitStateSeqNo(), {});   
                     }
-                    const char* dataPtr = static_cast<const char*>(completion->GetData());
-                    Cache.Insert(
-                        TLogCache::TCacheRecord(
-                            completion->GetOffset(),
-                            TRcBuf(TString(dataPtr, dataPtr + completion->GetSize())),
-                            completion->GetBadOffsets()));
                 }
             }
 
@@ -1385,9 +1395,15 @@ public:
     // Can be called from completion Exec
     virtual void CachedPreadAsync(void *data, ui32 size, ui64 offset, TCompletionAction *completionAction,
             TReqId reqId, NWilson::TTraceId *traceId) override {
+        TGuard<TMutex> pdiskStateGuard(PDisk->StateMutex);
         TGuard<TMutex> guard(CacheMutex);
         ReadsForOffset.emplace(offset, TRead(data, size, offset, completionAction, reqId, traceId));
         UpdateReads();
+    }
+
+    virtual void DisableCache() override {
+        TGuard<TMutex> guard(CacheMutex);
+        Cache.Disable();
     }
 
     virtual void ClearCache() override {

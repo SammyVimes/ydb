@@ -288,7 +288,7 @@ void TPDisk::OutputHtmlLogChunksDetails(TStringStream &str) {
                     TABLER() {
                         TABLED() { str << idx;}
                         TABLED() { str << it->ChunkIdx; }
-                        TABLED() { str << (ChunkState[it->ChunkIdx].CommitState == TChunkState::DATA_COMMITTED); }
+                        TABLED() { str << (ChunkState[it->ChunkIdx].GetCommitState() == TChunkState::DATA_COMMITTED); }
                         TABLED() { str << "[" << it->FirstNonce << ", " << it->LastNonce << "]"; }
                         TABLED() { str << it->CurrentUserCount; }
                         for (ui32 owner : activeOwners) {
@@ -441,7 +441,7 @@ void TPDisk::OutputHtmlChunkLockUnlockInfo(TStringStream &str) {
                                     const TChunkState &chunk = ChunkState[idx];
                                     TABLED() {
                                         str << "<span style='color:";
-                                        str << (chunk.CommitState == TChunkState::LOCKED ? "red" : "black");
+                                        str << (chunk.GetCommitState() == TChunkState::LOCKED ? "red" : "black");
                                         str << ";'>";
                                         if (chunk.OwnerId == (TOwner) OwnerSystem) {
                                             str << "L";
@@ -453,7 +453,7 @@ void TPDisk::OutputHtmlChunkLockUnlockInfo(TStringStream &str) {
                                             str << "X";
                                         } else {
                                             str << (ui32)chunk.OwnerId;
-                                            if (chunk.CommitState != TChunkState::DATA_COMMITTED && chunk.CommitState != TChunkState::LOCKED) {
+                                            if (chunk.GetCommitState() != TChunkState::DATA_COMMITTED && chunk.GetCommitState() != TChunkState::LOCKED) {
                                                 str << "-";
                                             }
                                         }

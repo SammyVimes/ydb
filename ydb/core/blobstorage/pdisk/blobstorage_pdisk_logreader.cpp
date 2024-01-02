@@ -72,7 +72,7 @@ void TPDisk::ProcessChunkOwnerMap(TMap<ui32, TChunkState> &chunkOwnerMap) {
         }
 
         if (state.OwnerId != OwnerSystem || state.OwnerId == ownerId) {
-            if (IsOwnerUser(state.OwnerId) && state.CommitState == TChunkState::DATA_COMMITTED) {
+            if (IsOwnerUser(state.OwnerId) && state.GetCommitState() == TChunkState::DATA_COMMITTED) {
                 Mon.CommitedDataChunks->Dec();
                 LOG_DEBUG(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32
                     " Line# %" PRIu32 " --CommitedDataChunks# %" PRIi64 " chunkIdx# %" PRIu32 " prev ownerId# %" PRIu32,
@@ -82,7 +82,7 @@ void TPDisk::ProcessChunkOwnerMap(TMap<ui32, TChunkState> &chunkOwnerMap) {
             state.OwnerId = ownerId;
             state.Nonce = chunkNonce;
             if (IsOwnerAllocated(ownerId)) {
-                state.CommitState = TChunkState::DATA_COMMITTED;
+                state.SetCommitState(TChunkState::DATA_COMMITTED);
                 if (IsOwnerUser(ownerId)) {
                     Mon.CommitedDataChunks->Inc();
                     LOG_DEBUG(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32
@@ -91,7 +91,7 @@ void TPDisk::ProcessChunkOwnerMap(TMap<ui32, TChunkState> &chunkOwnerMap) {
                         (ui32)ownerId);
                 }
             } else {
-                state.CommitState = TChunkState::FREE;
+                state.SetCommitState(TChunkState::FREE);
             }
         }
     }
@@ -808,11 +808,11 @@ bool TLogReader::ProcessSectorSet(TSectorData *sector) {
                     << " LastGoodToWriteLogPosition# " << LastGoodToWriteLogPosition
                     << " Marker# LR018");
         } else {
-           Y_VERIFY_S(ChunkIdx == LogEndChunkIdx && SectorIdx >= LogEndSectorIdx, SelfInfo()
-                   << " File# " << __FILE__
-                   << " Line# " << __LINE__
-                   << " LogEndChunkIdx# " << LogEndChunkIdx
-                   << " LogEndSectorIdx# " << LogEndSectorIdx);
+            Y_VERIFY_S(ChunkIdx == LogEndChunkIdx && SectorIdx >= LogEndSectorIdx, SelfInfo()
+                    << " File# " << __FILE__
+                    << " Line# " << __LINE__
+                    << " LogEndChunkIdx# " << LogEndChunkIdx
+                    << " LogEndSectorIdx# " << LogEndSectorIdx);
             if (!(ChunkIdx == LogEndChunkIdx && SectorIdx >= LogEndSectorIdx)) {
                 LOG_WARN_S(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, SelfInfo()
                         << " In ProcessSectorSet got !restorator.GoodSectorFlags outside the LogEndSector."
@@ -1133,6 +1133,14 @@ void TLogReader::ReplyOk() {
             if (OwnerVDiskId != TVDiskID::InvalidId) {
                 ADD_RECORD_WITH_TIMESTAMP_TO_OPERATION_LOG(ownerData.OperationLog, "Has read the whole log, OwnerId# " << Owner);
                 ownerData.HasReadTheWholeLog = true;
+
+                std::bitset<OwnerCount> &initialOwners = PDisk->LogRecoveryState.InitialOwners;
+
+                initialOwners.set(Owner, false);
+
+                if (initialOwners.none()) {
+                    PDisk->BlockDevice->DisableCache();
+                }
             }
         }
     }
@@ -1163,6 +1171,13 @@ void TLogReader::Reply() {
         PDisk->ProcessChunkOwnerMap(*ChunkOwnerMap.Get());
         ChunkOwnerMap.Destroy();
 
+        ui64 sector = SectorIdx;
+
+        if (!SetLastGoodToWritePosition && sector != 0) {
+            sector -= 1;
+        }
+
+        // Remove invalid part of the last log chunk.
         PDisk->BlockDevice->EraseCacheRange(
             PDisk->Format.Offset(ChunkIdx, 0),
             PDisk->Format.Offset(ChunkIdx + 1, 0)
@@ -1170,6 +1185,14 @@ void TLogReader::Reply() {
     }
     LOG_DEBUG(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# %" PRIu32 " To ownerId# %" PRIu32 " %s",
         (ui32)PDisk->PDiskId, (ui32)Owner, Result->ToString().c_str());
+    
+    if (!IsInitial && Result->IsEndOfLog) {
+        ui32 prevChunkIdx = ChunkIdx;
+
+        // Finished reading owner's whole log.
+        PDisk->NotifyLogChunkRead(prevChunkIdx, Owner);
+    }
+
     ActorSystem->Send(ReplyTo, Result.Release());
     if (!IsInitial) {
         PDisk->Mon.LogRead.CountResponse(ResultSize);
@@ -1294,7 +1317,7 @@ bool TLogReader::ProcessNextChunkReference(TSectorData& sector) {
 void TLogReader::UpdateNewChunkInfo(ui32 currChunk, const TMaybe<ui32> prevChunkIdx) {
     TGuard<TMutex> guard(PDisk->StateMutex);
     if (prevChunkIdx) {
-        PDisk->ChunkState[*prevChunkIdx].CommitState = TChunkState::LOG_COMMITTED;
+        PDisk->ChunkState[*prevChunkIdx].SetCommitState(TChunkState::LOG_COMMITTED);
     }
 
     TChunkState& state = PDisk->ChunkState[currChunk];
@@ -1303,7 +1326,7 @@ void TLogReader::UpdateNewChunkInfo(ui32 currChunk, const TMaybe<ui32> prevChunk
                 << " chunk will be treated as log chunk, but in ChunkState is marked as owned by user"
                 << " ChunkState# " << state.ToString());
     }
-    state.CommitState = TChunkState::LOG_RESERVED;
+    state.SetCommitState(TChunkState::LOG_RESERVED);
     LOG_INFO_S(*ActorSystem, NKikimrServices::BS_PDISK, SelfInfo() << " chunk is the next log chunk,"
             << " prevOwnerId# " << ui32(state.OwnerId) << " -> newOwnerId# " << ui32(OwnerSystem));
     state.OwnerId = OwnerSystem;
@@ -1311,6 +1334,13 @@ void TLogReader::UpdateNewChunkInfo(ui32 currChunk, const TMaybe<ui32> prevChunk
 }
 
 void TLogReader::SwitchToChunk(ui32 chunkIdx) {
+    if (!IsInitial) {
+        ui32 prevChunkIdx = ChunkIdx;
+        
+        // Finished reading log chunk.
+        PDisk->NotifyLogChunkRead(prevChunkIdx, Owner);
+    }
+
     ChunkIdx = chunkIdx;
     SectorIdx = 0;
     OffsetInSector = 0;
