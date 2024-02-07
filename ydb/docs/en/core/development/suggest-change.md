@@ -64,19 +64,24 @@ And copy-paste the shown token to complete the GitHub CLI configuration.
 
 YDB official repository is [https://github.com/ydb-platform/ydb](https://github.com/ydb-platform/ydb), located under the YDB organization account `ydb-platform`.
 
-To work on the YDB code changes, you need to create a fork repository under your GitHub account, and clone it locally. There's a single GitHub CLI command which does all of that together:
+To work on the YDB code changes, you need to create a fork repository under your GitHub account, and clone it locally. Create a fork pressing `Fork` button on the official
+repository page.
 
+After your fork is set up, clone the official repository:
 ```
 mkdir -p ~/ydbwork
 cd ~/ydbwork
-```
-```
-gh repo fork ydb-platform/ydb --default-branch-only --clone
+git clone https://github.com/ydb-platform/ydb.git
 ```
 
-Once completed, you have a YDB Git repository fork cloned to `~/ydbwork/ydb`.
+Once completed, you have a YDB Git repository cloned to `~/ydbwork/ydb`.
 
 Forking a repository is an instant action, however cloning to the local machine takes some time to transfer about 650 MB of repository data over the network.
+
+Now add your fork as a remote:
+```
+git remote add fork https://github.com/{your_user_name}/ydb.git
+```
 
 ### Configure commit authorship {#author}
 
@@ -86,8 +91,8 @@ Run the following command from your repository directory to set up your name and
 cd ~/ydbwork/ydb
 ```
 ```
-git config --global user.name "Marco Polo"
-git config --global user.email "marco@ydb.tech"
+git config user.name "Marco Polo"
+git config user.email "marco@ydb.tech"
 ```
 
 ## Working on a feature {#feature}
@@ -96,29 +101,27 @@ To start working on a feature, ensure the steps specified in the [Setup the envi
 
 ### Refresh trunk {#fork_sync}
 
-Usually you need a fresh trunk revision to branch from. Sync fork to obtain it, running the following command:
+Usually you need a fresh trunk revision to branch from. Sync your local main branch running the following command in the repository:
 
-```
-gh repo sync your_github_login/ydb -s ydb-platform/ydb
-```
-
-This statement performs sync remotely on GitHub. Pull the changes to the local repository then:
-
+If your current local branch is not `main`:
 ```
 cd ~/ydbwork/ydb
+git fetch origin main:main
 ```
+This updates your local main branch without checking it out.
+
+If your current local branch is `main`:
 ```
-git checkout main
-git pull
+git pull --ff-only origin main
 ```
 
-### Create a development branch {#fork_sync}
+### Create a development branch {#development_branch}
 
 Create a development branch using Git (replace "feature42" with your branch name), and assign upstream for it:
 
 ```
 git checkout -b feature42
-git push --set-upstream origin feature42
+git push --set-upstream fork feature42
 ```
 
 ### Make changes and commits {#commit}
@@ -143,16 +146,8 @@ git push
 
 ### Create a pull request to the official repository {#create_pr}
 
-When the changes are completed and locally tested (see [Ya Build and Test](build-ya.md)), run the following command from your repository root to submit a Pull Request to the YDB official repository:
-
-```
-cd ~/ydbwork/ydb
-```
-```
-gh pr create --title "Feature 42 implemented"
-```
-
-After answering some questions, the Pull Request will be created and you will get a link to its page on GitHub.com.
+When the changes are completed and locally tested (see [Ya Build and Test](build-ya.md)), visit your branch's page on GitHub.com, press `Contribute` and then `Open Pull Request`.
+You can also use the link in the `git push` output to open a Pull Request.
 
 ### Precommit checks {#precommit_checks}
 
@@ -186,7 +181,6 @@ If you have conflicts on the Pull Request, you may rebase your changes on top of
 
 ```
 # Assuming your active branch is your development branch
-gh repo sync your_github_login/ydb -s ydb-platform/ydb
-git pull main
+git fetch origin main:main
 git rebase main
 ```
