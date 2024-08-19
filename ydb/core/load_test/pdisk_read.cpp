@@ -1,4 +1,5 @@
-#include "service_actor.h"
+#include "pdisk_test_actor.h"
+
 #include <ydb/core/base/appdata.h>
 #include <ydb/core/base/counters.h>
 #include <ydb/core/control/immediate_control_board_wrapper.h>

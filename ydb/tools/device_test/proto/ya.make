@@ -1,0 +1,17 @@
+PROTO_LIBRARY()
+
+GRPC()
+
+OWNER(va-kuznecov)
+
+PEERDIR(
+    ydb/core/protos
+)
+
+SRCS(
+    device_perf_test.proto
+)
+
+EXCLUDE_TAGS(GO_PROTO)
+
+END()

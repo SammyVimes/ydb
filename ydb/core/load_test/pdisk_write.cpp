@@ -1,5 +1,6 @@
+#include "pdisk_test_actor.h"
+
 #include <util/random/shuffle.h>
-#include "service_actor.h"
 #include <ydb/core/base/counters.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk.h>
 #include <ydb/core/blobstorage/base/blobstorage_events.h>
@@ -121,6 +122,7 @@ class TPDiskWriterLoadTestActor : public TActorBootstrapped<TPDiskWriterLoadTest
     // Monitoring
     TIntrusivePtr<::NMonitoring::TDynamicCounters> LoadCounters;
     ::NMonitoring::TDynamicCounters::TCounterPtr BytesWritten;
+    ui64 ForLimBytesWritten = 0;
     ::NMonitoring::TDynamicCounters::TCounterPtr LogEntriesWritten;
     NMonitoring::TPercentileTrackerLg<6, 5, 15> ResponseTimes;
     NMonitoring::TPercentileTrackerLg<6, 5, 15> LogResponseTimes;
@@ -128,25 +130,30 @@ class TPDiskWriterLoadTestActor : public TActorBootstrapped<TPDiskWriterLoadTest
     TIntrusivePtr<TEvLoad::TLoadReport> Report;
     TIntrusivePtr<NMonitoring::TCounterForPtr> PDiskBytesWritten;
 
+    ui64 DiskSize = 0;
+
 public:
     static constexpr auto ActorActivityType() {
         return NKikimrServices::TActivity::BS_LOAD_PDISK_WRITE;
     }
 
     TPDiskWriterLoadTestActor(const NKikimr::TEvLoadTestRequest::TPDiskWriteLoad& cmd, const TActorId& parent,
-            const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, ui64 index, ui64 tag)
+            const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, ui64 index, ui64 tag, ui64 diskSize)
         : Parent(parent)
         , Tag(tag)
         , MaxInFlight(4, 0, 65536)
         , OwnerRound(1000 + index)
         , Rng(Now().GetValue())
         , Report(new TEvLoad::TLoadReport())
+        , DiskSize(diskSize)
     {
 
         VERIFY_PARAM(DurationSeconds);
         DurationSeconds = cmd.GetDurationSeconds();
-        Y_ASSERT(DurationSeconds > DelayBeforeMeasurements.Seconds());
-        Report->Duration = TDuration::Seconds(DurationSeconds);
+        if (DurationSeconds > 0) {
+            Y_ASSERT(DurationSeconds > DelayBeforeMeasurements.Seconds());
+            Report->Duration = TDuration::Seconds(DurationSeconds);
+        }
 
         IntervalMsMin = cmd.GetIntervalMsMin();
         IntervalMsMax = cmd.GetIntervalMsMax();
@@ -171,17 +178,19 @@ public:
         Reuse = cmd.GetReuse();
         IsWardenlessTest = cmd.GetIsWardenlessTest();
 
+        Cout << "DiskSize " << DiskSize << Endl;
+
         for (const auto& chunk : cmd.GetChunks()) {
             if (!chunk.HasSlots() || !chunk.HasWeight() || !chunk.GetSlots() || !chunk.GetWeight()) {
                 ythrow TLoadActorException() << "chunk.Slots/Weight fields are either missing or zero";
             }
             Chunks.push_back(TChunkInfo{
-                    {},
-                    chunk.GetSlots(),
-                    0,
-                    chunk.GetWeight(),
-                    0,
-                });
+                {},
+                chunk.GetSlots(),
+                0,
+                chunk.GetWeight(),
+                0,
+            });
         }
 
         // Monitoring initialization
@@ -208,7 +217,9 @@ public:
 
     void Bootstrap(const TActorContext& ctx) {
         Become(&TPDiskWriterLoadTestActor::StateFunc);
-        ctx.Schedule(TDuration::Seconds(DurationSeconds), new TEvents::TEvPoisonPill);
+        if (DurationSeconds > 0) {
+            ctx.Schedule(TDuration::Seconds(DurationSeconds), new TEvents::TEvPoisonPill);
+        }
         ctx.Schedule(TDuration::MilliSeconds(MonitoringUpdateCycleMs), new TEvUpdateMonitoring);
         AppData(ctx)->Icb->RegisterLocalControl(MaxInFlight, Sprintf("PDiskWriteLoadActor_MaxInFlight_%4" PRIu64, Tag).c_str());
         if (IsWardenlessTest) {
@@ -325,6 +336,10 @@ public:
 
     void CheckDie(const TActorContext& ctx) {
         if (!MaxInFlight && !InFlight && !LogInFlight && !Harakiri) {
+            if (DurationSeconds == 0) {
+                Report->Duration = TAppData::TimeProvider->Now() - TestStartTime;
+            }
+
             if (PDiskParams) {
                 SendRequest(ctx, std::make_unique<NPDisk::TEvHarakiri>(PDiskParams->Owner, PDiskParams->OwnerRound));
                 Harakiri = true;
@@ -450,6 +465,7 @@ public:
         ui64 requestIdx = reinterpret_cast<ui64>(msg->Cookie);
         TRequestInfo *info = &RequestInfo[requestIdx];
         info->DataWritten = true;
+        ForLimBytesWritten += info->Size;
         *BytesWritten += info->Size;
 
         if (info->LogWritten) {
@@ -472,6 +488,10 @@ public:
         NPDisk::TCommitRecord record;
         record.CommitChunks.push_back(chunkIdx);
         record.DeleteChunks.swap(DeleteChunks);
+
+        record.FirstLsnToKeep = Lsn;
+        record.IsStartingPoint = false;
+
         DeletedChunksCount += record.DeleteChunks.size();
         TLsnSeg seg(Lsn, Lsn);
         ++Lsn;
@@ -498,6 +518,10 @@ public:
                 // completion handler
             }
             --LogInFlight;
+        }
+
+        if (DurationSeconds == 0 && ForLimBytesWritten >= (DiskSize * 2)) {
+            ctx.Send(SelfId(), std::make_unique<TEvents::TEvPoisonPill>());
         }
 
         CheckDie(ctx);
@@ -631,8 +655,8 @@ public:
 };
 
 IActor *CreatePDiskWriterLoadTest(const NKikimr::TEvLoadTestRequest::TPDiskWriteLoad& cmd,
-        const TActorId& parent, const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, ui64 index, ui64 tag) {
-    return new TPDiskWriterLoadTestActor(cmd, parent, counters, index, tag);
+        const TActorId& parent, const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, ui64 index, ui64 tag, ui64 diskSize) {
+    return new TPDiskWriterLoadTestActor(cmd, parent, counters, index, tag, diskSize);
 }
 
 } // NKikimr

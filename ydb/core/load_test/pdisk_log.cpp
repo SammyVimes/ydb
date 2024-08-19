@@ -1,5 +1,6 @@
+#include "pdisk_test_actor.h"
+
 #include <util/random/shuffle.h>
-#include "service_actor.h"
 #include <ydb/core/base/counters.h>
 #include <ydb/core/blobstorage/pdisk/blobstorage_pdisk.h>
 #include <ydb/core/blobstorage/base/blobstorage_events.h>
