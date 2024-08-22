@@ -21,6 +21,7 @@ BASE_VARS = [
     ("kikimr_auth_token_file", "${kikimr_home}/token/kikimr.token"),
     ("kikimr_dyn_ns_file", "${kikimr_config}/dyn_ns.txt"),
     ("kikimr_tracing_file", "${kikimr_config}/tracing.txt"),
+    ("kikimr_pdisk_key_file", "${kikimr_config}/pdisk_key.txt"),
 ]
 
 NODE_ID_LOCAL_VAR = """
@@ -154,6 +155,12 @@ if [ -f "${kikimr_dyn_ns_file}" ]; then
     kikimr_arg="${kikimr_arg}${kikimr_dyn_ns_file:+ --dyn-nodes-file ${kikimr_dyn_ns_file}}"
 fi
 
+if [ -f "${kikimr_pdisk_key_file}" ]; then
+    kikimr_arg="${kikimr_arg}${kikimr_pdisk_key_file:+ --pdisk-key-file ${kikimr_pdisk_key_file}}"
+else
+    echo "PDisk Key file not found!"
+fi
+
 kikimr_arg="${kikimr_arg}${kikimr_ca:+ --ca=${kikimr_ca}}${kikimr_cert:+ --cert=${kikimr_cert}}${kikimr_key:+ --key=${kikimr_key}}"
 kikimr_arg="${kikimr_arg} ${kikimr_tracing_file}"
 """
@@ -181,7 +188,7 @@ def local_vars(
     mbus_port=2134,
     kikimr_home='/Berkanavt/kikimr',
     kikimr_binaries_base_path='/Berkanavt/kikimr',
-    pq_enable=False,
+    pq_enable=True,
     sqs_port=8771,
     sqs_enable=False,
     enable_cores=False,
@@ -333,22 +340,6 @@ def yql_arguments(yql_txt_enabled=False):
     )
 
 
-def cms_config_cache_argument_for_dynamic_nodes(enable_cms_config_cache=False):
-    return (
-        ''
-        if not enable_cms_config_cache
-        else 'kikimr_arg="${kikimr_arg} --cms-config-cache-file ${kikimr_home}_${kikimr_ic_port}/cache/cached_cfg.txt"'
-    )
-
-
-def cms_config_cache_argument_for_static_nodes(enable_cms_config_cache=False):
-    return (
-        ''
-        if not enable_cms_config_cache
-        else 'kikimr_arg="${kikimr_arg} --cms-config-cache-file ${kikimr_home}/cache/cached_cfg.txt"'
-    )
-
-
 def mbus_arguments(enable_mbus=False):
     return (
         []
@@ -386,6 +377,7 @@ def kikimr_cfg_for_static_node_new_style(
     cert_params=None,
     new_style_kikimr_cfg=True,
     mbus_enabled=False,
+    pq_enable=True,
 ):
     return "\n".join(
         [
@@ -394,6 +386,7 @@ def kikimr_cfg_for_static_node_new_style(
                 ic_port=ic_port,
                 mon_address=mon_address,
                 mon_port=mon_port,
+                grpc_port=grpc_port,
                 kikimr_home=kikimr_home,
                 enable_cores=enable_cores,
                 cert_params=cert_params,
@@ -401,6 +394,7 @@ def kikimr_cfg_for_static_node_new_style(
                 kikimr_binaries_base_path=None,
                 new_style_kikimr_cfg=new_style_kikimr_cfg,
                 mbus_enabled=mbus_enabled,
+                pq_enable=pq_enable,
             ),
             NEW_STYLE_CONFIG,
         ]
@@ -413,13 +407,12 @@ def kikimr_cfg_for_static_node(
     ic_port=19001,
     mon_port=8765,
     kikimr_home='/Berkanavt/kikimr',
-    pq_enable=False,
+    pq_enable=True,
     enable_cores=False,
     default_log_level=3,
     kikimr_binaries_base_path='/Berkanavt/kikimr',
     mon_address="",
     cert_params=None,
-    enable_cms_config_cache=False,
     rb_txt_enabled=False,
     metering_txt_enabled=False,
     audit_txt_enabled=False,
@@ -459,7 +452,6 @@ def kikimr_cfg_for_static_node(
         + metering_arguments(metering_txt_enabled)
         + audit_arguments(audit_txt_enabled)
         + yql_arguments(yql_txt_enabled)
-        + ([cms_config_cache_argument_for_static_nodes(enable_cms_config_cache)] if enable_cms_config_cache else [])
         + mbus_arguments(mbus_enabled)
     )
 
@@ -477,7 +469,6 @@ def kikimr_cfg_for_dynamic_node(
     kikimr_binaries_base_path='/Berkanavt/kikimr',
     mon_address="",
     cert_params=None,
-    enable_cms_config_cache=False,
     rb_txt_enabled=False,
     metering_txt_enabled=False,
     audit_txt_enabled=False,
@@ -515,7 +506,6 @@ def kikimr_cfg_for_dynamic_node(
         + rb_arguments(rb_txt_enabled)
         + metering_arguments(metering_txt_enabled)
         + audit_arguments(audit_txt_enabled)
-        + ([cms_config_cache_argument_for_dynamic_nodes(enable_cms_config_cache)] if enable_cms_config_cache else [])
     )
 
 
@@ -537,7 +527,6 @@ def expected_vars(**kwargs):
 
 def kikimr_cfg_for_dynamic_slot(
     enable_cores=False,
-    enable_cms_config_cache=False,
     cert_params=None,
     rb_txt_enabled=False,
     metering_txt_enabled=False,
@@ -576,5 +565,4 @@ def kikimr_cfg_for_dynamic_slot(
         + metering_arguments(metering_txt_enabled)
         + audit_arguments(audit_txt_enabled)
         + yql_arguments(yql_txt_enabled)
-        + ([cms_config_cache_argument_for_dynamic_nodes(enable_cms_config_cache)] if enable_cms_config_cache else [])
     )

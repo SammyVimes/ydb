@@ -197,6 +197,7 @@ CREATE TABLE unparted (
 	a int
 );
 DROP TABLE unparted;
+SELECT conislocal, coninhcount FROM pg_constraint WHERE conrelid = 'part_b'::regclass;
 create table defcheck_def (a int, c int, b int);
 -- test that complex default partition constraints are enforced correctly
 insert into defcheck_def values (0, 0);

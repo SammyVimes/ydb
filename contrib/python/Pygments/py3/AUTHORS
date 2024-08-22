@@ -46,6 +46,7 @@ Other contributors, listed alphabetically, are:
 * chebee7i -- Python traceback lexer improvements
 * Hiram Chirino -- Scaml and Jade lexers
 * Mauricio Caceres -- SAS and Stata lexers.
+* Michael Camilleri, John Gabriele, sogaiu -- Janet lexer
 * Ian Cooper -- VGL lexer
 * David Corbett -- Inform, Jasmin, JSGF, Snowball, and TADS 3 lexers
 * Leaf Corcoran -- MoonScript lexer
@@ -115,6 +116,8 @@ Other contributors, listed alphabetically, are:
   MSDOS session, BC, WDiff
 * Brian R. Jackson -- Tea lexer
 * Christian Jann -- ShellSession lexer
+* Jonas Camillus Jeppesen -- Line numbers and line highlighting for 
+  RTF-formatter
 * Dennis Kaarsemaker -- sources.list lexer
 * Dmitri Kabak -- Inferno Limbo lexer
 * Igor Kalnitsky -- vhdl lexer
@@ -140,6 +143,7 @@ Other contributors, listed alphabetically, are:
 * Sylvestre Ledru -- Scilab lexer
 * Chee Sing Lee -- Flatline lexer
 * Mark Lee -- Vala lexer
+* Thomas Linder Puls -- Visual Prolog lexer
 * Pete Lomax -- Phix lexer
 * Valentin Lorentz -- C++ lexer improvements
 * Ben Mabey -- Gherkin lexer
@@ -194,6 +198,7 @@ Other contributors, listed alphabetically, are:
 * Kashif Rasul -- CUDA lexer
 * Nathan Reed -- HLSL lexer
 * Justin Reidy -- MXML lexer
+* Jonathon Reinhart, Google LLC -- Soong lexer
 * Norman Richards -- JSON lexer
 * Corey Richardson -- Rust lexer updates
 * Fabrizio Riguzzi -- cplint leder
@@ -270,8 +275,9 @@ Other contributors, listed alphabetically, are:
 * Marc Auberer -- Spice lexer
 * Amr Hesham -- Carbon lexer
 * diskdance -- Wikitext lexer
+* vanillajonathan -- PRQL lexer
 * Nikolay Antipov -- OpenSCAD lexer
 * Markus Meyer, Nextron Systems -- YARA lexer
-
+* Hannes Römer -- Mojo lexer
 
 Many thanks for all contributions!

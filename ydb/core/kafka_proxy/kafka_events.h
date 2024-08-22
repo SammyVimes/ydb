@@ -5,7 +5,7 @@
 #include <ydb/services/persqueue_v1/actors/events.h>
 
 #include "kafka_messages.h"
-#include "ydb/library/aclib/aclib.h"
+#include <ydb/library/aclib/aclib.h>
 #include "actors/actors.h"
 
 using namespace NActors;
@@ -27,6 +27,9 @@ struct TEvKafka {
         EvHeartbeatRequest,
         EvLeaveGroupRequest,
         EvKillReadSession,
+        EvCommitedOffsetsResponse,
+        EvCreateTopicsResponse,
+        EvReadSessionInfo,
         EvResponse = EvRequest + 256,
         EvInternalEvents = EvResponse + 256,
         EvEnd
@@ -163,6 +166,14 @@ struct TEvKafka {
         {}
     };
 
+    struct TEvReadSessionInfo : public TEventLocal<TEvReadSessionInfo, EvReadSessionInfo> {
+        TEvReadSessionInfo(const TString& groupId)
+        : GroupId(groupId)
+        {}
+
+        TString GroupId;
+    };
+
     struct TEvKillReadSession : public TEventLocal<TEvKillReadSession, EvKillReadSession> {};
 
     struct TEvUpdateHistCounter : public TEventLocal<TEvUpdateHistCounter, EvUpdateHistCounter> {
@@ -197,8 +208,8 @@ struct TGetOffsetsRequest : public NKikimr::NGRpcProxy::V1::TLocalRequestBase {
     TVector<ui32> PartitionIds;
 };
 
-struct TEvTopicOffsetsResponse : public NActors::TEventLocal<TEvTopicOffsetsResponse, EvTopicOffsetsResponse> 
-                           , public NKikimr::NGRpcProxy::V1::TEvPQProxy::TLocalResponseBase
+struct TEvTopicOffsetsResponse : public NActors::TEventLocal<TEvTopicOffsetsResponse, EvTopicOffsetsResponse>
+                               , public NKikimr::NGRpcProxy::V1::TLocalResponseBase
 {
     TEvTopicOffsetsResponse()
     {}
@@ -206,6 +217,35 @@ struct TEvTopicOffsetsResponse : public NActors::TEventLocal<TEvTopicOffsetsResp
     TVector<TPartitionOffsetsInfo> Partitions;
 };
 
+struct TEvCommitedOffsetsResponse : public NActors::TEventLocal<TEvCommitedOffsetsResponse, EvTopicOffsetsResponse>
+                                  , public NKikimr::NGRpcProxy::V1::TLocalResponseBase
+{
+    TEvCommitedOffsetsResponse()
+    {}
+
+    TString TopicName;
+    EKafkaErrors Status;
+    std::shared_ptr<std::unordered_map<ui32, std::unordered_map<TString, ui32>>> PartitionIdToOffsets;
+};
+
+struct TEvTopicModificationResponse : public NActors::TEventLocal<TEvTopicModificationResponse, EvCreateTopicsResponse>
+                                    , public NKikimr::NGRpcProxy::V1::TLocalResponseBase
+{
+    enum EStatus {
+        OK,
+        ERROR,
+        BAD_REQUEST,
+        INVALID_CONFIG,
+        TOPIC_DOES_NOT_EXIST,
+    };
+
+    TEvTopicModificationResponse()
+    {}
+
+    TString TopicPath;
+    EKafkaErrors Status;
+    TString Message;
+};
 };
 
 } // namespace NKafka

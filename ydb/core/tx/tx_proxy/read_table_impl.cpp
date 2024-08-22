@@ -12,6 +12,8 @@
 #include <ydb/core/scheme/scheme_types_proto.h>
 #include <ydb/core/engine/mkql_proto.h>
 
+#include <ydb/library/yql/core/issue/yql_issue.h>
+#include <ydb/library/yql/core/issue/protos/issue_id.pb.h>
 #include <ydb/library/yql/public/issue/yql_issue_message.h>
 #include <ydb/library/yql/public/issue/yql_issue_manager.h>
 
@@ -91,6 +93,7 @@ namespace {
     bool ParseRangeKey(
             const NKikimrMiniKQL::TParams& proto,
             TConstArrayRef<NScheme::TTypeInfo> keyTypes,
+            const TVector<bool>& notNullTypes,
             TSerializedCellVec& buf,
             EParseRangeKeyExp exp,
             TVector<TString>& unresolvedKeys)
@@ -106,7 +109,7 @@ namespace {
             auto& value = proto.GetValue();
             auto& type = proto.GetType();
             TString errStr;
-            bool res = NMiniKQL::CellsFromTuple(&type, value, keyTypes, true, key, errStr, memoryOwner);
+            bool res = NMiniKQL::CellsFromTuple(&type, value, keyTypes, notNullTypes, true, key, errStr, memoryOwner);
             if (!res) {
                 unresolvedKeys.push_back("Failed to parse range key tuple: " + errStr);
                 return false;
@@ -532,6 +535,7 @@ private:
         }
 
         TVector<NScheme::TTypeInfo> keyTypes(res.Columns.size());
+        TVector<bool> notNullKeys(res.Columns.size());
         TVector<TKeyDesc::TColumnOp> columns(res.Columns.size());
         {
             size_t no = 0;
@@ -542,6 +546,7 @@ private:
 
                 if (col.KeyOrder != -1) {
                     keyTypes[col.KeyOrder] = col.PType;
+                    notNullKeys[col.KeyOrder] = col.IsNotNullColumn;
                     ++keys;
                 }
 
@@ -562,6 +567,7 @@ private:
             }
 
             keyTypes.resize(keys);
+            notNullKeys.resize(keys);
         }
 
         if (!colNameToPos.empty()) {
@@ -593,9 +599,9 @@ private:
                 ? (toInclusive ? EParseRangeKeyExp::NONE : EParseRangeKeyExp::TO_NULL)
                 : EParseRangeKeyExp::NONE);
 
-        if (!ParseRangeKey(Settings.KeyRange.GetFrom(), keyTypes,
+        if (!ParseRangeKey(Settings.KeyRange.GetFrom(), keyTypes, notNullKeys,
                         KeyFromValues, fromExpand, UnresolvedKeys) ||
-            !ParseRangeKey(Settings.KeyRange.GetTo(), keyTypes,
+            !ParseRangeKey(Settings.KeyRange.GetTo(), keyTypes, notNullKeys,
                         KeyToValues, toExpand, UnresolvedKeys))
         {
             TxProxyMon->ResolveKeySetWrongRequest->Inc();
@@ -854,6 +860,16 @@ private:
         ++TabletsToPrepare;
     }
 
+    void RaiseShardOverloaded(const NKikimrTxDataShard::TEvProposeTransactionResult& record, ui64 shardId) {
+        auto issue = NYql::YqlIssue({}, NYql::TIssuesIds::KIKIMR_OVERLOADED, TStringBuilder()
+            << "Shard " << shardId << " is overloaded");
+        for (const auto& err : record.GetError()) {
+            issue.AddSubIssue(new NYql::TIssue(TStringBuilder()
+                << "[" << err.GetKind() << "] " << err.GetReason()));
+        }
+        IssueManager.RaiseIssue(std::move(issue));
+    }
+
     void HandlePrepare(TEvDataShard::TEvProposeTransactionResult::TPtr& ev, const TActorContext& ctx) {
         const auto* msg = ev->Get();
         const auto& record = msg->Record;
@@ -974,6 +990,7 @@ private:
                 TxProxyMon->TxResultShardOverloaded->Inc();
                 status = TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ProxyShardOverloaded;
                 code = NKikimrIssues::TStatusIds::OVERLOADED;
+                RaiseShardOverloaded(record, shardId);
                 break;
             case NKikimrTxDataShard::TEvProposeTransactionResult::EXEC_ERROR:
                 TxProxyMon->TxResultExecError->Inc();
@@ -1430,6 +1447,9 @@ private:
             case EReadTableFormat::YdbResultSet:
                 tx.SetApiVersion(NKikimrTxUserProxy::TReadTableTransaction::YDB_V1);
                 break;
+            case EReadTableFormat::YdbResultSetWithNotNullSupport:
+                tx.SetApiVersion(NKikimrTxUserProxy::TReadTableTransaction::YDB_V2);
+                break;
         }
 
         for (auto &col : Columns) {
@@ -1441,6 +1461,7 @@ private:
             if (columnType.TypeInfo) {
                 *c.MutableTypeInfo() = *columnType.TypeInfo;
             }
+            c.SetNotNull(col.IsNotNullColumn);
         }
 
         auto& txRange = *tx.MutableRange();
@@ -1722,15 +1743,19 @@ private:
     void SendEmptyResponseData(const TActorContext& ctx) {
         TString data;
         ui32 apiVersion = 0;
+        bool allowNotNull = false;
 
         switch (Settings.DataFormat) {
             case EReadTableFormat::OldResultSet:
                 // we don't support empty result sets
                 return;
 
+            case EReadTableFormat::YdbResultSetWithNotNullSupport:
+                allowNotNull = true;
             case EReadTableFormat::YdbResultSet: {
                 Ydb::ResultSet res;
                 for (auto& col : Columns) {
+                    bool notNullResp = allowNotNull && col.IsNotNullColumn;
                     auto* meta = res.add_columns();
                     meta->set_name(col.Name);
 
@@ -1740,16 +1765,15 @@ private:
                         pg->set_type_name(NPg::PgTypeNameFromTypeDesc(typeDesc));
                         pg->set_oid(NPg::PgTypeIdFromTypeDesc(typeDesc));
                     } else {
+                        auto xType = notNullResp ? meta->mutable_type() : meta->mutable_type()->mutable_optional_type()->mutable_item();
                         auto id = static_cast<NYql::NProto::TypeIds>(col.PType.GetTypeId());
                         if (id == NYql::NProto::Decimal) {
-                            auto decimalType = meta->mutable_type()->mutable_optional_type()->mutable_item()
-                                ->mutable_decimal_type();
+                            auto decimalType = xType->mutable_decimal_type();
                             //TODO: Pass decimal params here
                             decimalType->set_precision(22);
                             decimalType->set_scale(9);
                         } else {
-                            meta->mutable_type()->mutable_optional_type()->mutable_item()
-                                ->set_type_id(static_cast<Ydb::Type::PrimitiveTypeId>(id));
+                            xType->set_type_id(static_cast<Ydb::Type::PrimitiveTypeId>(id));
                         }
                     }
                 }
@@ -1940,6 +1964,7 @@ private:
 
                 status = TEvTxUserProxy::TEvProposeTransactionStatus::EStatus::ProxyShardOverloaded;
                 code = NKikimrIssues::TStatusIds::OVERLOADED;
+                RaiseShardOverloaded(record, state.ShardId);
                 break;
 
             case NKikimrTxDataShard::TEvProposeTransactionResult::EXEC_ERROR:

@@ -9,7 +9,9 @@ RESOURCE(../pg_wrapper/postgresql/src/include/catalog/pg_opfamily.dat pg_opfamil
 RESOURCE(../pg_wrapper/postgresql/src/include/catalog/pg_opclass.dat pg_opclass.dat)
 RESOURCE(../pg_wrapper/postgresql/src/include/catalog/pg_amproc.dat pg_amproc.dat)
 RESOURCE(../pg_wrapper/postgresql/src/include/catalog/pg_amop.dat pg_amop.dat)
+RESOURCE(../pg_wrapper/postgresql/src/include/catalog/pg_am.dat pg_am.dat)
 RESOURCE(../pg_wrapper/postgresql/src/include/catalog/pg_conversion.dat pg_conversion.dat)
+RESOURCE(../pg_wrapper/postgresql/src/include/catalog/pg_language.dat pg_language.dat)
 
 SRCS(
     catalog.cpp
@@ -18,6 +20,9 @@ SRCS(
 PEERDIR(
     library/cpp/resource
     ydb/library/yql/public/issue
+    ydb/library/yql/parser/pg_catalog/proto
+    ydb/library/yql/protos
+    library/cpp/digest/md5
 )
 
 END()

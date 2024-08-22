@@ -17,11 +17,11 @@ struct TSetup {
         Formatter = NSQLFormat::MakeSqlFormatter(settings);
     }
 
-    void Run(const TCases& cases) {
+    void Run(const TCases& cases, NSQLFormat::EFormatMode mode = NSQLFormat::EFormatMode::Pretty) {
         for (const auto& c : cases) {
             NYql::TIssues issues;
             TString formatted;
-            auto res = Formatter->Format(c.first, formatted, issues);
+            auto res = Formatter->Format(c.first, formatted, issues, mode);
             UNIT_ASSERT_C(res, issues.ToString());
             auto expected = c.second;
             SubstGlobal(expected, "\t", TString(NSQLFormat::OneIndent, ' '));
@@ -32,9 +32,11 @@ struct TSetup {
             UNIT_ASSERT_C(res2, issues.ToString());
             UNIT_ASSERT_NO_DIFF(formatted, formatted2);
 
-            auto mutatedQuery = NSQLFormat::MutateQuery(c.first);
-            auto res3 = Formatter->Format(mutatedQuery, formatted, issues);
-            UNIT_ASSERT_C(res3, issues.ToString());
+            if (mode == NSQLFormat::EFormatMode::Pretty) {
+                auto mutatedQuery = NSQLFormat::MutateQuery(c.first);
+                auto res3 = Formatter->Format(mutatedQuery, formatted, issues);
+                UNIT_ASSERT_C(res3, issues.ToString());
+            }
         }
     }
 
@@ -131,6 +133,8 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
     Y_UNIT_TEST(CreateGroup) {
         TCases cases = {
             {"use plato;create group user;","USE plato;\n\nCREATE GROUP user;\n"},
+            {"use plato;create group user with user user;","USE plato;\n\nCREATE GROUP user WITH USER user;\n"},
+            {"use plato;create group user with user user, user,;","USE plato;\n\nCREATE GROUP user WITH USER user, user,;\n"},
         };
 
         TSetup setup;
@@ -271,14 +275,16 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
              "CREATE TABLE user (\n\tuser int32\n)\nWITH (ttl = interval('P1D') ON user AS MICROSECONDS);\n"},
             {"create table user(user int32) with (ttl=interval('P1D') on user as nAnOsEcOnDs)",
              "CREATE TABLE user (\n\tuser int32\n)\nWITH (ttl = interval('P1D') ON user AS NANOSECONDS);\n"},
-            {"create table user(index user global unique sync with (user=user,user=user) on (user,user))",
-             "CREATE TABLE user (\n\tINDEX user GLOBAL UNIQUE SYNC WITH (user = user, user = user) ON (user, user)\n);\n"},
-            {"create table user(index user global async with (user=user,) on (user))",
-             "CREATE TABLE user (\n\tINDEX user GLOBAL ASYNC WITH (user = user,) ON (user)\n);\n"},
+            {"create table user(index user global unique sync on (user,user) with (user=user,user=user))",
+             "CREATE TABLE user (\n\tINDEX user GLOBAL UNIQUE SYNC ON (user, user) WITH (user = user, user = user)\n);\n"},
+            {"create table user(index user global async on (user) with (user=user,))",
+             "CREATE TABLE user (\n\tINDEX user GLOBAL ASYNC ON (user) WITH (user = user,)\n);\n"},
             {"create table user(index user local on (user) cover (user))",
              "CREATE TABLE user (\n\tINDEX user LOCAL ON (user) COVER (user)\n);\n"},
             {"create table user(index user local on (user) cover (user,user))",
              "CREATE TABLE user (\n\tINDEX user LOCAL ON (user) COVER (user, user)\n);\n"},
+            {"create table user(index idx global using subtype on (col) cover (col) with (setting = foo, another_setting = bar));",
+             "CREATE TABLE user (\n\tINDEX idx GLOBAL USING subtype ON (col) COVER (col) WITH (setting = foo, another_setting = bar)\n);\n"},
             {"create table user(family user (user='foo'))",
              "CREATE TABLE user (\n\tFAMILY user (user = 'foo')\n);\n"},
             {"create table user(family user (user='foo',user='bar'))",
@@ -287,6 +293,8 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
              "CREATE TABLE user (\n\tCHANGEFEED user WITH (user = 'foo')\n);\n"},
             {"create table user(changefeed user with (user='foo',user='bar'))",
              "CREATE TABLE user (\n\tCHANGEFEED user WITH (user = 'foo', user = 'bar')\n);\n"},
+            {"create table user(user) AS SELECT 1","CREATE TABLE user (\n\tuser\n)\nAS\nSELECT\n    1;\n"},
+            {"create table user(user) AS VALUES (1), (2)","CREATE TABLE user (\n\tuser\n)\nAS\nVALUES\n    (1),\n    (2);\n"},
             {"create table user(foo int32, bar bool ?) inherits (s3:$cluster.xxx) partition by hash(a,b,hash) with (inherits=interval('PT1D') ON logical_time) tablestore tablestore",
               "CREATE TABLE user (\n"
               "\tfoo int32,\n"
@@ -302,7 +310,10 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
               "\tbar bool?\n"
               ")\n"
               "PARTITION BY HASH (a, b, hash)\n"
-              "WITH (tiering = 'some');\n"}
+              "WITH (tiering = 'some');\n"},
+            {"create table if not  exists user(user int32)", "CREATE TABLE IF NOT EXISTS user (\n\tuser int32\n);\n"},
+            {"create temp   table    user(user int32)", "CREATE TEMP TABLE user (\n\tuser int32\n);\n"},
+            {"create   temporary   table    user(user int32)", "CREATE TEMPORARY TABLE user (\n\tuser int32\n);\n"}
         };
 
         TSetup setup;
@@ -315,10 +326,14 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
              "ALTER OBJECT usEr (TYPE abcde) SET (a = b);\n"},
             {"creAte oBject usEr (tYpe abcde) With (a = b)",
              "CREATE OBJECT usEr (TYPE abcde) WITH (a = b);\n"},
+             {"creAte oBject if not exIstS usEr (tYpe abcde) With (a = b)",
+             "CREATE OBJECT IF NOT EXISTS usEr (TYPE abcde) WITH (a = b);\n"},
             {"creAte oBject usEr (tYpe abcde) With a = b",
              "CREATE OBJECT usEr (TYPE abcde) WITH a = b;\n"},
             {"dRop oBject usEr (tYpe abcde) With (aeEE)",
              "DROP OBJECT usEr (TYPE abcde) WITH (aeEE);\n"},
+             {"dRop oBject If ExistS usEr (tYpe abcde) With (aeEE)",
+             "DROP OBJECT IF EXISTS usEr (TYPE abcde) WITH (aeEE);\n"},
             {"dRop oBject usEr (tYpe abcde) With aeEE",
              "DROP OBJECT usEr (TYPE abcde) WITH aeEE;\n"}
         };
@@ -326,7 +341,7 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
         TSetup setup;
         setup.Run(cases);
     }
-    
+
     Y_UNIT_TEST(TableStoreOperations) {
         TCases cases = {
             {"alter tableStore uSer aDd column usEr int32",
@@ -343,8 +358,20 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
         TCases cases = {
             {"creAte exTernAl daTa SouRce usEr With (a = \"b\")",
              "CREATE EXTERNAL DATA SOURCE usEr WITH (a = \"b\");\n"},
+             {"creAte exTernAl daTa SouRce if not exists usEr With (a = \"b\")",
+             "CREATE EXTERNAL DATA SOURCE IF NOT EXISTS usEr WITH (a = \"b\");\n"},
+             {"creAte oR rePlaCe exTernAl daTa SouRce usEr With (a = \"b\")",
+             "CREATE OR REPLACE EXTERNAL DATA SOURCE usEr WITH (a = \"b\");\n"},
+             {"create external data source eds with (a=\"a\",b=\"b\",c = true)",
+             "CREATE EXTERNAL DATA SOURCE eds WITH (\n\ta = \"a\",\n\tb = \"b\",\n\tc = TRUE\n);\n"},
+             {"alter external data source eds set a true, reset (b, c), set (x=y, z=false)",
+             "ALTER EXTERNAL DATA SOURCE eds\n\tSET a TRUE,\n\tRESET (b, c),\n\tSET (x = y, z = FALSE);\n"},
+             {"alter external data source eds reset (a), set (x=y)",
+             "ALTER EXTERNAL DATA SOURCE eds\n\tRESET (a),\n\tSET (x = y);\n"},
             {"dRop exTerNal Data SouRce usEr",
              "DROP EXTERNAL DATA SOURCE usEr;\n"},
+             {"dRop exTerNal Data SouRce if exists usEr",
+             "DROP EXTERNAL DATA SOURCE IF EXISTS usEr;\n"},
         };
 
         TSetup setup;
@@ -355,6 +382,8 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
         TCases cases = {
             {"create async replication user for table1 AS table2 with (user='foo')",
              "CREATE ASYNC REPLICATION user FOR table1 AS table2 WITH (user = 'foo');\n"},
+            {"alter async replication user set (user='foo')",
+             "ALTER ASYNC REPLICATION user SET (user = 'foo');\n"},
             {"drop async replication user",
              "DROP ASYNC REPLICATION user;\n"},
             {"drop async replication user cascade",
@@ -369,8 +398,18 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
         TCases cases = {
             {"creAte exTernAl TabLe usEr (a int) With (a = \"b\")",
              "CREATE EXTERNAL TABLE usEr (\n\ta int\n)\nWITH (a = \"b\");\n"},
+             {"creAte oR rePlaCe exTernAl TabLe usEr (a int) With (a = \"b\")",
+             "CREATE OR REPLACE EXTERNAL TABLE usEr (\n\ta int\n)\nWITH (a = \"b\");\n"},
+            {"creAte exTernAl TabLe iF NOt Exists usEr (a int) With (a = \"b\")",
+             "CREATE EXTERNAL TABLE IF NOT EXISTS usEr (\n\ta int\n)\nWITH (a = \"b\");\n"},
+            {"create external table user (a int) with (a=\"b\",c=\"d\")",
+             "CREATE EXTERNAL TABLE user (\n\ta int\n)\nWITH (\n\ta = \"b\",\n\tc = \"d\"\n);\n"},
+            {"alter  external table user add column col1 int32, drop column col2, reset(prop), set (prop2 = 42, x=y), set a true",
+            "ALTER EXTERNAL TABLE user\n\tADD COLUMN col1 int32,\n\tDROP COLUMN col2,\n\tRESET (prop),\n\tSET (prop2 = 42, x = y),\n\tSET a TRUE;\n"},
             {"dRop exTerNal taBlE usEr",
              "DROP EXTERNAL TABLE usEr;\n"},
+            {"dRop exTerNal taBlE iF eXiStS usEr",
+             "DROP EXTERNAL TABLE IF EXISTS usEr;\n"},
         };
 
         TSetup setup;
@@ -401,6 +440,8 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
              "ALTER TABLE user\n\tDROP COLUMN user;\n"},
             {"alter table user alter column user set family user",
              "ALTER TABLE user\n\tALTER COLUMN user SET FAMILY user;\n"},
+            {"alter table t alter column c drop not null",
+             "ALTER TABLE t\n\tALTER COLUMN c DROP NOT NULL;\n"},
             {"alter table user add family user(user='foo')",
              "ALTER TABLE user\n\tADD FAMILY user (user = 'foo');\n"},
             {"alter table user alter family user set user 'foo'",
@@ -417,6 +458,14 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
              "ALTER TABLE user\n\tRESET (user, user);\n"},
             {"alter table user add index user local on (user)",
              "ALTER TABLE user\n\tADD INDEX user LOCAL ON (user);\n"},
+            {"alter table user alter index idx set setting 'foo'",
+             "ALTER TABLE user\n\tALTER INDEX idx SET setting 'foo';\n"},
+            {"alter table user alter index idx set (setting = 'foo', another_setting = 'bar')",
+             "ALTER TABLE user\n\tALTER INDEX idx SET (setting = 'foo', another_setting = 'bar');\n"},
+            {"alter table user alter index idx reset (setting, another_setting)",
+             "ALTER TABLE user\n\tALTER INDEX idx RESET (setting, another_setting);\n"},
+            {"alter table user add index idx global using subtype on (col) cover (col) with (setting = foo, another_setting = 'bar');",
+             "ALTER TABLE user\n\tADD INDEX idx GLOBAL USING subtype ON (col) COVER (col) WITH (setting = foo, another_setting = 'bar');\n"},
             {"alter table user drop index user",
              "ALTER TABLE user\n\tDROP INDEX user;\n"},
             {"alter table user rename to user",
@@ -464,6 +513,7 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
         TSetup setup;
         setup.Run(cases);
     }
+
     Y_UNIT_TEST(AlterTopic) {
         TCases cases = {
              {"alter topic topic1 alter consumer c1 set (important = false)",
@@ -480,10 +530,25 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
         TSetup setup;
         setup.Run(cases);
     }
+
     Y_UNIT_TEST(DropTopic) {
         TCases cases = {
             {"drop topic topic1",
              "DROP TOPIC topic1;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(TopicExistsStatement) {
+        TCases cases = {
+            {"drop topic if exists topic1",
+             "DROP TOPIC IF EXISTS topic1;\n"},
+            {"create topic if not exists topic1 with (partition_count_limit = 5)",
+             "CREATE TOPIC IF NOT EXISTS topic1 WITH (\n\tpartition_count_limit = 5\n);\n"},
+             {"alter topic if exists topic1 alter consumer c1 set (important = false)",
+             "ALTER TOPIC IF EXISTS topic1\n\tALTER CONSUMER c1 SET (important = FALSE);\n"},
         };
 
         TSetup setup;
@@ -551,6 +616,8 @@ Y_UNIT_TEST_SUITE(CheckSqlFormatter) {
              "EVALUATE FOR $x IN []\n\tDO BEGIN\n\t\tSELECT\n\t\t\t$x;\n\tEND DO;\n"},
             {"evaluate for $x in [] do begin select $x; end do else do begin select 2; end do",
              "EVALUATE FOR $x IN []\n\tDO BEGIN\n\t\tSELECT\n\t\t\t$x;\n\tEND DO\nELSE\n\tDO BEGIN\n\t\tSELECT\n\t\t\t2;\n\tEND DO;\n"},
+            {"evaluate parallel for $x in [] do $a($x)",
+             "EVALUATE PARALLEL FOR $x IN []\n\tDO $a($x);\n"},
         };
 
         TSetup setup;
@@ -1345,7 +1412,7 @@ FROM Input MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS A);
 
     Y_UNIT_TEST(Union) {
         TCases cases = {
-            {"select 1 union all select 2 union select 3 union all select 4 union select 5", 
+            {"select 1 union all select 2 union select 3 union all select 4 union select 5",
              "SELECT\n\t1\nUNION ALL\nSELECT\n\t2\nUNION\nSELECT\n\t3\nUNION ALL\nSELECT\n\t4\nUNION\nSELECT\n\t5;\n"},
              };
 
@@ -1371,11 +1438,11 @@ FROM Input MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS A);
 
     Y_UNIT_TEST(WindowFunctionInsideExpr) {
         TCases cases = {
-            {"SELECT CAST(ROW_NUMBER() OVER () AS String) AS x,\nFROM Input;", 
+            {"SELECT CAST(ROW_NUMBER() OVER () AS String) AS x,\nFROM Input;",
              "SELECT\n\tCAST(ROW_NUMBER() OVER () AS String) AS x,\nFROM Input;\n"},
-            {"SELECT CAST(ROW_NUMBER() OVER (PARTITION BY key) AS String) AS x,\nFROM Input;", 
+            {"SELECT CAST(ROW_NUMBER() OVER (PARTITION BY key) AS String) AS x,\nFROM Input;",
              "SELECT\n\tCAST(\n\t\tROW_NUMBER() OVER (\n\t\t\tPARTITION BY\n\t\t\t\tkey\n\t\t) AS String\n\t) AS x,\nFROM Input;\n"},
-            {"SELECT CAST(ROW_NUMBER() OVER (users) AS String) AS x,\nFROM Input;", 
+            {"SELECT CAST(ROW_NUMBER() OVER (users) AS String) AS x,\nFROM Input;",
             "SELECT\n\tCAST(\n\t\tROW_NUMBER() OVER (\n\t\t\tusers\n\t\t) AS String\n\t) AS x,\nFROM Input;\n"},
         };
 
@@ -1385,9 +1452,9 @@ FROM Input MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS A);
 
     Y_UNIT_TEST(ExistsExpr) {
         TCases cases = {
-            {"SELECT EXISTS (SELECT 1);", 
+            {"SELECT EXISTS (SELECT 1);",
              "SELECT\n\tEXISTS (\n\t\tSELECT\n\t\t\t1\n\t);\n"},
-            {"SELECT CAST(EXISTS(SELECT 1) AS Int) AS x,\nFROM Input;", 
+            {"SELECT CAST(EXISTS(SELECT 1) AS Int) AS x,\nFROM Input;",
              "SELECT\n\tCAST(\n\t\tEXISTS (\n\t\t\tSELECT\n\t\t\t\t1\n\t\t) AS Int\n\t) AS x,\nFROM Input;\n"},
         };
 
@@ -1397,7 +1464,7 @@ FROM Input MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS A);
 
     Y_UNIT_TEST(LambdaInsideExpr) {
         TCases cases = {
-            {"SELECT ListMap(AsList(1,2),($x)->{return $x+1});", 
+            {"SELECT ListMap(AsList(1,2),($x)->{return $x+1});",
              "SELECT\n\tListMap(\n\t\tAsList(1, 2), ($x) -> {\n\t\t\tRETURN $x + 1\n\t\t}\n\t);\n"},
         };
 
@@ -1407,12 +1474,192 @@ FROM Input MATCH_RECOGNIZE (PATTERN (A) DEFINE A AS A);
 
     Y_UNIT_TEST(CaseExpr) {
         TCases cases = {
-            {"SELECT CASE WHEN 1 == 2 THEN 3 WHEN 4 == 5 THEN 6 WHEN 7 == 8 THEN 9 ELSE 10 END;", 
+            {"SELECT CASE WHEN 1 == 2 THEN 3 WHEN 4 == 5 THEN 6 WHEN 7 == 8 THEN 9 ELSE 10 END;",
              "SELECT\n\tCASE\n\t\tWHEN 1 == 2\n\t\t\tTHEN 3\n\t\tWHEN 4 == 5\n\t\t\tTHEN 6\n\t\tWHEN 7 == 8\n\t\t\tTHEN 9\n\t\tELSE 10\n\tEND;\n"},
-            {"SELECT CAST(CASE WHEN 1 == 2 THEN 3 WHEN 4 == 5 THEN 6 ELSE 10 END AS String);", 
+            {"SELECT CAST(CASE WHEN 1 == 2 THEN 3 WHEN 4 == 5 THEN 6 ELSE 10 END AS String);",
              "SELECT\n\tCAST(\n\t\tCASE\n\t\t\tWHEN 1 == 2\n\t\t\t\tTHEN 3\n\t\t\tWHEN 4 == 5\n\t\t\t\tTHEN 6\n\t\t\tELSE 10\n\t\tEND AS String\n\t);\n"},
-            {"SELECT CASE x WHEN 1 THEN 2 WHEN 3 THEN 4 WHEN 5 THEN 6 ELSE 10 END;", 
+            {"SELECT CASE x WHEN 1 THEN 2 WHEN 3 THEN 4 WHEN 5 THEN 6 ELSE 10 END;",
              "SELECT\n\tCASE x\n\t\tWHEN 1\n\t\t\tTHEN 2\n\t\tWHEN 3\n\t\t\tTHEN 4\n\t\tWHEN 5\n\t\t\tTHEN 6\n\t\tELSE 10\n\tEND;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(MultiTokenOperations) {
+        TCases cases = {
+            {"$x = 1 >>| 2;",
+             "$x = 1 >>| 2;\n"},
+             {"$x = 1 >> 2;",
+             "$x = 1 >> 2;\n"},
+             {"$x = 1 ?? 2;",
+             "$x = 1 ?? 2;\n"},
+             {"$x = 1 >  /*comment*/  >  /*comment*/  | 2;",
+             "$x = 1 >/*comment*/>/*comment*/| 2;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(OperatorNewlines) {
+        TCases cases = {
+            {"$x = TRUE\nOR\nFALSE;",
+             "$x = TRUE\n\tOR\n\tFALSE;\n"},
+            {"$x = TRUE OR\nFALSE;",
+             "$x = TRUE OR\n\tFALSE;\n"},
+            {"$x = TRUE\nOR FALSE;",
+             "$x = TRUE OR\n\tFALSE;\n"},
+            {"$x = 1\n+2\n*3;",
+             "$x = 1 +\n\t2 *\n\t\t3;\n"},
+            {"$x = 1\n+\n2\n*3\n*5\n+\n4;",
+             "$x = 1\n\t+\n\t2 *\n\t\t3 *\n\t\t5\n\t+\n\t4;\n"},
+            {"$x = 1\n+2+3+4\n+5+6+7+\n\n8+9+10;",
+             "$x = 1 +\n\t2 + 3 + 4 +\n\t5 + 6 + 7 +\n\t8 + 9 + 10;\n"},
+            {"$x = TRUE\nAND\nTRUE OR\nFALSE\nAND TRUE\nOR FALSE\nAND TRUE\nOR FALSE;",
+             "$x = TRUE\n\tAND\n\tTRUE OR\n\tFALSE AND\n\t\tTRUE OR\n\tFALSE AND\n\t\tTRUE OR\n\tFALSE;\n"},
+            {"$x = 1 -- comment\n+ 2;",
+             "$x = 1-- comment\n\t+\n\t2;\n"},
+             {"$x = 1 -- comment\n+ -- comment\n2;",
+             "$x = 1-- comment\n\t+-- comment\n\t2;\n"},
+             {"$x = 1 + -- comment\n2;",
+             "$x = 1 +-- comment\n\t2;\n"},
+             {"$x = 1\n>\n>\n|\n2;",
+             "$x = 1\n\t>>|\n\t2;\n"},
+             {"$x = 1\n?? 2 ??\n3\n??\n4 +\n5\n*\n6 +\n7 ??\n8;",
+             "$x = 1 ??\n\t2 ??\n\t3\n\t??\n\t4 +\n\t\t5\n\t\t\t*\n\t\t\t6 +\n\t\t7 ??\n\t8;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(ObfuscateSelect) {
+        TCases cases = {
+            {"select 1;",
+             "SELECT\n\t0;\n"},
+            {"select true;",
+             "SELECT\n\tFALSE;\n"},
+            {"select 'foo';",
+             "SELECT\n\t'str';\n"},
+            {"select 3.0;",
+             "SELECT\n\t0.0;\n"},
+            {"select col;",
+             "SELECT\n\tid;\n"},
+            {"select * from tab;",
+             "SELECT\n\t*\nFROM id;\n"},
+            {"select cast(col as int32);",
+             "SELECT\n\tCAST(id AS int32);\n"},
+            {"select func(col);",
+             "SELECT\n\tfunc(id);\n"},
+            {"select mod::func(col);",
+             "SELECT\n\tmod::func(id);\n"},
+            {"declare $a as int32;",
+             "DECLARE $id AS int32;\n"},
+            {"select * from `logs/of/bob` where pwd='foo';",
+             "SELECT\n\t*\nFROM id\nWHERE id = 'str';\n"},
+            {"select $f();",
+             "SELECT\n\t$id();\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases, NSQLFormat::EFormatMode::Obfuscate);
+    }
+
+    Y_UNIT_TEST(ObfuscatePragma) {
+        TCases cases = {
+            {"pragma a=1",
+             "PRAGMA id = 0;\n"},
+            {"pragma a='foo';",
+             "PRAGMA id = 'str';\n"},
+            {"pragma a=true;",
+             "PRAGMA id = FALSE;\n"},
+            {"pragma a=$foo;",
+             "PRAGMA id = $id;\n"},
+            {"pragma a=foo;",
+             "PRAGMA id = id;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases, NSQLFormat::EFormatMode::Obfuscate);
+    }
+
+    Y_UNIT_TEST(CreateView) {
+        TCases cases = {
+            {"creAte vIEw TheView wiTh (security_invoker = trUE) As SELect 1",
+             "CREATE VIEW TheView WITH (security_invoker = TRUE) AS\nSELECT\n\t1;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(DropView) {
+        TCases cases = {
+            {"dRop viEW theVIEW",
+             "DROP VIEW theVIEW;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(ResourcePoolOperations) {
+        TCases cases = {
+            {"creAte reSourCe poOl naMe With (a = \"b\")",
+             "CREATE RESOURCE POOL naMe WITH (a = \"b\");\n"},
+             {"create resource pool eds with (a=\"a\",b=\"b\",c = true)",
+             "CREATE RESOURCE POOL eds WITH (\n\ta = \"a\",\n\tb = \"b\",\n\tc = TRUE\n);\n"},
+             {"alTer reSOurcE poOl naMe resEt (b, c), seT (x=y, z=false)",
+             "ALTER RESOURCE POOL naMe\n\tRESET (b, c),\n\tSET (x = y, z = FALSE);\n"},
+             {"alter resource pool eds reset (a), set (x=y)",
+             "ALTER RESOURCE POOL eds\n\tRESET (a),\n\tSET (x = y);\n"},
+            {"dRop reSourCe poOl naMe",
+             "DROP RESOURCE POOL naMe;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(BackupCollectionOperations) {
+        TCases cases = {
+            {"creAte  BackuP colLection `-naMe` wIth (a = \"b\")",
+             "CREATE BACKUP COLLECTION `-naMe` WITH (a = \"b\");\n"},
+             {"alTer bACKuP coLLECTION naMe resEt (b, c), seT (x=y, z=false)",
+             "ALTER BACKUP COLLECTION naMe\n\tRESET (b, c),\n\tSET (x = y, z = FALSE);\n"},
+            {"DROP backup collectiOn       `/some/path`",
+             "DROP BACKUP COLLECTION `/some/path`;\n"},
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(Analyze) {
+        TCases cases = {
+            {"analyze table (col1, col2, col3)",
+             "ANALYZE table (col1, col2, col3);\n"},
+             {"analyze table",
+             "ANALYZE table;\n"}
+        };
+
+        TSetup setup;
+        setup.Run(cases);
+    }
+
+    Y_UNIT_TEST(ResourcePoolClassifierOperations) {
+        TCases cases = {
+            {"creAte reSourCe poOl ClaSsiFIer naMe With (a = \"b\")",
+             "CREATE RESOURCE POOL CLASSIFIER naMe WITH (a = \"b\");\n"},
+             {"create resource pool classifier eds with (a=\"a\",b=\"b\",c = true)",
+             "CREATE RESOURCE POOL CLASSIFIER eds WITH (\n\ta = \"a\",\n\tb = \"b\",\n\tc = TRUE\n);\n"},
+             {"alTer reSOurcE poOl ClaSsiFIer naMe resEt (b, c), seT (x=y, z=false)",
+             "ALTER RESOURCE POOL CLASSIFIER naMe\n\tRESET (b, c),\n\tSET (x = y, z = FALSE);\n"},
+             {"alter resource pool classifier eds reset (a), set (x=y)",
+             "ALTER RESOURCE POOL CLASSIFIER eds\n\tRESET (a),\n\tSET (x = y);\n"},
+            {"dRop reSourCe poOl ClaSsiFIer naMe",
+             "DROP RESOURCE POOL CLASSIFIER naMe;\n"},
         };
 
         TSetup setup;

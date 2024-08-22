@@ -4,9 +4,12 @@
 #include <ydb/library/actors/core/actor_bootstrapped.h>
 #include <ydb/library/actors/core/hfunc.h>
 #include <ydb/core/base/appdata.h>
+#include <ydb/core/base/counters.h>
 #include <ydb/core/base/feature_flags.h>
 #include <ydb/core/base/domain.h>
 #include <ydb/core/base/statestorage.h>
+#include <ydb/core/cms/console/console.h>
+#include <ydb/core/cms/console/configs_dispatcher.h>
 #include <ydb/core/health_check/health_check.h>
 #include <ydb/core/protos/db_metadata_cache.pb.h>
 
@@ -33,7 +36,8 @@ public:
     using TBoardInfoEntries = TMap<TActorId, TEvStateStorage::TBoardInfoEntry>;
 
 private:
-    static constexpr TDuration TIMEOUT = TDuration::Seconds(15);
+    TDuration RefreshPeriod;
+    bool Enabled = false;
     const TString Path;
     const TString BoardPath;
     ui32 ActiveNode;
@@ -44,6 +48,9 @@ private:
     TActorId PublishActor;
     TActorId SubscribeActor;
     bool RequestInProgress = false;
+    ::NMonitoring::TDynamicCounterPtr Counters;
+    static const inline TString HEALTHCHECK_REQUESTS_MADE_COUNTER = "DbMetadataCache/HealthCheckRequestsMade";
+    static const inline TString HEALTHCHECK_REQUESTS_ANSWERED_COUNTER = "DbMetadataCache/HealthCheckRequestsAnswered";
 
     void SendRequest() {
         if (RequestInProgress) {
@@ -53,18 +60,21 @@ private:
         auto request = std::make_unique<NHealthCheck::TEvSelfCheckRequest>();
         request->Database = Path;
         request->Request.set_return_verbose_status(true);
+        request->Request.set_merge_records(true);
         Send(NHealthCheck::MakeHealthCheckID(), request.release());
+        Counters->GetCounter(HEALTHCHECK_REQUESTS_MADE_COUNTER, true)->Inc();
     }
 
     void Reply(TActorId client) {
         auto response = std::make_unique<NHealthCheck::TEvSelfCheckResultProto>();
         response->Record = *Result;
         Send(client, response.release());
+        Counters->GetCounter(HEALTHCHECK_REQUESTS_ANSWERED_COUNTER, true)->Inc();
     }
 
     void RefreshCache() {
         SendRequest();
-        Schedule(TIMEOUT, new TEvRefreshCache());
+        Schedule(RefreshPeriod, new TEvRefreshCache());
     }
 
     void UpdateActiveNode() {
@@ -80,10 +90,8 @@ private:
     }
 
     void SubscribeToBoard() {
-        auto domainInfo = AppData()->DomainsInfo->Domains.begin()->second;
         SubscribeActor = RegisterWithSameMailbox(CreateBoardLookupActor(BoardPath,
                                                        SelfId(),
-                                                       domainInfo->DefaultStateStorageGroup,
                                                        EBoardLookupMode::Subscription));
     }
 
@@ -125,7 +133,7 @@ private:
     void Handle(NHealthCheck::TEvSelfCheckRequestProto::TPtr& ev) {
         LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::DB_METADATA_CACHE, "Got request");
         TInstant now = TActivationContext::Now();
-        if (Result && now - LastResultUpdate <= 2 * TIMEOUT) {
+        if (Result && now - LastResultUpdate <= 2 * RefreshPeriod) {
             LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::DB_METADATA_CACHE, "Replying now");
             Reply(ev->Sender);
         } else {
@@ -135,10 +143,18 @@ private:
         }
     }
 
+    void Handle(NConsole::TEvConsole::TEvConfigNotificationRequest::TPtr& ev) {
+        const auto& record = ev->Get()->Record;
+        ApplyConfig(record.GetConfig().GetMetadataCacheConfig(), record.GetConfig().GetFeatureFlags());
+        Send(ev->Sender, new NConsole::TEvConsole::TEvConfigNotificationResponse(record), 0, ev->Cookie);
+    }
+
 public:
-    TDatabaseMetadataCache(const TString& path) : Path(path)
-                                                , BoardPath(MakeDatabaseMetadataCacheBoardPath(Path))
+    TDatabaseMetadataCache(const TString& path,
+                           const ::NMonitoring::TDynamicCounterPtr& counters) : Path(path)
+                                                                              , BoardPath(MakeDatabaseMetadataCacheBoardPath(Path))
     {
+        Counters = GetServiceCounters(counters, "utils");
     }
 
     static ui32 PickActiveNode(const TBoardInfoEntries& infoEntries) {
@@ -161,25 +177,43 @@ public:
         return result;
     }
 
+    void ApplyConfig(const NKikimrConfig::TMetadataCacheConfig& config, const NKikimrConfig::TFeatureFlags& flags) {
+        RefreshPeriod = TDuration::MilliSeconds(config.GetRefreshPeriodMs());
+        bool enabled = flags.GetEnableDbMetadataCache();
+        if (!Enabled && enabled) {
+            TInstant now = TActivationContext::Now();
+            NKikimrMetadataCache::TDatabaseMetadataCacheInfo info;
+            info.SetStartTimestamp(now.MicroSeconds());
+            PublishActor = RegisterWithSameMailbox(CreateBoardPublishActor(BoardPath,
+                                                   info.SerializeAsString(),
+                                                   SelfId(),
+                                                   0,
+                                                   true));
+            SubscribeToBoard();
+            Become(&TThis::StateWait);
+        } else if (Enabled && !enabled) {
+            CleanUp();
+            Become(&TThis::StateDisabled);
+        }
+        Enabled = enabled;
+    }
+
     void Bootstrap() {
         LOG_DEBUG_S(TActivationContext::AsActorContext(), NKikimrServices::DB_METADATA_CACHE, "Starting db metadata cache actor");
-        auto domainInfo = AppData()->DomainsInfo->Domains.begin()->second;
-        TInstant now = TActivationContext::Now();
-        NKikimrMetadataCache::TDatabaseMetadataCacheInfo info;
-        info.SetStartTimestamp(now.MicroSeconds());
-        PublishActor = RegisterWithSameMailbox(CreateBoardPublishActor(BoardPath,
-                                                        info.SerializeAsString(),
-                                                        SelfId(),
-                                                        domainInfo->DefaultStateStorageGroup,
-                                                        0,
-                                                        true));
-        SubscribeToBoard();
-        Become(&TThis::StateWait);
+        Become(&TThis::StateInactive);
+        ApplyConfig(AppData()->MetadataCacheConfig, AppData()->FeatureFlags);
+        Send(NConsole::MakeConfigsDispatcherID(SelfId().NodeId()),
+             new NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionRequest({NKikimrConsole::TConfigItem::FeatureFlagsItem,
+                                                                                  NKikimrConsole::TConfigItem::MetadataCacheConfigItem}));
+    }
+
+    void CleanUp() {
+        Send(PublishActor, new TEvents::TEvPoison);
+        Send(SubscribeActor, new TEvents::TEvPoison);
     }
 
     void PassAway() override {
-        Send(PublishActor, new TEvents::TEvPoison);
-        Send(SubscribeActor, new TEvents::TEvPoison);
+        CleanUp();
         return TActor::PassAway();
     }
 
@@ -190,6 +224,8 @@ public:
             cFunc(TEvents::TEvPoison::EventType, PassAway);
             hFunc(NHealthCheck::TEvSelfCheckResult, Handle);
             hFunc(NHealthCheck::TEvSelfCheckRequestProto, Handle);
+            IgnoreFunc(NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse);
+            hFunc(NConsole::TEvConsole::TEvConfigNotificationRequest, Handle);
             default: Y_ABORT("Unexpected event: %s", ev->ToString().c_str());
         }
     }
@@ -202,6 +238,8 @@ public:
             hFunc(TEvStateStorage::TEvBoardInfo, Handle);
             hFunc(TEvStateStorage::TEvBoardInfoUpdate, Handle);
             cFunc(TEvents::TEvPoison::EventType, PassAway);
+            IgnoreFunc(NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse);
+            hFunc(NConsole::TEvConsole::TEvConfigNotificationRequest, Handle);
             default: Y_ABORT("Unexpected event: %s", ev->ToString().c_str());
         }
     }
@@ -214,7 +252,17 @@ public:
             hFunc(TEvStateStorage::TEvBoardInfo, Handle);
             hFunc(TEvStateStorage::TEvBoardInfoUpdate, Handle);
             cFunc(TEvents::TEvPoison::EventType, PassAway);
+            IgnoreFunc(NConsole::TEvConfigsDispatcher::TEvSetConfigSubscriptionResponse);
+            hFunc(NConsole::TEvConsole::TEvConfigNotificationRequest, Handle);
             default: Y_ABORT("Unexpected event: %s", ev->ToString().c_str());
+        }
+    }
+
+    STATEFN(StateDisabled) {
+        switch (ev->GetTypeRewrite()) {
+            cFunc(TEvents::TEvPoison::EventType, PassAway);
+            hFunc(NConsole::TEvConsole::TEvConfigNotificationRequest, Handle);
+            // Ignore everything else
         }
     }
 };
@@ -223,8 +271,8 @@ inline TActorId MakeDatabaseMetadataCacheId(ui32 nodeId) {
     return TActorId(nodeId, "METACACHE");
 }
 
-inline std::unique_ptr<IActor> CreateDatabaseMetadataCache(const TString& path) {
-    return std::unique_ptr<IActor>(new TDatabaseMetadataCache(path));
+inline std::unique_ptr<IActor> CreateDatabaseMetadataCache(const TString& path, const ::NMonitoring::TDynamicCounterPtr& counters) {
+    return std::unique_ptr<IActor>(new TDatabaseMetadataCache(path, counters));
 }
 
 inline std::optional<TActorId> ResolveActiveDatabaseMetadataCache(const TMap<TActorId, TEvStateStorage::TBoardInfoEntry>& infoEntries) {

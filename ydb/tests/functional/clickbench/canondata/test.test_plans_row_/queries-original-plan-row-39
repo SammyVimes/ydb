@@ -18,10 +18,20 @@
                                 "Node Type": "Limit-Offset",
                                 "Operators": [
                                     {
+                                        "Inputs": [
+                                            {
+                                                "InternalOperatorId": 1
+                                            }
+                                        ],
                                         "Limit": "10",
                                         "Name": "Limit"
                                     },
                                     {
+                                        "Inputs": [
+                                            {
+                                                "ExternalPlanNodeId": 6
+                                            }
+                                        ],
                                         "Name": "Offset",
                                         "Offset": "1000"
                                     }
@@ -37,7 +47,12 @@
                                                 "Node Type": "Limit",
                                                 "Operators": [
                                                     {
-                                                        "Limit": "10 + 1000",
+                                                        "Inputs": [
+                                                            {
+                                                                "ExternalPlanNodeId": 4
+                                                            }
+                                                        ],
+                                                        "Limit": "SUM(10,1000)",
                                                         "Name": "Limit"
                                                     }
                                                 ],
@@ -52,7 +67,12 @@
                                                                 "Node Type": "TopSort",
                                                                 "Operators": [
                                                                     {
-                                                                        "Limit": "10 + 1000",
+                                                                        "Inputs": [
+                                                                            {
+                                                                                "ExternalPlanNodeId": 2
+                                                                            }
+                                                                        ],
+                                                                        "Limit": "SUM(10,1000)",
                                                                         "Name": "TopSort",
                                                                         "TopSortBy": "argument.Count0"
                                                                     }
@@ -72,36 +92,64 @@
                                                                         "PlanNodeType": "Connection",
                                                                         "Plans": [
                                                                             {
-                                                                                "Node Type": "Aggregate-Filter-TableFullScan",
+                                                                                "Node Type": "Aggregate-Filter-TableRangeScan",
                                                                                 "Operators": [
                                                                                     {
-                                                                                        "Aggregation": "{_yql_agg_0: SUM(state._yql_agg_0)}",
+                                                                                        "Aggregation": "{_yql_agg_0: SUM(state._yql_agg_0,1)}",
                                                                                         "GroupBy": "",
+                                                                                        "Inputs": [
+                                                                                            {
+                                                                                                "InternalOperatorId": 1
+                                                                                            },
+                                                                                            {
+                                                                                                "InternalOperatorId": 1
+                                                                                            },
+                                                                                            {
+                                                                                                "InternalOperatorId": 1
+                                                                                            },
+                                                                                            {
+                                                                                                "InternalOperatorId": 1
+                                                                                            },
+                                                                                            {
+                                                                                                "InternalOperatorId": 1
+                                                                                            },
+                                                                                            {
+                                                                                                "InternalOperatorId": 1
+                                                                                            },
+                                                                                            {
+                                                                                                "InternalOperatorId": 1
+                                                                                            }
+                                                                                        ],
                                                                                         "Name": "Aggregate"
                                                                                     },
                                                                                     {
+                                                                                        "Inputs": [
+                                                                                            {
+                                                                                                "InternalOperatorId": 2
+                                                                                            }
+                                                                                        ],
                                                                                         "Name": "Filter",
-                                                                                        "Predicate": "item.CounterID == 62 And item.EventDate >= \"15887\" And item.EventDate <= \"15917\" And item.IsRefresh == 0"
+                                                                                        "Predicate": "item.IsRefresh == 0"
                                                                                     },
                                                                                     {
-                                                                                        "Name": "TableFullScan",
+                                                                                        "Inputs": [],
+                                                                                        "Name": "TableRangeScan",
                                                                                         "ReadColumns": [
                                                                                             "AdvEngineID",
-                                                                                            "CounterID",
-                                                                                            "EventDate",
                                                                                             "IsRefresh",
                                                                                             "Referer",
                                                                                             "SearchEngineID",
                                                                                             "TraficSourceID",
                                                                                             "URL"
                                                                                         ],
-                                                                                        "ReadRanges": [
-                                                                                            "EventTime (-\u221e, +\u221e)",
-                                                                                            "CounterID (-\u221e, +\u221e)",
-                                                                                            "EventDate (-\u221e, +\u221e)",
+                                                                                        "ReadRange": [
+                                                                                            "CounterID (62)",
+                                                                                            "EventDate [15887, 15917]",
                                                                                             "UserID (-\u221e, +\u221e)",
+                                                                                            "EventTime (-\u221e, +\u221e)",
                                                                                             "WatchID (-\u221e, +\u221e)"
                                                                                         ],
+                                                                                        "Scan": "Parallel",
                                                                                         "Table": "clickbench/plans/row/hits"
                                                                                     }
                                                                                 ],
@@ -127,7 +175,10 @@
                             }
                         ]
                     }
-                ]
+                ],
+                "Stats": {
+                    "ResourcePoolId": "default"
+                }
             },
             "tables": [
                 {
@@ -136,22 +187,22 @@
                         {
                             "columns": [
                                 "AdvEngineID",
-                                "CounterID",
-                                "EventDate",
                                 "IsRefresh",
                                 "Referer",
                                 "SearchEngineID",
                                 "TraficSourceID",
                                 "URL"
                             ],
+                            "lookup_by": [
+                                "CounterID (62)"
+                            ],
                             "scan_by": [
-                                "EventTime (-\u221e, +\u221e)",
-                                "CounterID (-\u221e, +\u221e)",
-                                "EventDate (-\u221e, +\u221e)",
+                                "EventDate [15887, 15917]",
                                 "UserID (-\u221e, +\u221e)",
+                                "EventTime (-\u221e, +\u221e)",
                                 "WatchID (-\u221e, +\u221e)"
                             ],
-                            "type": "FullScan"
+                            "type": "Scan"
                         }
                     ]
                 }

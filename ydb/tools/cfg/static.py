@@ -1,5 +1,6 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
+import copy
 import base64
 import collections
 import itertools
@@ -14,9 +15,11 @@ from google.protobuf import json_format
 from ydb.core.protos import (
     auth_pb2,
     blobstorage_vdisk_config_pb2,
+    bootstrap_pb2,
     cms_pb2,
     config_pb2,
     feature_flags_pb2,
+    key_pb2,
     netclassifier_pb2,
     pqconfig_pb2,
     resource_broker_pb2,
@@ -48,7 +51,6 @@ class StaticConfigGenerator(object):
         cfg_home="/Berkanavt/kikimr",
         sqs_port=8771,
         enable_cores=False,
-        enable_cms_config_cache=False,
         local_binary_path=None,
         skip_location=False,
         schema_validator=None,
@@ -61,6 +63,7 @@ class StaticConfigGenerator(object):
         # collects and provides information about cluster hosts
         self.__cluster_details = base.ClusterDetailsProvider(template, walle_provider, validator=schema_validator, database=database)
         self._enable_cores = template.get("enable_cores", enable_cores)
+        self._yaml_config_enabled = template.get("yaml_config_enabled", False)
         self.__is_dynamic_node = True if database is not None else False
         self._database = database
         self._walle_provider = walle_provider
@@ -99,6 +102,7 @@ class StaticConfigGenerator(object):
             "netclassifier.txt": None,
             "pqcd.txt": None,
             "failure_injection.txt": None,
+            "pdisk_key.txt": None,
         }
         self.__optional_config_files = set(
             (
@@ -107,15 +111,16 @@ class StaticConfigGenerator(object):
                 "audit.txt",
                 "fq.txt",
                 "failure_injection.txt",
+                "pdisk_key.txt",
             )
         )
-        self._enable_cms_config_cache = template.get("enable_cms_config_cache", enable_cms_config_cache)
-        if "tracing" in template:
+        tracing = template.get("tracing_config")
+        if tracing is not None:
             self.__tracing = (
-                template["tracing"]["host"],
-                template["tracing"]["port"],
-                template["tracing"]["root_ca"],
-                template["tracing"]["service_name"],
+                tracing["backend"],
+                tracing.get("uploader"),
+                tracing.get("sampling", []),
+                tracing.get("external_throttling", []),
             )
         else:
             self.__tracing = None
@@ -254,6 +259,14 @@ class StaticConfigGenerator(object):
         return self.__proto_config("fq.txt").ByteSize() > 0
 
     @property
+    def pdisk_key_txt(self):
+        return self.__proto_config("pdisk_key.txt", key_pb2.TKeyConfig, self.__cluster_details.pdisk_key_config)
+
+    @property
+    def pdisk_key_txt_enabled(self):
+        return self.__proto_config("pdisk_key.txt").ByteSize() > 0
+
+    @property
     def mbus_enabled(self):
         mbus_config = self.__cluster_details.get_service("message_bus_config")
         return mbus_config is not None and len(mbus_config) > 0
@@ -261,6 +274,10 @@ class StaticConfigGenerator(object):
     @property
     def table_service_config(self):
         return self.__cluster_details.get_service("table_service_config")
+
+    @property
+    def column_shard_config(self):
+        return self.__cluster_details.get_service("column_shard_config")
 
     @property
     def hive_config(self):
@@ -281,7 +298,6 @@ class StaticConfigGenerator(object):
                 self.__cluster_details.default_log_level,
                 mon_address=self.__cluster_details.monitor_address,
                 cert_params=self.__cluster_details.ic_cert_params,
-                enable_cms_config_cache=self._enable_cms_config_cache,
                 rb_txt_enabled=self.rb_txt_enabled,
                 metering_txt_enabled=self.metering_txt_enabled,
                 audit_txt_enabled=self.audit_txt_enabled,
@@ -331,7 +347,9 @@ class StaticConfigGenerator(object):
             all_configs["app_config.proto"] = utils.message_to_string(self.get_app_config())
         all_configs["kikimr.cfg"] = self.kikimr_cfg
         all_configs["dynamic_server.cfg"] = self.dynamic_server_common_args
-        all_configs["config.yaml"] = self.get_yaml_format_config()
+        normalized_config = self.get_normalized_config()
+        all_configs["config.yaml"] = self.get_yaml_format_config(normalized_config)
+        all_configs["dynconfig.yaml"] = self.get_yaml_format_dynconfig(normalized_config)
         return all_configs
 
     def get_yaml_format_string(self, key):
@@ -364,13 +382,19 @@ class StaticConfigGenerator(object):
             return yaml_config
         return result
 
-    def get_yaml_format_config(self):
+    def get_normalized_config(self):
         app_config = self.get_app_config()
         dictionary = json_format.MessageToDict(app_config, preserving_proto_field_name=True)
         normalized_config = self.normalize_dictionary(dictionary)
 
         if self.table_service_config:
             normalized_config["table_service_config"] = self.table_service_config
+
+        if self.column_shard_config:
+            normalized_config["column_shard_config"] = self.column_shard_config
+
+        if self.__cluster_details.client_certificate_authorization is not None:
+            normalized_config["client_certificate_authorization"] = self.__cluster_details.client_certificate_authorization
 
         if self.__cluster_details.blob_storage_config is not None:
             normalized_config["blob_storage_config"] = self.__cluster_details.blob_storage_config
@@ -455,7 +479,72 @@ class StaticConfigGenerator(object):
 
         normalized_config["static_erasure"] = str(self.__cluster_details.static_erasure)
 
-        return yaml.safe_dump(normalized_config, sort_keys=True, default_flow_style=None)
+        if 'blob_storage_config' in normalized_config:
+            for group in normalized_config['blob_storage_config']['service_set']['groups']:
+                for ring in group['rings']:
+                    for fail_domain in ring['fail_domains']:
+                        for vdisk_location in fail_domain['vdisk_locations']:
+                            vdisk_location['pdisk_guid'] = int(vdisk_location['pdisk_guid'])
+                            vdisk_location['pdisk_category'] = int(vdisk_location['pdisk_category'])
+                            if 'pdisk_config' in vdisk_location:
+                                if 'expected_slot_count' in vdisk_location['pdisk_config']:
+                                    vdisk_location['pdisk_config']['expected_slot_count'] = int(vdisk_location['pdisk_config']['expected_slot_count'])
+        if 'channel_profile_config' in normalized_config:
+            for profile in normalized_config['channel_profile_config']['profile']:
+                for channel in profile['channel']:
+                    channel['pdisk_category'] = int(channel['pdisk_category'])
+        if 'system_tablets' in normalized_config:
+            for tablets in normalized_config['system_tablets'].values():
+                for tablet in tablets:
+                    tablet['info']['tablet_id'] = int(tablet['info']['tablet_id'])
+
+        if self._yaml_config_enabled:
+            normalized_config['yaml_config_enabled'] = True
+
+        return normalized_config
+
+    def get_yaml_format_config(self, normalized_config):
+        return yaml.safe_dump(normalized_config, sort_keys=True, default_flow_style=False, indent=2)
+
+    def get_yaml_format_dynconfig(self, normalized_config):
+        cluster_uuid = normalized_config.get('nameservice_config', {}).get('cluster_uuid', '')
+        dynconfig = {
+            'metadata': {
+                'kind': 'MainConfig',
+                'cluster': cluster_uuid,
+                'version': 0,
+            },
+            'config': copy.deepcopy(normalized_config),
+            'allowed_labels': {
+                'node_id': {'type': 'string'},
+                'host': {'type': 'string'},
+                'tenant': {'type': 'string'},
+            },
+            'selector_config': [],
+        }
+
+        if self.__cluster_details.use_auto_config:
+            dynconfig['selector_config'].append({
+                'description': 'actor system config for dynnodes',
+                'selector': {
+                    'dynamic': True,
+                },
+                'config': {
+                    'actor_system_config': {
+                        'cpu_count': self.__cluster_details.dynamic_cpu_count,
+                        'node_type': 'COMPUTE',
+                        'use_auto_config': True,
+                    }
+                }
+            })
+        # emulate dumping ordered dict to yaml
+        lines = []
+        for key in ['metadata', 'config', 'allowed_labels', 'selector_config']:
+            lines.append(key + ':')
+            substr = yaml.safe_dump(dynconfig[key], sort_keys=True, default_flow_style=False, indent=2)
+            for line in substr.split('\n'):
+                lines.append('  ' + line)
+        return '\n'.join(lines)
 
     def get_app_config(self):
         app_config = config_pb2.TAppConfig()
@@ -499,6 +588,8 @@ class StaticConfigGenerator(object):
         if self.hive_config.ByteSize() > 0:
             app_config.HiveConfig.CopyFrom(self.hive_config)
         app_config.MergeFrom(self.tracing_txt)
+        if self.pdisk_key_txt_enabled:
+            app_config.PDiskKeyConfig.CopyFrom(self.pdisk_key_txt)
         return app_config
 
     def __proto_config(self, config_file, config_class=None, cluster_details_for_field=None):
@@ -579,7 +670,7 @@ class StaticConfigGenerator(object):
         return all_tablets
 
     def __generate_boot_txt(self):
-        self.__proto_configs["boot.txt"] = config_pb2.TBootstrap()
+        self.__proto_configs["boot.txt"] = bootstrap_pb2.TBootstrap()
 
         for tablet_type, tablet_count in self.__system_tablets:
             for index in range(int(tablet_count)):
@@ -1106,14 +1197,132 @@ class StaticConfigGenerator(object):
             self.__generate_sys_txt_advanced()
 
     def __generate_tracing_txt(self):
+        def get_selectors(selectors):
+            selectors_pb = config_pb2.TTracingConfig.TSelectors()
+
+            request_type = selectors["request_type"]
+            if request_type is not None:
+                selectors_pb.RequestType = request_type
+
+            return selectors_pb
+
+        def get_sampling_scope(sampling):
+            sampling_scope_pb = config_pb2.TTracingConfig.TSamplingRule()
+            selectors = sampling.get("scope")
+            if selectors is not None:
+                sampling_scope_pb.Scope.CopyFrom(get_selectors(selectors))
+            sampling_scope_pb.Fraction = sampling['fraction']
+            sampling_scope_pb.Level = sampling['level']
+            sampling_scope_pb.MaxTracesPerMinute = sampling['max_traces_per_minute']
+            sampling_scope_pb.MaxTracesBurst = sampling.get('max_traces_burst', 0)
+            return sampling_scope_pb
+
+        def get_external_throttling(throttling):
+            throttling_scope_pb = config_pb2.TTracingConfig.TExternalThrottlingRule()
+            selectors = throttling.get("scope")
+            if selectors is not None:
+                throttling_scope_pb.Scope.CopyFrom(get_selectors(selectors))
+            throttling_scope_pb.MaxTracesPerMinute = throttling['max_traces_per_minute']
+            throttling_scope_pb.MaxTracesBurst = throttling.get('max_traces_burst', 0)
+            return throttling_scope_pb
+
+        def get_auth_config(auth):
+            auth_pb = config_pb2.TTracingConfig.TBackendConfig.TAuthConfig()
+            tvm = auth.get("tvm")
+            if tvm is not None:
+                tvm_pb = auth_pb.Tvm
+
+                if "host" in tvm:
+                    tvm_pb.Host = tvm["host"]
+                if "port" in tvm:
+                    tvm_pb.Port = tvm["port"]
+                tvm_pb.SelfTvmId = tvm["self_tvm_id"]
+                tvm_pb.TracingTvmId = tvm["tracing_tvm_id"]
+                if "disk_cache_dir" in tvm:
+                    tvm_pb.DiskCacheDir = tvm["disk_cache_dir"]
+
+                if "plain_text_secret" in tvm:
+                    tvm_pb.PlainTextSecret = tvm["plain_text_secret"]
+                elif "secret_file" in tvm:
+                    tvm_pb.SecretFile = tvm["secret_file"]
+                elif "secret_environment_variable" in tvm:
+                    tvm_pb.SecretEnvironmentVariable = tvm["secret_environment_variable"]
+            return auth_pb
+
+        def get_opentelemetry(opentelemetry):
+            opentelemetry_pb = config_pb2.TTracingConfig.TBackendConfig.TOpentelemetryBackend()
+
+            opentelemetry_pb.CollectorUrl = opentelemetry["collector_url"]
+            opentelemetry_pb.ServiceName = opentelemetry["service_name"]
+
+            return opentelemetry_pb
+
+        def get_backend(backend):
+            backend_pb = config_pb2.TTracingConfig.TBackendConfig()
+
+            auth = backend.get("auth_config")
+            if auth is not None:
+                backend_pb.AuthConfig.CopyFrom(get_auth_config(auth))
+
+            opentelemetry = backend["opentelemetry"]
+            if opentelemetry is not None:
+                backend_pb.Opentelemetry.CopyFrom(get_opentelemetry(opentelemetry))
+
+            return backend_pb
+
+        def get_uploader(uploader):
+            uploader_pb = config_pb2.TTracingConfig.TUploaderConfig()
+
+            max_exported_spans_per_second = uploader.get("max_exported_spans_per_second")
+            if max_exported_spans_per_second is not None:
+                uploader_pb.MaxExportedSpansPerSecond = max_exported_spans_per_second
+
+            max_spans_in_batch = uploader.get("max_spans_in_batch")
+            if max_spans_in_batch is not None:
+                uploader_pb.MaxSpansInBatch = max_spans_in_batch
+
+            max_bytes_in_batch = uploader.get("max_bytes_in_batch")
+            if max_bytes_in_batch is not None:
+                uploader_pb.MaxBytesInBatch = max_bytes_in_batch
+
+            max_batch_accumulation_milliseconds = uploader.get("max_batch_accumulation_milliseconds")
+            if max_batch_accumulation_milliseconds is not None:
+                uploader_pb.MaxBatchAccumulationMilliseconds = max_batch_accumulation_milliseconds
+
+            span_export_timeout_seconds = uploader.get("span_export_timeout_seconds")
+            if span_export_timeout_seconds is not None:
+                uploader_pb.SpanExportTimeoutSeconds = span_export_timeout_seconds
+
+            max_export_requests_inflight = uploader.get("max_export_requests_inflight")
+            if max_export_requests_inflight is not None:
+                uploader_pb.MaxExportRequestsInflight = max_export_requests_inflight
+
+            return uploader_pb
+
         pb = config_pb2.TAppConfig()
         if self.__tracing:
+            tracing_pb = pb.TracingConfig
             (
-                pb.TracingConfig.Host,
-                pb.TracingConfig.Port,
-                pb.TracingConfig.RootCA,
-                pb.TracingConfig.ServiceName,
+                backend,
+                uploader,
+                sampling,
+                external_throttling
             ) = self.__tracing
+
+            assert isinstance(sampling, list)
+            assert isinstance(external_throttling, list)
+
+            tracing_pb.Backend.CopyFrom(get_backend(backend))
+
+            if uploader is not None:
+                tracing_pb.Uploader.CopyFrom(get_uploader(uploader))
+
+            for sampling_scope in sampling:
+                tracing_pb.Sampling.append(get_sampling_scope(sampling_scope))
+
+            for throttling_scope in external_throttling:
+                tracing_pb.ExternalThrottling.append(get_external_throttling(throttling_scope))
+
         self.__proto_configs["tracing.txt"] = pb
 
     def __generate_sys_txt_advanced(self):
@@ -1207,5 +1416,5 @@ class StaticConfigGenerator(object):
         if self.__cluster_details.use_new_style_kikimr_cfg:
             return dynamic_cfg_new_style(self._enable_cores)
         return kikimr_cfg_for_dynamic_slot(
-            self._enable_cores, self._enable_cms_config_cache, cert_params=self.__cluster_details.ic_cert_params
+            self._enable_cores, cert_params=self.__cluster_details.ic_cert_params
         )

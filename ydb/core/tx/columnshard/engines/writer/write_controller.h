@@ -4,22 +4,19 @@
 #include "blob_constructor.h"
 
 #include <ydb/library/actors/core/actor.h>
-#include <ydb/core/tx/columnshard/blob_manager.h>
 #include <ydb/core/tx/columnshard/defs.h>
 #include <ydb/core/tx/columnshard/blobs_action/abstract/write.h>
 
 
 namespace NKikimr::NColumnShard {
 
-class TBlobPutResult : public NColumnShard::TPutStatus {
+class TBlobPutResult: public NColumnShard::TPutStatus {
 public:
     using TPtr = std::shared_ptr<TBlobPutResult>;
 
     TBlobPutResult(NKikimrProto::EReplyStatus status,
         THashSet<ui32>&& yellowMoveChannels,
-        THashSet<ui32>&& yellowStopChannels,
-        const NColumnShard::TUsage& resourceUsage)
-        : ResourceUsage(resourceUsage)
+        THashSet<ui32>&& yellowStopChannels)
     {
         SetPutStatus(status, std::move(yellowMoveChannels), std::move(yellowStopChannels));
     }
@@ -27,26 +24,14 @@ public:
     TBlobPutResult(NKikimrProto::EReplyStatus status) {
         SetPutStatus(status);
     }
-
-    void AddResources(const NColumnShard::TUsage& usage) {
-        ResourceUsage.Add(usage);
-    }
-
-    TAutoPtr<TCpuGuard> StartCpuGuard() {
-        return new TCpuGuard(ResourceUsage);
-    }
-
-private:
-    YDB_READONLY_DEF(NColumnShard::TUsage, ResourceUsage);
 };
 
 class IWriteController {
 private:
-    THashMap<TUnifiedBlobId, std::shared_ptr<NOlap::IBlobsWritingAction>> BlobActions;
-    THashMap<i64, std::shared_ptr<NOlap::IBlobsWritingAction>> WritingActions;
+    THashMap<TString, std::shared_ptr<NOlap::IBlobsWritingAction>> WaitingActions;
+    NOlap::TWriteActionsCollection WritingActions;
     std::deque<NOlap::TBlobWriteInfo> WriteTasks;
 protected:
-    TUsage ResourceUsage;
     virtual void DoOnReadyResult(const NActors::TActorContext& ctx, const TBlobPutResult::TPtr& putResult) = 0;
     virtual void DoOnBlobWriteResult(const TEvBlobStorage::TEvPutResult& /*result*/) {
 
@@ -55,16 +40,33 @@ protected:
 
     }
 
-    NOlap::TBlobWriteInfo& AddWriteTask(NOlap::TBlobWriteInfo&& task) {
-        WritingActions.emplace(task.GetWriteOperator()->GetActionId(), task.GetWriteOperator());
-        WriteTasks.emplace_back(std::move(task));
-        return WriteTasks.back();
+    NOlap::TBlobWriteInfo& AddWriteTask(NOlap::TBlobWriteInfo&& task);
+    virtual void DoAbort(const TString& /*reason*/) {
     }
 public:
-    void Abort() {
+    const NOlap::TWriteActionsCollection& GetBlobActions() const {
+        return WritingActions;
+    }
+
+    TString DebugString() const {
+        TStringBuilder sb;
+        for (auto&& i : WritingActions) {
+            sb << i.second->GetStorageId() << ",";
+        }
+        ui64 size = 0;
+        for (auto&& i : WriteTasks) {
+            size += i.GetBlobId().BlobSize();
+        }
+
+        return TStringBuilder() << "size=" << size << ";count=" << WriteTasks.size() << ";actions=" << sb << ";";
+    }
+
+    void Abort(const TString& reason) {
+        AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("event", "IWriteController aborted")("reason", reason);
         for (auto&& i : WritingActions) {
             i.second->Abort();
         }
+        DoAbort(reason);
     }
 
     using TPtr = std::shared_ptr<IWriteController>;
@@ -75,18 +77,10 @@ public:
     }
 
     void OnReadyResult(const NActors::TActorContext& ctx, const TBlobPutResult::TPtr& putResult) {
-        putResult->AddResources(ResourceUsage);
         DoOnReadyResult(ctx, putResult);
     }
 
-    void OnBlobWriteResult(const TEvBlobStorage::TEvPutResult& result) {
-        TUnifiedBlobId blobId(result.GroupId, result.Id);
-        auto it = BlobActions.find(blobId);
-        AFL_VERIFY(it != BlobActions.end());
-        it->second->OnBlobWriteResult(blobId, result.Status);
-        BlobActions.erase(it);
-        DoOnBlobWriteResult(result);
-    }
+    void OnBlobWriteResult(const TEvBlobStorage::TEvPutResult& result);
 
     std::optional<NOlap::TBlobWriteInfo> Next() {
         if (WriteTasks.empty()) {
@@ -94,19 +88,11 @@ public:
         }
         auto result = std::move(WriteTasks.front());
         WriteTasks.pop_front();
-        BlobActions.emplace(result.GetBlobId(), result.GetWriteOperator());
         return result;
 
     }
-    bool IsBlobActionsReady() const {
-        return BlobActions.empty();
-    }
-    std::vector<std::shared_ptr<NOlap::IBlobsWritingAction>> GetBlobActions() const {
-        std::vector<std::shared_ptr<NOlap::IBlobsWritingAction>> actions;
-        for (auto&& i : WritingActions) {
-            actions.emplace_back(i.second);
-        }
-        return actions;
+    bool IsReady() const {
+        return WaitingActions.empty();
     }
 };
 

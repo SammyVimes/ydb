@@ -40,16 +40,21 @@ TControlPlaneStorageConfig::TControlPlaneStorageConfig(const NConfig::TControlPl
         AvailableBindings.insert(GetBindingType(availableBinding));
     }
 
+    for (const auto& availableConnection : Proto.GetAvailableStreamingConnection()) {
+        AvailableStreamingConnections.insert(GetConnectionType(availableConnection));
+    }
+
     GeneratorPathsLimit =
         s3Config.HasGeneratorPathsLimit() ? s3Config.GetGeneratorPathsLimit() : 50'000;
 
     for (const auto& mapping : Proto.GetRetryPolicyMapping()) {
         auto& retryPolicy = mapping.GetPolicy();
         auto retryCount = retryPolicy.GetRetryCount();
+        auto retryLimit = retryPolicy.GetRetryLimit();
         auto retryPeriod = GetDuration(retryPolicy.GetRetryPeriod(), TDuration::Hours(1));
         auto backoffPeriod = GetDuration(retryPolicy.GetBackoffPeriod(), TDuration::Zero());
         for (const auto statusCode: mapping.GetStatusCode()) {
-            RetryPolicies.emplace(statusCode, TRetryPolicyItem(retryCount, retryPeriod, backoffPeriod));
+            RetryPolicies.emplace(statusCode, TRetryPolicyItem(retryCount, retryLimit, retryPeriod, backoffPeriod));
         }
     }
 

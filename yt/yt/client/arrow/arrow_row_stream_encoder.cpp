@@ -26,7 +26,7 @@ using namespace NTableClient;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const auto& Logger = ArrowLogger;
+static constexpr auto& Logger = ArrowLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -52,7 +52,7 @@ std::tuple<org::apache::arrow::flatbuf::Type, flatbuffers::Offset<void>> Seriali
     switch (simpleType) {
         case ESimpleLogicalValueType::Null:
         case ESimpleLogicalValueType::Void:
-            return std::make_tuple(
+            return std::tuple(
                 org::apache::arrow::flatbuf::Type_Null,
                 org::apache::arrow::flatbuf::CreateNull(*flatbufBuilder)
                     .Union());
@@ -65,7 +65,7 @@ std::tuple<org::apache::arrow::flatbuf::Type, flatbuffers::Offset<void>> Seriali
         case ESimpleLogicalValueType::Uint16:
         case ESimpleLogicalValueType::Int32:
         case ESimpleLogicalValueType::Uint32:
-            return std::make_tuple(
+            return std::tuple(
                 org::apache::arrow::flatbuf::Type_Int,
                 org::apache::arrow::flatbuf::CreateInt(
                     *flatbufBuilder,
@@ -73,28 +73,36 @@ std::tuple<org::apache::arrow::flatbuf::Type, flatbuffers::Offset<void>> Seriali
                     IsIntegralTypeSigned(simpleType)).Union());
 
         case ESimpleLogicalValueType::Double:
-            return std::make_tuple(
+            return std::tuple(
                 org::apache::arrow::flatbuf::Type_FloatingPoint,
                 org::apache::arrow::flatbuf::CreateFloatingPoint(
                     *flatbufBuilder,
                     org::apache::arrow::flatbuf::Precision_DOUBLE)
                     .Union());
 
+        case ESimpleLogicalValueType::Float:
+            return std::tuple(
+                org::apache::arrow::flatbuf::Type_FloatingPoint,
+                org::apache::arrow::flatbuf::CreateFloatingPoint(
+                    *flatbufBuilder,
+                    org::apache::arrow::flatbuf::Precision_SINGLE)
+                    .Union());
+
         case ESimpleLogicalValueType::Boolean:
-            return std::make_tuple(
+            return std::tuple(
                 org::apache::arrow::flatbuf::Type_Bool,
                 org::apache::arrow::flatbuf::CreateBool(*flatbufBuilder)
                     .Union());
 
         case ESimpleLogicalValueType::String:
         case ESimpleLogicalValueType::Any:
-            return std::make_tuple(
+            return std::tuple(
                 org::apache::arrow::flatbuf::Type_Binary,
                 org::apache::arrow::flatbuf::CreateBinary(*flatbufBuilder)
                     .Union());
 
         case ESimpleLogicalValueType::Utf8:
-            return std::make_tuple(
+            return std::tuple(
                 org::apache::arrow::flatbuf::Type_Utf8,
                 org::apache::arrow::flatbuf::CreateUtf8(*flatbufBuilder)
                     .Union());
@@ -181,7 +189,7 @@ struct TRecordBatchSerializationContext final
 template <class T>
 TMutableRange<T> GetTypedValues(TMutableRef ref)
 {
-    return MakeMutableRange(
+    return TMutableRange(
         reinterpret_cast<T*>(ref.Begin()),
         reinterpret_cast<T*>(ref.End()));
 }
@@ -449,7 +457,8 @@ void SerializeDoubleColumn(
     YT_VERIFY(column->Values->BaseValue == 0);
     YT_VERIFY(!column->Values->ZigZagEncoded);
 
-    YT_LOG_DEBUG("Adding double column (ColumnId: %v, StartIndex: %v, ValueCount: %v)",
+    YT_LOG_DEBUG(
+        "Adding double column (ColumnId: %v, StartIndex: %v, ValueCount: %v, Rle: %v)",
         column->Id,
         column->StartIndex,
         column->ValueCount,
@@ -465,6 +474,36 @@ void SerializeDoubleColumn(
                 dstRef.Begin(),
                 relevantValues.Begin(),
                 column->ValueCount * sizeof(double));
+        });
+}
+
+void SerializeFloatColumn(
+    const TTypedBatchColumn& typedColumn,
+    TRecordBatchSerializationContext* context)
+{
+    const auto* column = typedColumn.Column;
+    YT_VERIFY(column->Values);
+    YT_VERIFY(column->Values->BitWidth == 32);
+    YT_VERIFY(column->Values->BaseValue == 0);
+    YT_VERIFY(!column->Values->ZigZagEncoded);
+
+    YT_LOG_DEBUG(
+        "Adding float column (ColumnId: %v, StartIndex: %v, ValueCount: %v, Rle: %v)",
+        column->Id,
+        column->StartIndex,
+        column->ValueCount,
+        column->Rle.has_value());
+
+    SerializeColumnPrologue(typedColumn, context);
+
+    context->AddBuffer(
+        column->ValueCount * sizeof(float),
+        [=] (TMutableRef dstRef) {
+            auto relevantValues = column->GetRelevantTypedValues<float>();
+            ::memcpy(
+                dstRef.Begin(),
+                relevantValues.Begin(),
+                column->ValueCount * sizeof(float));
         });
 }
 
@@ -510,7 +549,7 @@ void SerializeStringLikeColumn(
                 startIndex,
                 endIndex,
                 GetTypedValues<ui32>(dstRef));
-         });
+        });
 
     context->AddBuffer(
         stringsSize,
@@ -519,7 +558,7 @@ void SerializeStringLikeColumn(
                 dstRef.Begin(),
                 stringData.Begin() + startOffset,
                 stringsSize);
-         });
+        });
 }
 
 void SerializeBooleanColumn(
@@ -547,7 +586,7 @@ void SerializeBooleanColumn(
                 column->StartIndex,
                 column->StartIndex + column->ValueCount,
                 dstRef);
-         });
+        });
 }
 
 void SerializeNullColumn(
@@ -583,6 +622,8 @@ void SerializeColumn(
         SerializeIntegerColumn(typedColumn, simpleType, context);
     } else if (simpleType == ESimpleLogicalValueType::Double) {
         SerializeDoubleColumn(typedColumn, context);
+    } else if (simpleType == ESimpleLogicalValueType::Float) {
+        SerializeFloatColumn(typedColumn, context);
     } else if (IsStringLikeType(simpleType)) {
         SerializeStringLikeColumn(typedColumn, context);
     } else if (simpleType == ESimpleLogicalValueType::Boolean) {
@@ -621,7 +662,7 @@ auto SerializeRecordBatch(
 
     auto totalSize = context->CurrentBodyOffset;
 
-    return std::make_tuple(
+    return std::tuple(
         recordBatchOffset,
         totalSize,
         [context = std::move(context)] (TMutableRef dstRef) {
@@ -930,6 +971,7 @@ private:
 
         int arrowDictionaryIdCounter = 0;
         std::vector<flatbuffers::Offset<org::apache::arrow::flatbuf::Field>> fieldOffsets;
+        fieldOffsets.reserve(TypedColumns_.size());
 
         for (const auto& typedColumn : TypedColumns_) {
             auto optionalColumnSchema = FindColumnSchema(*typedColumn.Column);
@@ -1047,7 +1089,7 @@ private:
         auto [recordBatchOffset, bodySize, bodyWriter] = SerializeRecordBatch(
             &flatbufBuilder,
             typedColumn.Column->ValueCount,
-            MakeRange({typedColumn}));
+            TRange({typedColumn}));
 
         auto dictionaryBatchOffset = org::apache::arrow::flatbuf::CreateDictionaryBatch(
             flatbufBuilder,

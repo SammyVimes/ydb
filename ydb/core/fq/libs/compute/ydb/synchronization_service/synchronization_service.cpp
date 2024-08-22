@@ -21,6 +21,7 @@
 #include <ydb/library/actors/core/actorsystem.h>
 #include <ydb/library/actors/core/hfunc.h>
 #include <ydb/library/actors/core/log.h>
+#include <contrib/libs/fmt/include/fmt/format.h>
 
 #define LOG_E(stream) LOG_ERROR_S(*TlsActivationContext, NKikimrServices::FQ_RUN_ACTOR, "[ydb] [SynchronizationService]: " << stream)
 #define LOG_W(stream) LOG_WARN_S( *TlsActivationContext, NKikimrServices::FQ_RUN_ACTOR, "[ydb] [SynchronizationService]: " << stream)
@@ -41,6 +42,7 @@ public:
                            const NConfig::TCommonConfig& commonConfig,
                            const NConfig::TComputeConfig& computeConfig,
                            const NFq::NConfig::TYdbStorageConfig& connectionConfig,
+                           const NFq::NConfig::TWorkloadManagerConfig& workloadManagerConfig,
                            const TSigner::TPtr& signer,
                            const TYqSharedResources::TPtr& yqSharedResources,
                            const NKikimr::TYdbCredentialsProviderFactory& credentialsProviderFactory,
@@ -51,6 +53,7 @@ public:
         , CommonConfig(commonConfig)
         , ComputeConfig(computeConfig)
         , ConnectionConfig(connectionConfig)
+        , WorkloadManagerConfig(workloadManagerConfig)
         , Signer(signer)
         , YqSharedResources(yqSharedResources)
         , CredentialsProviderFactory(credentialsProviderFactory)
@@ -93,14 +96,22 @@ public:
             ReplyErrorAndPassAway(issues, "Error describe a database at the synchronization stage");
             return;
         }
-        const auto& result = ev.Get()->Get()->Record;
-        if (result.synchronized()) {
-            LOG_I("Synchronization has already completed for the scope " << Scope);
-            ReplyAndPassAway();
-        } else {
+        ComputeDatabase = ev.Get()->Get()->Record;
+        if (!ComputeDatabase.synchronized()) {
             LOG_I("Start fetch connections stage for the scope (cms or ydbcp) " << Scope);
             SendListConnections();
+            return;
         }
+
+        if (WorkloadManagerConfig.GetEnable() && !ComputeDatabase.workload_manager_synchronized()) {
+            Become(&TSynchronizeScopeActor::StateCreateResourcePoolsFunc);
+            LOG_I("Start creating resource pools for the scope (cms or ydbcp) " << Scope);
+            CreateResourcePools();
+            return;
+        }
+
+        LOG_I("Synchronization has already completed for the scope " << Scope);
+        ReplyAndPassAway();
     }
 
     void Handle(const TEvControlPlaneStorage::TEvListConnectionsResponse::TPtr& ev) {
@@ -217,7 +228,7 @@ public:
     void ProcessCreateBinding() {
         ProcessedBindings++;
         if (ProcessedBindings == Bindings.size()) {
-            SendFinalModifyDatabase();
+            FinishExternalSourcesSynchronization();
         }
     }
 
@@ -244,6 +255,35 @@ public:
 
         LOG_I("Synchronization has already completed for the scope (cms or ydbcp) " << Scope);
         ReplyAndPassAway();
+    }
+
+    void ProcessCreateResourcePool() {
+        ProcessedResourcePools++;
+        if (ProcessedResourcePools == WorkloadManagerConfig.ResourcePoolSize()) {
+            SendFinalModifyDatabase();
+        }
+    }
+
+    STRICT_STFUNC(StateCreateResourcePoolsFunc,
+        hFunc(TEvYdbCompute::TEvCreateResourcePoolResponse, Handle);
+        hFunc(TEvControlPlaneStorage::TEvModifyDatabaseResponse, Handle);
+    )
+
+    void Handle(const TEvYdbCompute::TEvCreateResourcePoolResponse::TPtr& ev) {
+        const auto& status = ev.Get()->Get()->Status;
+        if (IsPathExistsIssue(status)) {
+            if (AlterResourcePool(ev.Get()->Cookie)) {
+                return;
+            }
+        }
+        if (!status.IsSuccess()) {
+            LOG_E("Create resource pool response (error): " << ProcessedResourcePools << " of " << WorkloadManagerConfig.ResourcePoolSize() << ", issues = " << status.GetIssues().ToOneLineString());
+            Issues.AddIssues(status.GetIssues());
+            ProcessCreateResourcePool();
+            return;
+        }
+        SuccessfullyCreatedResourcePools++;
+        ProcessCreateResourcePool();
     }
 
 private:
@@ -395,6 +435,8 @@ private:
                 new IEventHandle(SelfId(), SelfId(), new TEvControlPlaneProxy::TEvCreateConnectionRequest{{}, proto, {}, {}, {}});
 
             request.Get()->Get()->YDBClient = Client;
+            request.Get()->Get()->ComputeDatabase = ComputeDatabase;
+            request.Get()->Get()->Scope = Scope;
 
             Register(NFq::NPrivate::MakeCreateConnectionActor(
                 SelfId(),
@@ -403,13 +445,14 @@ private:
                 Counters,
                 TPermissions{},
                 CommonConfig,
+                ComputeConfig,
                 Signer,
                 true,
                 connection.first
             ));
         }
         if (Connections.empty()) {
-            SendFinalModifyDatabase();
+            FinishExternalSourcesSynchronization();
         }
     }
 
@@ -422,9 +465,12 @@ private:
                 new IEventHandle(SelfId(), SelfId(), new TEvControlPlaneProxy::TEvCreateBindingRequest{{}, proto, {}, {}, {}});
 
             request.Get()->Get()->YDBClient = Client;
+            request.Get()->Get()->ComputeDatabase = ComputeDatabase;
+            request.Get()->Get()->Scope = Scope;
+
             auto it = Connections.find(binding.second.content().connection_id());
             if (it == Connections.end()) {
-                NYql::TIssue issue {TStringBuilder {} 
+                NYql::TIssue issue {TStringBuilder {}
                     << "While synchronizing tables for binding with id '" << binding.first << "'"};
                 issue.AddSubIssue(MakeIntrusive<NYql::TIssue>(TStringBuilder{}
                     << "Can't find connection with id '" << binding.second.content().connection_id() << "'"));
@@ -439,13 +485,14 @@ private:
                 TDuration::Seconds(30),
                 Counters,
                 TPermissions{},
+                ComputeConfig,
                 true,
                 binding.first
             ));
         }
 
         if (Bindings.empty()) {
-            SendFinalModifyDatabase();
+            FinishExternalSourcesSynchronization();
         }
     }
 
@@ -511,11 +558,28 @@ private:
         Send(ControlPlaneStorageServiceActorId(), event.release());
     }
 
+    void FinishExternalSourcesSynchronization() {
+        if (WorkloadManagerConfig.GetEnable() && !ComputeDatabase.workload_manager_synchronized()) {
+            Become(&TSynchronizeScopeActor::StateCreateResourcePoolsFunc);
+            LOG_I("Start creating resource pools for the scope (cms or ydbcp) " << Scope << " after external sources synchronization");
+            CreateResourcePools();
+            return;
+        }
+        SendFinalModifyDatabase();
+    }
+
     void SendFinalModifyDatabase() {
         if (Issues) {
             LOG_I("Synchronization has already completed with errors for scope: " << Scope);
             Issues.AddIssue(TStringBuilder{} << "Connections created " << SuccessfullyCreatedConnections << " of " << ProcessedConnections);
             Issues.AddIssue(TStringBuilder{} << "Bindings created " << SuccessfullyCreatedBindings << " of " << ProcessedBindings);
+            if (WorkloadManagerConfig.GetEnable()) {
+                Issues.AddIssue(TStringBuilder{} << "Resource pools created " << SuccessfullyCreatedResourcePools << " of " << WorkloadManagerConfig.ResourcePoolSize());
+            }
+            if (WorkloadManagerConfig.GetEnable() && SuccessfullyCreatedResourcePools < WorkloadManagerConfig.ResourcePoolSize()) {
+                ReplyErrorAndPassAway(Issues);
+                return;
+            }
             ReplyAndPassAway();
             return;
         }
@@ -531,6 +595,9 @@ private:
             case NConfig::TYdbComputeControlPlane::kYdbcp:
             std::unique_ptr<TEvControlPlaneStorage::TEvModifyDatabaseRequest> event{new TEvControlPlaneStorage::TEvModifyDatabaseRequest{CloudId, Scope}};
             event->Synchronized = true;
+            if (WorkloadManagerConfig.GetEnable()) {
+                event->WorkloadManagerSynchronized = true;
+            }
             Send(ControlPlaneStorageServiceActorId(), event.release());
             return;
         }
@@ -540,6 +607,74 @@ private:
         TPermissions permissions;
         permissions.SetAll();
         return permissions;
+    }
+
+    static NYdb::TStatus ExtractStatus(const NYdb::TAsyncStatus& future) {
+        try {
+            return std::move(future.GetValueSync()); // can throw an exception
+        } catch (...) {
+            return NYdb::TStatus{NYdb::EStatus::BAD_REQUEST, NYql::TIssues{NYql::TIssue{CurrentExceptionMessage()}}};
+        }
+    }
+
+    void CreateResourcePools() {
+        using namespace fmt::literals;
+        for (size_t i = 0; i < WorkloadManagerConfig.ResourcePoolSize(); i++) {
+            const auto& resourcePool = WorkloadManagerConfig.GetResourcePool(i);
+            Client
+                ->RetryOperation([resourcePool](NYdb::NTable::TSession session) {    
+                    return session.ExecuteSchemeQuery(fmt::format(R"(
+                        CREATE RESOURCE POOL `{resource_pool_name}` WITH (
+                            CONCURRENT_QUERY_LIMIT="{concurrent_query_limit}",
+                            QUEUE_SIZE="{queue_size}",
+                            DATABASE_LOAD_CPU_THRESHOLD="{database_load_cpu_threshold}"
+                        );
+                    )",
+                    "resource_pool_name"_a = resourcePool.GetName(),
+                    "concurrent_query_limit"_a = resourcePool.GetConcurrentQueryLimit(),
+                    "queue_size"_a = resourcePool.GetQueueSize(),
+                    "database_load_cpu_threshold"_a = resourcePool.GetDatabaseLoadCpuThreshold()));
+                })
+                .Subscribe([actorSystem = TActivationContext::ActorSystem(), self = SelfId(), i](const NYdb::TAsyncStatus& future) {
+                    actorSystem->Send(self, new TEvYdbCompute::TEvCreateResourcePoolResponse(ExtractStatus(future)), 0, i);
+                });
+        }
+
+        if (WorkloadManagerConfig.GetResourcePool().empty()) {
+            SendFinalModifyDatabase();
+        }
+    }
+
+    static bool IsPathExistsIssue(const NYdb::TStatus& status) {
+        return status.GetIssues().ToOneLineString().Contains("error: path exist");
+    }
+
+    bool AlterResourcePool(size_t index) {
+        using namespace fmt::literals;
+        if (index >= WorkloadManagerConfig.ResourcePoolSize()) {
+            LOG_E("Alter resource pool has been failed. Invalid index: " << index << " of " << WorkloadManagerConfig.ResourcePoolSize());
+            Issues.AddIssue(TStringBuilder{} << "Alter resource pool has been failed. Invalid index: " << index << " of " << WorkloadManagerConfig.ResourcePoolSize());
+            return false;
+        }
+        const auto& resourcePool = WorkloadManagerConfig.GetResourcePool(index);
+        Client
+            ->RetryOperation([resourcePool](NYdb::NTable::TSession session) {    
+                return session.ExecuteSchemeQuery(fmt::format(R"(
+                    ALTER RESOURCE POOL `{resource_pool_name}` SET (
+                        CONCURRENT_QUERY_LIMIT="{concurrent_query_limit}",
+                        QUEUE_SIZE="{queue_size}",
+                        DATABASE_LOAD_CPU_THRESHOLD="{database_load_cpu_threshold}"
+                    );
+                )",
+                "resource_pool_name"_a = resourcePool.GetName(),
+                "concurrent_query_limit"_a = resourcePool.GetConcurrentQueryLimit(),
+                "queue_size"_a = resourcePool.GetQueueSize(),
+                "database_load_cpu_threshold"_a = resourcePool.GetDatabaseLoadCpuThreshold()));
+            })
+            .Subscribe([actorSystem = TActivationContext::ActorSystem(), self = SelfId(), index](const NYdb::TAsyncStatus& future) {
+                actorSystem->Send(self, new TEvYdbCompute::TEvCreateResourcePoolResponse(ExtractStatus(future)), 0, index);
+            });
+        return true;
     }
 
     template<typename T>
@@ -556,7 +691,9 @@ private:
     TString Scope;
     NConfig::TCommonConfig CommonConfig;
     NFq::TComputeConfig ComputeConfig;
+    FederatedQuery::Internal::ComputeDatabaseInternal ComputeDatabase;
     NFq::NConfig::TYdbStorageConfig ConnectionConfig;
+    NFq::NConfig::TWorkloadManagerConfig WorkloadManagerConfig;
     TSigner::TPtr Signer;
     TYqSharedResources::TPtr YqSharedResources;
     NKikimr::TYdbCredentialsProviderFactory CredentialsProviderFactory;
@@ -565,8 +702,10 @@ private:
     TSet<TString> BindingIds;
     uint64_t SuccessfullyCreatedConnections = 0;
     uint64_t SuccessfullyCreatedBindings = 0;
+    uint64_t SuccessfullyCreatedResourcePools = 0;
     uint64_t ProcessedConnections = 0;
     uint64_t ProcessedBindings = 0;
+    uint64_t ProcessedResourcePools = 0;
     TMap<TString, FederatedQuery::Connection> Connections;
     TMap<TString, FederatedQuery::Binding> Bindings;
     NFq::NPrivate::TCounters Counters;
@@ -666,12 +805,13 @@ public:
         }
 
         const NFq::NConfig::TYdbStorageConfig& connectionConfig = ev->Get()->ConnectionConfig;
+        const NFq::NConfig::TWorkloadManagerConfig& workloadManagerConfig = ev->Get()->WorkloadManagerConfig;
         auto it = Cache.find(scope);
         if (it == Cache.end()) {
             auto& item = Cache[scope];
             item.Status = EScopeStatus::IN_PROGRESS;
             item.Requests.push_back(ev);
-            Register(new TSynchronizeScopeActor{SelfId(), cloudId, scope, CommonConfig, ComputeConfig, connectionConfig, Signer, YqSharedResources, CredentialsProviderFactory,  Counters.Counters});
+            Register(new TSynchronizeScopeActor{SelfId(), cloudId, scope, CommonConfig, ComputeConfig, connectionConfig, workloadManagerConfig, Signer, YqSharedResources, CredentialsProviderFactory,  Counters.Counters});
             return;
         }
 

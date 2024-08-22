@@ -122,24 +122,96 @@ SYS_SCHEMA = {
             "type": "string",
             "enum": NodeType.all_node_type_names(),
         },
+        "force_io_pool_threads": {"type": "integer"},
     },
     "additionalProperties": False,
 }
 
+SELECTORS_CONFIGS = dict(
+    type="object",
+    properties=dict(
+        request_type=dict(type="string"),
+    ),
+    required=[],
+    additionalProperties=False,
+)
+
 TRACING_SCHEMA = dict(
     type="object",
     properties=dict(
-        host=dict(type="string"),
-        port=dict(type="integer"),
-        root_ca=dict(type="string"),
-        service_name=dict(type="string"),
+        backend=dict(
+            type="object",
+            properties=dict(
+                auth_config=dict(
+                    type="object",
+                    properties=dict(
+                        tvm=dict(
+                            type="object",
+                            properties=dict(
+                                url=dict(type="string"),
+                                self_tvm_id=dict(type="integer"),
+                                tracing_tvm_id=dict(type="integer"),
+                                disc_cache_dir=dict(type="string"),
+                                plain_text_secret=dict(type="string"),
+                                secret_file=dict(type="string"),
+                                secret_environment_variable=dict(type="string"),
+                            ),
+                            required=["self_tvm_id", "tracing_tvm_id"],
+                        )
+                    ),
+                    required=["tvm"],
+                ),
+                opentelemetry=dict(
+                    type="object",
+                    properties=dict(
+                        collector_url=dict(type="string"),
+                        service_name=dict(type="string"),
+                    )
+                ),
+            ),
+            required=["opentelemetry"],
+            additionalProperties=False,
+        ),
+        uploader=dict(
+            type="object",
+            properties=dict(
+                max_exported_spans_per_second=dict(type="integer", minimum=1),
+                max_spans_in_batch=dict(type="integer", minimum=1),
+                max_bytes_in_batch=dict(type="integer"),
+                max_batch_accumulation_milliseconds=dict(type="integer"),
+                span_export_timeout_seconds=dict(type="integer", minimum=1),
+                max_export_requests_inflight=dict(type="integer", minimum=1),
+            ),
+            additionalProperties=False,
+        ),
+        sampling=dict(
+            type="array",
+            items=dict(
+                type="object",
+                properties=dict(
+                    scope=SELECTORS_CONFIGS,
+                    fraction=dict(type="number", minimum=0, maximum=1),
+                    level=dict(type="integer", minimum=0, maximum=15),
+                    max_traces_per_minute=dict(type="integer", minimum=0),
+                    max_traces_burst=dict(type="integer", minimum=0),
+                ),
+                required=["fraction", "level", "max_traces_per_minute"],
+            ),
+        ),
+        external_throttling=dict(
+            type="array",
+            items=dict(
+                type="object",
+                properties=dict(
+                    scope=SELECTORS_CONFIGS,
+                    max_traces_per_minute=dict(type="integer", minimum=0),
+                    max_traces_burst=dict(type="integer", minimum=0),
+                ),
+                required=["max_traces_per_minute"],
+            ),
+        ),
     ),
-    required=[
-        "host",
-        "port",
-        "root_ca",
-        "service_name",
-    ],
+    required=["backend"],
     additionalProperties=False,
 )
 
@@ -171,6 +243,7 @@ HOST_SCHEMA = {
         "ic_port": {
             "type": "integer",
         },
+        "node_id": {"type": "integer", "minLength": 1},
     },
     "required": [
         "name",
@@ -410,6 +483,7 @@ DOMAIN_SCHEMA = {
 NBS_SCHEMA = {
     "type": "object",
     "properties": {
+        "diagnostics": {"type": "object"},
         "enable": {"type": "boolean"},
         "new_config_generator_enabled": {"type": "boolean"},
         "sys": copy.deepcopy(SYS_SCHEMA),
@@ -897,9 +971,6 @@ TEMPLATE_SCHEMA = {
         "nw_cache_file_path": {
             "type": "string",
         },
-        "enable_cms_config_cache": {
-            "type": "boolean",
-        },
         "hosts": {
             "type": "array",
             "items": copy.deepcopy(HOST_SCHEMA),
@@ -923,7 +994,7 @@ TEMPLATE_SCHEMA = {
         "features": copy.deepcopy(FEATURES_SCHEMA),
         "shared_cache": copy.deepcopy(SHARED_CACHE_SCHEMA),
         "sys": copy.deepcopy(SYS_SCHEMA),
-        "tracing": copy.deepcopy(TRACING_SCHEMA),
+        "tracing_config": copy.deepcopy(TRACING_SCHEMA),
         "failure_injection_config": copy.deepcopy(FAILURE_INJECTION_CONFIG_SCHEMA),
         "solomon": copy.deepcopy(SOLOMON_SCHEMA),
         "cms": copy.deepcopy(CMS_SCHEMA),
@@ -946,6 +1017,7 @@ def _host_and_ic_port(host):
 
 def checkNameServiceDuplicates(validator, allow_duplicates, instance, schema):
     names = collections.Counter([_host_and_ic_port(host) for host in instance])
+    node_ids = collections.Counter([host["node_id"] for host in instance if host.get("node_id")])
 
     for name, count in names.items():
         if count > 1:
@@ -954,6 +1026,15 @@ def checkNameServiceDuplicates(validator, allow_duplicates, instance, schema):
                 % (
                     instance,
                     name,
+                )
+            )
+    for node_id, count in node_ids.items():
+        if count > 1:
+            yield jsonschema.ValidationError(
+                "NodeId of items contains non-unique elements %r: %s. "
+                % (
+                    instance,
+                    node_id,
                 )
             )
 

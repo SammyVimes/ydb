@@ -4,6 +4,7 @@
 #include "convert.h"
 #endif
 
+#include "attribute_consumer.h"
 #include "default_building_consumer.h"
 #include "serialize.h"
 #include "tree_builder.h"
@@ -77,7 +78,7 @@ TYsonString ConvertToYsonStringNestingLimited(const TYsonString& value, int nest
 
 ////////////////////////////////////////////////////////////////////////////////
 
-} // namespace NYT::NYSon
+} // namespace NYT::NYson
 
 namespace NYT::NYTree {
 
@@ -100,11 +101,12 @@ NYson::TYsonProducer ConvertToProducer(T&& value)
 template <class T>
 INodePtr ConvertToNode(
     const T& value,
-    INodeFactory* factory)
+    INodeFactory* factory,
+    int treeSizeLimit)
 {
     auto type = GetYsonType(value);
 
-    auto builder = CreateBuilderFromFactory(factory);
+    auto builder = CreateBuilderFromFactory(factory, treeSizeLimit);
     builder->BeginTree();
 
     switch (type) {

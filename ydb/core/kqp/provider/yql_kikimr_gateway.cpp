@@ -6,7 +6,10 @@
 #include <ydb/library/yql/utils/yql_panic.h>
 #include <ydb/library/yql/minikql/mkql_node.h>
 #include <ydb/library/yql/minikql/mkql_string_util.h>
+#include <ydb/core/base/path.h>
 #include <ydb/core/base/table_index.h>
+#include <ydb/core/kqp/gateway/utils/scheme_helpers.h>
+#include <ydb/core/protos/replication.pb.h>
 
 #include <util/string/split.h>
 #include <util/string/strip.h>
@@ -39,7 +42,7 @@ static void CreateDirs(std::shared_ptr<TVector<TString>> partsHolder, size_t ind
             CreateDirs(partsHolder, index + 1, promise, createDir);
         });
 
-    TString basePath = IKikimrGateway::CombinePath(parts.begin(), parts.begin() + index);
+    TString basePath = NKikimr::NKqp::NSchemeHelpers::CombinePath(parts.begin(), parts.begin() + index);
 
     createDir(basePath, parts[index], partPromise);
 }
@@ -52,42 +55,30 @@ TKikimrPathId TKikimrPathId::Parse(const TStringBuf& str) {
     return TKikimrPathId(FromString<ui64>(ownerStr), FromString<ui64>(idStr));
 }
 
-TString IKikimrGateway::CanonizePath(const TString& path) {
-    if (path.empty()) {
-        return "/";
+void TReplicationSettings::TOAuthToken::Serialize(NKikimrReplication::TOAuthToken& proto) const {
+    if (Token) {
+        proto.SetToken(Token);
     }
-
-    if (path[0] != '/') {
-        return "/" + path;
+    if (TokenSecretName) {
+        proto.SetTokenSecretName(TokenSecretName);
     }
-
-    return path;
 }
 
-TVector<TString> IKikimrGateway::SplitPath(const TString& path) {
-    TVector<TString> parts;
-    Split(path, "/", parts);
-    return parts;
-}
-
-bool IKikimrGateway::TrySplitTablePath(const TString& path, std::pair<TString, TString>& result, TString& error) {
-    auto parts = SplitPath(path);
-
-    if (parts.size() < 2) {
-        error = TString("Missing scheme root in table path: ") + path;
-        return false;
+void TReplicationSettings::TStaticCredentials::Serialize(NKikimrReplication::TStaticCredentials& proto) const {
+    if (UserName) {
+        proto.SetUser(UserName);
     }
-
-    result = std::make_pair(
-        CombinePath(parts.begin(), parts.end() - 1),
-        parts.back());
-
-    return true;
+    if (Password) {
+        proto.SetPassword(Password);
+    }
+    if (PasswordSecretName) {
+        proto.SetPasswordSecretName(PasswordSecretName);
+    }
 }
 
 TFuture<IKikimrGateway::TGenericResult> IKikimrGateway::CreatePath(const TString& path, TCreateDirFunc createDir) {
-    auto partsHolder = std::make_shared<TVector<TString>>(SplitPath(path));
-    auto &parts = *partsHolder;
+    auto partsHolder = std::make_shared<TVector<TString>>(NKikimr::SplitPath(path));
+    auto& parts = *partsHolder;
 
     if (parts.size() < 2) {
         TGenericResult result;
@@ -101,48 +92,6 @@ TFuture<IKikimrGateway::TGenericResult> IKikimrGateway::CreatePath(const TString
     return pathPromise.GetFuture();
 }
 
-TString IKikimrGateway::CreateIndexTablePath(const TString& tableName, const TString& indexName) {
-    return tableName + "/" + indexName + "/indexImplTable";
-}
-
-
-void IKikimrGateway::BuildIndexMetadata(TTableMetadataResult& loadTableMetadataResult) {
-    auto tableMetadata = loadTableMetadataResult.Metadata;
-    YQL_ENSURE(tableMetadata);
-
-    if (tableMetadata->Indexes.empty()) {
-        return;
-    }
-
-    const auto& cluster = tableMetadata->Cluster;
-    const auto& tableName = tableMetadata->Name;
-    const size_t indexesCount = tableMetadata->Indexes.size();
-
-    NKikimr::NTableIndex::TTableColumns tableColumns;
-    tableColumns.Columns.reserve(tableMetadata->Columns.size());
-    for (auto& column: tableMetadata->Columns) {
-        tableColumns.Columns.insert_noresize(column.first);
-    }
-    tableColumns.Keys = tableMetadata->KeyColumnNames;
-
-    tableMetadata->SecondaryGlobalIndexMetadata.resize(indexesCount);
-    for (size_t i = 0; i < indexesCount; i++) {
-        const auto& index = tableMetadata->Indexes[i];
-        auto indexTablePath = CreateIndexTablePath(tableName, index.Name);
-        NKikimr::NTableIndex::TTableColumns indexTableColumns = NKikimr::NTableIndex::CalcTableImplDescription(
-                    tableColumns,
-                    NKikimr::NTableIndex::TIndexColumns{index.KeyColumns, {}});
-
-        TKikimrTableMetadataPtr indexTableMetadata = new TKikimrTableMetadata(cluster, indexTablePath);
-        indexTableMetadata->DoesExist = true;
-        indexTableMetadata->KeyColumnNames = indexTableColumns.Keys;
-        for (auto& column: indexTableColumns.Columns) {
-            indexTableMetadata->Columns[column] = tableMetadata->Columns.at(column);
-        }
-
-        tableMetadata->SecondaryGlobalIndexMetadata[i] = indexTableMetadata;
-    }
-}
 
 bool TTtlSettings::TryParse(const NNodes::TCoNameValueTupleList& node, TTtlSettings& settings, TString& error) {
     using namespace NNodes;
@@ -379,6 +328,14 @@ static std::shared_ptr<THashMap<TString, Ydb::Topic::Codec>> GetCodecsMapping() 
     return codecsMapping;
 }
 
+static std::shared_ptr<THashMap<TString, Ydb::Topic::AutoPartitioningStrategy>> GetAutoPartitioningStrategiesMapping() {
+    static std::shared_ptr<THashMap<TString, Ydb::Topic::AutoPartitioningStrategy>> strategiesMapping;
+    if (strategiesMapping == nullptr) {
+        strategiesMapping = MakeEnumMapping<Ydb::Topic::AutoPartitioningStrategy>(Ydb::Topic::AutoPartitioningStrategy_descriptor(), "auto_partitioning_strategy_");
+    }
+    return strategiesMapping;
+}
+
 static std::shared_ptr<THashMap<TString, Ydb::Topic::MeteringMode>> GetMeteringModesMapping() {
     static std::shared_ptr<THashMap<TString, Ydb::Topic::MeteringMode>> metModesMapping;
     if (metModesMapping == nullptr) {
@@ -393,6 +350,18 @@ bool GetTopicMeteringModeFromString(const TString& meteringMode, Ydb::Topic::Met
     auto mapping = GetMeteringModesMapping();
     auto normMode = to_lower(meteringMode);
     auto iter = mapping->find(normMode);
+    if (iter.IsEnd()) {
+        return false;
+    } else {
+        result = iter->second;
+        return true;
+    }
+}
+
+bool GetTopicAutoPartitioningStrategyFromString(const TString& strategy, Ydb::Topic::AutoPartitioningStrategy& result) {
+    auto mapping = GetAutoPartitioningStrategiesMapping();
+    auto normStrategy = to_lower(strategy);
+    auto iter = mapping->find(normStrategy);
     if (iter.IsEnd()) {
         return false;
     } else {

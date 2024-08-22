@@ -1,6 +1,6 @@
 #include "config.h"
 
-#include <yt/yt/core/misc/backoff_strategy_config.h>
+#include <yt/yt/core/misc/config.h>
 
 namespace NYT::NApi {
 
@@ -37,13 +37,9 @@ void TConnectionDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("table_mount_cache", &TThis::TableMountCache)
         .DefaultNew();
     registrar.Parameter("tablet_write_backoff", &TThis::TabletWriteBackoff)
-        .DefaultNew();
-
-    registrar.Preprocessor([] (TThis* config) {
-        // TODO(gritukan): Enable tablet retries by default one day.
-        config->TabletWriteBackoff = New<TSerializableExponentialBackoffOptions>();
-        config->TabletWriteBackoff->InvocationCount = 1;
-    });
+        .Default({
+            .InvocationCount = 0,
+        });
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -149,6 +145,8 @@ void TJournalWriterConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("open_session_backoff_time", &TThis::OpenSessionBackoffTime)
         .Default(TDuration::Seconds(10));
+    registrar.Parameter("open_session_retry_count", &TThis::OpenSessionRetryCount)
+        .Default(5);
 
     registrar.Parameter("prerequisite_transaction_probe_period", &TThis::PrerequisiteTransactionProbePeriod)
         .Default(TDuration::Seconds(60));

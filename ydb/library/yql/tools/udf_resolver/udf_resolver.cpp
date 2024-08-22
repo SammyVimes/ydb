@@ -28,14 +28,19 @@
 #ifdef _linux_
 #include <sys/types.h>
 #include <sys/prctl.h>
+#include <sys/resource.h>
 #include <sys/syscall.h>
 #include <sys/socket.h>
+#ifndef GRND_RANDOM
 #include <sys/random.h>
+#endif
 
 #include <linux/filter.h>
 #include <linux/seccomp.h>
 #include <linux/audit.h>
+#ifndef GRND_RANDOM
 #include <linux/random.h>
+#endif
 
 #ifndef __SI_MAX_SIZE
 #define __SI_MAX_SIZE        128
@@ -268,6 +273,12 @@ int main(int argc, char **argv) {
         }
 
         NYql::SendSignalOnParentThreadExit(SIGTERM);
+
+#ifdef _linux_
+        if (rlimit limit = {0, 0}; setrlimit(RLIMIT_CORE, &limit) != 0) {
+            ythrow TSystemError() << "Failed to set RLIMIT_CORE";
+        }
+#endif
 
         if (res.Has("filter-syscalls")) {
 #ifdef _linux_

@@ -4,6 +4,7 @@
 #include "execution_unit_ctors.h"
 #include "setup_sys_locks.h"
 #include "datashard_locks_db.h"
+#include "datashard_user_db.h"
 #include "probes.h"
 
 #include <ydb/core/engine/minikql/minikql_engine_host.h>
@@ -106,7 +107,7 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
     ui64 tabletId = DataShard.TabletID();
     const TValidatedDataTx::TPtr& dataTx = tx->GetDataTx();
 
-    if (op->IsImmediate() && !dataTx->ReValidateKeys()) {
+    if (op->IsImmediate() && !dataTx->ReValidateKeys(txc.DB.GetScheme())) {
         // Immediate transactions may be reordered with schema changes and become invalid
         Y_ABORT_UNLESS(!dataTx->Ready());
         op->SetAbortedFlag();
@@ -115,7 +116,7 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
         return EExecutionStatus::Executed;
     }
 
-    if (dataTx->CheckCancelled()) {
+    if (dataTx->CheckCancelled(DataShard.TabletID())) {
         tx->ReleaseTxData(txc, ctx);
         BuildResult(op, NKikimrTxDataShard::TEvProposeTransactionResult::CANCELLED)
             ->AddError(NKikimrTxDataShard::TError::EXECUTION_CANCELLED, "Tx was cancelled");
@@ -126,9 +127,14 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
     }
 
     try {
-        auto& kqpLocks = dataTx->GetKqpLocks();
+        const ui64 txId = tx->GetTxId();
+        const auto* kqpLocks = tx->GetDataTx()->HasKqpLocks() ? &tx->GetDataTx()->GetKqpLocks() : nullptr;
+        const auto& inReadSets = op->InReadSets();
+        auto& awaitingDecisions = tx->AwaitingDecisions();
+        auto& outReadSets = tx->OutReadSets();
         bool useGenericReadSets = dataTx->GetUseGenericReadSets();
         auto& tasksRunner = dataTx->GetKqpTasksRunner();
+        TSysLocks& sysLocks = DataShard.SysLocksTable();
 
         ui64 consumedMemory = dataTx->GetTxSize() + tasksRunner.GetAllocatedMemory();
         if (MaybeRequestMoreTxMemory(consumedMemory, txc)) {
@@ -177,18 +183,30 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
             // We need to clear OutReadSets and AwaitingDecisions for
             // volatile transactions, except when we commit them.
             if (!keepOutReadSets) {
-                tx->OutReadSets().clear();
-                tx->AwaitingDecisions().clear();
+                outReadSets.clear();
+                awaitingDecisions.clear();
             }
         };
 
-        const bool validated = op->HasVolatilePrepareFlag()
-            ? KqpValidateVolatileTx(tabletId, tx, DataShard.SysLocksTable())
-            : KqpValidateLocks(tabletId, tx, DataShard.SysLocksTable());
+        auto [validated, brokenLocks] = op->HasVolatilePrepareFlag()
+            ? KqpValidateVolatileTx(tabletId, sysLocks, kqpLocks, useGenericReadSets,
+                txId, tx->DelayedInReadSets(), awaitingDecisions, outReadSets)
+            : KqpValidateLocks(tabletId, sysLocks, kqpLocks, useGenericReadSets, inReadSets);
 
         if (!validated) {
-            KqpEraseLocks(tabletId, tx, DataShard.SysLocksTable());
-            DataShard.SysLocksTable().ApplyLocks();
+            tx->Result() = MakeHolder<TEvDataShard::TEvProposeTransactionResult>(
+                NKikimrTxDataShard::TX_KIND_DATA,
+                tabletId,
+                txId,
+                NKikimrTxDataShard::TEvProposeTransactionResult::LOCKS_BROKEN
+            );
+
+            for (auto& brokenLock : brokenLocks) {
+                tx->Result()->Record.MutableTxLocks()->Add()->Swap(&brokenLock);
+            }
+
+            KqpEraseLocks(tabletId, kqpLocks, sysLocks);
+            sysLocks.ApplyLocks();
             DataShard.SubscribeNewLocks(ctx);
             if (locksDb.HasChanges()) {
                 op->SetWaitCompletionFlag(true);
@@ -199,14 +217,9 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
 
         auto allocGuard = tasksRunner.BindAllocator(txc.GetMemoryLimit() - dataTx->GetTxSize());
 
-        NKqp::NRm::TKqpResourcesRequest req;
-        req.MemoryPool = NKqp::NRm::EKqpMemoryPool::DataQuery;
-        req.Memory = txc.GetMemoryLimit();
-        ui64 taskId = dataTx->GetFirstKqpTaskId();
-        NKqp::GetKqpResourceManager()->NotifyExternalResourcesAllocated(tx->GetTxId(), taskId, req);
-
+        NKqp::GetKqpResourceManager()->GetCounters()->RmExternalMemory->Add(txc.GetMemoryLimit());
         Y_DEFER {
-            NKqp::GetKqpResourceManager()->NotifyExternalResourcesFreed(tx->GetTxId(), taskId);
+            NKqp::GetKqpResourceManager()->GetCounters()->RmExternalMemory->Sub(txc.GetMemoryLimit());
         };
 
         LOG_T("Operation " << *op << " (execute_kqp_data_tx) at " << tabletId
@@ -220,17 +233,19 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
         dataTx->SetWriteVersion(writeVersion);
 
         if (op->HasVolatilePrepareFlag()) {
-            dataTx->SetVolatileTxId(tx->GetTxId());
+            dataTx->SetVolatileTxId(txId);
         }
 
         LWTRACK(ProposeTransactionKqpDataExecute, op->Orbit);
 
-        KqpCommitLocks(tabletId, tx, writeVersion, DataShard);
+        const bool isArbiter = op->HasVolatilePrepareFlag() && KqpLocksIsArbiter(tabletId, kqpLocks);
+
+        KqpCommitLocks(tabletId, kqpLocks, sysLocks, writeVersion, tx->GetDataTx()->GetUserDb());
 
         auto& computeCtx = tx->GetDataTx()->GetKqpComputeCtx();
 
         auto result = KqpCompleteTransaction(ctx, tabletId, op->GetTxId(),
-            op->HasKqpAttachedRSFlag() ? nullptr : &op->InReadSets(), kqpLocks, useGenericReadSets, tasksRunner, computeCtx);
+            op->HasKqpAttachedRSFlag() ? nullptr : &op->InReadSets(), useGenericReadSets, tasksRunner, computeCtx);
 
         if (!result && computeCtx.HadInconsistentReads()) {
             LOG_T("Operation " << *op << " (execute_kqp_data_tx) at " << tabletId
@@ -319,23 +334,28 @@ EExecutionStatus TExecuteKqpDataTxUnit::Execute(TOperation::TPtr op, TTransactio
         op->SetKqpAttachedRSFlag();
 
         if (dataTx->GetCounters().InvisibleRowSkips && op->LockTxId()) {
-            DataShard.SysLocksTable().BreakSetLocks();
+            sysLocks.BreakSetLocks();
         }
 
         // Note: any transaction (e.g. immediate or non-volatile) may decide to commit as volatile due to dependencies
         // Such transactions would have no participants and become immediately committed
         auto commitTxIds = dataTx->GetVolatileCommitTxIds();
         if (commitTxIds) {
-            TVector<ui64> participants(tx->AwaitingDecisions().begin(), tx->AwaitingDecisions().end());
+            TVector<ui64> participants(awaitingDecisions.begin(), awaitingDecisions.end());
             DataShard.GetVolatileTxManager().PersistAddVolatileTx(
-                tx->GetTxId(),
+                txId,
                 writeVersion,
                 commitTxIds,
                 dataTx->GetVolatileDependencies(),
                 participants,
                 dataTx->GetVolatileChangeGroup(),
                 dataTx->GetVolatileCommitOrdered(),
+                isArbiter,
                 txc);
+        }
+
+        if (dataTx->GetPerformedUserReads()) {
+            op->SetPerformedUserReads(true);
         }
 
         if (op->HasVolatilePrepareFlag()) {

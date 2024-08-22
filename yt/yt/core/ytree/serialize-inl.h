@@ -17,7 +17,6 @@
 #include <library/cpp/yt/misc/cast.h>
 
 #include <optional>
-#include <numeric>
 
 namespace NYT::NYTree {
 
@@ -92,7 +91,7 @@ struct TMapKeyHelper<T, true>
         consumer->OnKeyedItem(FormatEnum(value));
     }
 
-    static void Deserialize(T& value, const TString& key)
+    static void Deserialize(T& value, const std::string& key)
     {
         value = ParseEnum<T>(key);
     }
@@ -106,7 +105,7 @@ struct TMapKeyHelper<T, false>
         consumer->OnKeyedItem(ToString(value));
     }
 
-    static void Deserialize(T& value, const TString& key)
+    static void Deserialize(T& value, const std::string& key)
     {
         value = FromString<T>(key);
     }
@@ -115,12 +114,12 @@ struct TMapKeyHelper<T, false>
 template <>
 struct TMapKeyHelper<TGuid, false>
 {
-    static void Serialize(const TGuid& value, NYson::IYsonConsumer* consumer)
+    static void Serialize(TGuid value, NYson::IYsonConsumer* consumer)
     {
         consumer->OnKeyedItem(ToString(value));
     }
 
-    static void Deserialize(TGuid& value, const TString& key)
+    static void Deserialize(TGuid& value, const std::string& key)
     {
         value = TGuid::FromString(key);
     }
@@ -155,6 +154,9 @@ void DeserializeSet(T& value, INodePtr node)
     auto listNode = node->AsList();
     auto size = listNode->GetChildCount();
     value.clear();
+    if constexpr (requires {value.reserve(size);}) {
+        value.reserve(size);
+    }
     for (int i = 0; i < size; ++i) {
         typename T::value_type item;
         Deserialize(item, listNode->GetChildOrThrow(i));
@@ -167,6 +169,9 @@ void DeserializeMap(T& value, INodePtr node)
 {
     auto mapNode = node->AsMap();
     value.clear();
+    if constexpr (requires {value.reserve(mapNode->GetChildCount());}) {
+        value.reserve(mapNode->GetChildCount());
+    }
     for (const auto& [serializedKey, serializedItem] : mapNode->GetChildren()) {
         typename T::key_type key;
         TMapKeyHelper<typename T::key_type>::Deserialize(key, serializedKey);
@@ -280,7 +285,7 @@ void WriteYson(
     NYson::EYsonFormat format,
     int indent)
 {
-    NYson::TYsonWriter writer(output, format, type, /* enableRaw */ false, indent);
+    NYson::TYsonWriter writer(output, format, type, /*enableRaw*/ false, indent);
     Serialize(value, &writer);
 }
 
@@ -373,14 +378,14 @@ void Serialize(const TCompactVector<T, N>& items, NYson::IYsonConsumer* consumer
 
 // RepeatedPtrField
 template <class T>
-void Serialize(const NProtoBuf::RepeatedPtrField<T>& items, NYson::IYsonConsumer* consumer)
+void Serialize(const google::protobuf::RepeatedPtrField<T>& items, NYson::IYsonConsumer* consumer)
 {
     NDetail::SerializeVector(items, consumer);
 }
 
 // RepeatedField
 template <class T>
-void Serialize(const NProtoBuf::RepeatedField<T>& items, NYson::IYsonConsumer* consumer)
+void Serialize(const google::protobuf::RepeatedField<T>& items, NYson::IYsonConsumer* consumer)
 {
     NDetail::SerializeVector(items, consumer);
 }
@@ -426,11 +431,11 @@ void Serialize(const C<T...>& value, NYson::IYsonConsumer* consumer)
 }
 
 template <class E, class T, E Min, E Max>
-void Serialize(const TEnumIndexedVector<E, T, Min, Max>& vector, NYson::IYsonConsumer* consumer)
+void Serialize(const TEnumIndexedArray<E, T, Min, Max>& vector, NYson::IYsonConsumer* consumer)
 {
     consumer->OnBeginMap();
     for (auto key : TEnumTraits<E>::GetDomainValues()) {
-        if (!vector.IsDomainValue(key)) {
+        if (!vector.IsValidIndex(key)) {
             continue;
         }
         const auto& value = vector[key];
@@ -605,13 +610,13 @@ void Deserialize(C<T...>& value, INodePtr node)
 }
 
 template <class E, class T, E Min, E Max>
-void Deserialize(TEnumIndexedVector<E, T, Min, Max>& vector, INodePtr node)
+void Deserialize(TEnumIndexedArray<E, T, Min, Max>& vector, INodePtr node)
 {
     vector = {};
     auto mapNode = node->AsMap();
     for (const auto& [stringKey, child] : mapNode->GetChildren()) {
         auto key = ParseEnum<E>(stringKey);
-        if (!vector.IsDomainValue(key)) {
+        if (!vector.IsValidIndex(key)) {
             THROW_ERROR_EXCEPTION("Enum value %Qlv is out of supported range",
                 key);
         }
@@ -626,24 +631,15 @@ void DeserializeProtobufMessage(
     const NYson::TProtobufWriterOptions& options = {});
 
 template <class T>
+    requires std::derived_from<T, google::protobuf::Message>
 void Deserialize(
     T& message,
-    const INodePtr& node,
-    typename std::enable_if<std::is_convertible<T*, google::protobuf::Message*>::value, void>::type*)
+    const INodePtr& node)
 {
     NYson::TProtobufWriterOptions options;
     options.UnknownYsonFieldModeResolver = NYson::TProtobufWriterOptions::CreateConstantUnknownYsonFieldModeResolver(
         NYson::EUnknownYsonFieldsMode::Keep);
     DeserializeProtobufMessage(message, NYson::ReflectProtobufMessageType<T>(), node, options);
-}
-
-template <class T>
-void Deserialize(
-    T& message,
-    NYson::TYsonPullParserCursor* cursor,
-    typename std::enable_if<std::is_convertible<T*, google::protobuf::Message*>::value, void>::type*)
-{
-    Deserialize(message, NYson::ExtractTo<NYTree::INodePtr>(cursor));
 }
 
 template <class T, class TTag>

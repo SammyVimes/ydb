@@ -29,9 +29,8 @@
 #include <ydb/library/yql/providers/common/comp_nodes/yql_factory.h>
 #include <ydb/library/yql/providers/ydb/comp_nodes/yql_ydb_factory.h>
 #include <ydb/library/yql/providers/ydb/comp_nodes/yql_ydb_dq_transform.h>
+#include <ydb/library/yql/providers/s3/actors/yql_s3_actors_factory_impl.h>
 
-#include <ydb/library/yql/providers/s3/actors/yql_s3_sink_factory.h>
-#include <ydb/library/yql/providers/s3/actors/yql_s3_source_factory.h>
 #include <ydb/library/yql/providers/ydb/actors/yql_ydb_source_factory.h>
 #include <ydb/library/yql/providers/clickhouse/actors/yql_ch_source_factory.h>
 
@@ -109,11 +108,14 @@ NDq::IDqAsyncIoFactory::TPtr CreateAsyncIoFactory(const NYdb::TDriver& driver, I
     auto factory = MakeIntrusive<NYql::NDq::TDqAsyncIoFactory>();
     RegisterDqPqReadActorFactory(*factory, driver, nullptr);
     RegisterYdbReadActorFactory(*factory, driver, nullptr);
-    RegisterS3ReadActorFactory(*factory, nullptr, httpGateway);
     RegisterClickHouseReadActorFactory(*factory, nullptr, httpGateway);
-
     RegisterDqPqWriteActorFactory(*factory, driver, nullptr);
-    RegisterS3WriteActorFactory(*factory, nullptr, httpGateway);
+
+    auto s3ActorsFactory = NYql::NDq::CreateS3ActorsFactory();
+    auto retryPolicy = GetHTTPDefaultRetryPolicy();
+    s3ActorsFactory->RegisterS3WriteActorFactory(*factory, nullptr, httpGateway, retryPolicy);
+    s3ActorsFactory->RegisterS3ReadActorFactory(*factory, nullptr, httpGateway, retryPolicy);
+
     return factory;
 }
 
@@ -177,6 +179,7 @@ int main(int argc, char** argv) {
     opts.AddLongOption("disable_pipe", "Disable pipe").NoArgument();
     opts.AddLongOption("log_level", "Log Level");
     opts.AddLongOption("ipv4", "Use ipv4").NoArgument();
+    opts.AddLongOption("enable-spilling", "Enable disk spilling").NoArgument();
 
     ui32 threads = THREAD_PER_NODE;
     TString host;
@@ -388,7 +391,6 @@ int main(int argc, char** argv) {
         NYql::NDqs::TLocalWorkerManagerOptions lwmOptions;
         bool disablePipe = res.Has("disable_pipe");
         NKikimr::NMiniKQL::IStatsRegistryPtr statsRegistry = NKikimr::NMiniKQL::CreateDefaultStatsRegistry();
-
         lwmOptions.Factory = disablePipe
             ? NTaskRunnerProxy::CreateFactory(functionRegistry.Get(), dqCompFactory, dqTaskTransformFactory, patternCache, true)
             : NTaskRunnerProxy::CreatePipeFactory(pfOptions);
@@ -398,30 +400,33 @@ int main(int argc, char** argv) {
         lwmOptions.TaskRunnerInvokerFactory = disablePipe
             ? TTaskRunnerInvokerFactory::TPtr(new NDqs::TTaskRunnerInvokerFactory())
             : TTaskRunnerInvokerFactory::TPtr(new TConcurrentInvokerFactory(2*capacity));
+        YQL_ENSURE(functionRegistry);
         lwmOptions.TaskRunnerActorFactory = disablePipe
-            ? NDq::NTaskRunnerActor::CreateLocalTaskRunnerActorFactory([=](const NDq::TDqTaskSettings& task, NDqProto::EDqStatsMode statsMode, const NDq::TLogFunc& )
+            ? NDq::NTaskRunnerActor::CreateLocalTaskRunnerActorFactory([=](std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc, const NDq::TDqTaskSettings& task, NDqProto::EDqStatsMode statsMode, const NDq::TLogFunc& )
                 {
-                    return lwmOptions.Factory->Get(task, statsMode);
+                    return lwmOptions.Factory->Get(alloc, task, statsMode);
                 })
             : NTaskRunnerActor::CreateTaskRunnerActorFactory(lwmOptions.Factory, lwmOptions.TaskRunnerInvokerFactory);
         lwmOptions.ComputeActorOwnsCounters = true;
-        lwmOptions.UseSpilling = true;
+        bool enableSpilling = res.Has("enable-spilling");
         auto resman = NDqs::CreateLocalWorkerManager(lwmOptions);
 
         auto workerManagerActorId = actorSystem->Register(resman);
         actorSystem->RegisterLocalService(MakeWorkerManagerActorID(nodeId), workerManagerActorId);
 
-        auto spillingActor = actorSystem->Register(
-            NDq::CreateDqLocalFileSpillingService(
-                NDq::TFileSpillingServiceConfig{
-                    .Root = "./spilling",
-                    .CleanupOnShutdown = true
-                },
-                MakeIntrusive<NDq::TSpillingCounters>(dqSensors)
-            )
-        );
+        if (enableSpilling) {
+            auto spillingActor = actorSystem->Register(
+                NDq::CreateDqLocalFileSpillingService(
+                    NDq::TFileSpillingServiceConfig{
+                        .Root = "./spilling",
+                        .CleanupOnShutdown = true
+                    },
+                    MakeIntrusive<NDq::TSpillingCounters>(dqSensors)
+                )
+            );
 
-        actorSystem->RegisterLocalService(NDq::MakeDqLocalFileSpillingServiceID(nodeId), spillingActor);
+            actorSystem->RegisterLocalService(NDq::MakeDqLocalFileSpillingServiceID(nodeId), spillingActor);
+        }
 
         auto endFuture = ShouldContinue.GetFuture();
 

@@ -25,13 +25,6 @@ DEFINE_BIT_ENUM(EPollControl,
     ((Shutdown)     (0x400))    // Shutdown in progress  (for external use)
 );
 
-//! Poller may provide separate sets of threads for handling pollables of
-//! various priorities.
-DEFINE_ENUM(EPollablePriority,
-    ((Normal)    (0))
-    ((RealTime)  (1))
-);
-
 ////////////////////////////////////////////////////////////////////////////////
 
 //! Describes an FD-backed pollable entity.
@@ -49,10 +42,6 @@ struct IPollable
 
     //! Returns a human-readable string used for diagnostic purposes.
     virtual const TString& GetLoggingTag() const = 0;
-
-    //! Returns the priority of this pollable.
-    //! The result need not be stable (i.e. may vary across calls).
-    virtual EPollablePriority GetPriority() const = 0;
 
     //! Called by the poller when the appropriate event is triggered for the FD.
     virtual void OnEvent(EPollControl control) = 0;
@@ -82,7 +71,10 @@ struct IPoller
 
     //! Tries to register a pollable entity but does not arm the poller yet.
     //! Returns |false| if the poller is already shutting down.
-    virtual bool TryRegister(const IPollablePtr& pollable) = 0;
+    virtual bool TryRegister(const IPollablePtr& pollable, TString poolName = "default") = 0;
+
+    //! Method must be called inside OnEvent.
+    virtual void SetExecutionPool(const IPollablePtr& pollable, TString poolName) = 0;
 
     //! Unregisters the previously registered entity.
     /*!

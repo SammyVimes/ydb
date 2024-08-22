@@ -79,6 +79,14 @@ YT_DEFINE_ERROR_ENUM(
     ((LocationCrashed)                       (750))
     ((LocationDiskWaitingReplacement)        (751))
     ((ChunkMetaCacheFetchFailed)             (752))
+    ((LocationMediumIsMisconfigured)         (753))
+    ((DiskIdsMismatched)                     (754))
+    ((LocationDisabled)                      (755))
+    ((DiskFailed)                            (756))
+    ((DiskWaitingReplacement)                (757))
+    ((LockFileIsFound)                       (758))
+    ((DiskHealthCheckFailed)                 (759))
+    ((TooManyChunksToFetch)                  (760))
 );
 
 using TChunkId = NObjectClient::TObjectId;
@@ -132,6 +140,8 @@ using TChunkReplicaWithMediumList = TCompactVector<TChunkReplicaWithMedium, Typi
 
 class TChunkReplicaWithLocation;
 using TChunkReplicaWithLocationList = TCompactVector<TChunkReplicaWithLocation, TypicalReplicaCount>;
+
+struct TWrittenChunkReplicasInfo;
 
 class TChunkReplica;
 using TChunkReplicaList = TCompactVector<TChunkReplica, TypicalReplicaCount>;

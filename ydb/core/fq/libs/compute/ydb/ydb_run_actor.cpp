@@ -98,23 +98,41 @@ public:
     }
 
     void Handle(const TEvYdbCompute::TEvStatusTrackerResponse::TPtr& ev) {
+        if (CancelOperationIsRunning("StatusTrackerResponse (aborting). ")) {
+            return;
+        }
+
         auto& response = *ev->Get();
+        if (response.Status == NYdb::EStatus::NOT_FOUND) { // FAILING / ABORTING_BY_USER / ABORTING_BY_SYSTEM
+            LOG_I("StatusTrackerResponse (not found). Status: " << response.Status << " Issues: " << response.Issues.ToOneLineString());
+            CreateFinalizer(Params.Status);
+            return;
+        }
+
         if (response.Status != NYdb::EStatus::SUCCESS) {
             LOG_I("StatusTrackerResponse (failed). Status: " << response.Status << " Issues: " << response.Issues.ToOneLineString());
             ResignAndPassAway(response.Issues);
             return;
         }
-        ExecStatus = response.ExecStatus;
-        Params.Status = response.ComputeStatus;
+
+        if (!OperationIsFailing() || response.ExecStatus != NYdb::NQuery::EExecStatus::Completed) {
+            ExecStatus = response.ExecStatus;
+            Params.Status = response.ComputeStatus;
+        }
+
         LOG_I("StatusTrackerResponse (success) " << response.Status << " ExecStatus: " << static_cast<int>(response.ExecStatus) << " Issues: " << response.Issues.ToOneLineString());
-        if (response.ExecStatus == NYdb::NQuery::EExecStatus::Completed) {
-            Register(ActorFactory->CreateResultWriter(SelfId(), Connector, Pinger, Params.OperationId).release());
+        if (ExecStatus == NYdb::NQuery::EExecStatus::Completed) {
+            Register(ActorFactory->CreateResultWriter(SelfId(), Connector, Pinger, Params.OperationId, true).release());
         } else {
-            Register(ActorFactory->CreateResourcesCleaner(SelfId(), Connector, Params.OperationId).release());
+            CreateResourcesCleaner();
         }
     }
 
     void Handle(const TEvYdbCompute::TEvResultWriterResponse::TPtr& ev) {
+        if (CancelOperationIsRunning("ResultWriterResponse (aborting). ")) {
+            return;
+        }
+
         auto& response = *ev->Get();
         if (response.Status != NYdb::EStatus::SUCCESS) {
             LOG_I("ResultWriterResponse (failed). Status: " << response.Status << " Issues: " << response.Issues.ToOneLineString());
@@ -122,7 +140,7 @@ public:
             return;
         }
         LOG_I("ResultWriterResponse (success) " << response.Status << " Issues: " << response.Issues.ToOneLineString());
-        Register(ActorFactory->CreateResourcesCleaner(SelfId(), Connector, Params.OperationId).release());
+        CreateResourcesCleaner();
     }
 
     void Handle(const TEvYdbCompute::TEvResourcesCleanerResponse::TPtr& ev) {
@@ -133,22 +151,23 @@ public:
             return;
         }
         LOG_I("ResourcesCleanerResponse (success) " << response.Status << " Issues: " << response.Issues.ToOneLineString());
-        Register(ActorFactory->CreateFinalizer(Params, SelfId(), Pinger, ExecStatus, IsAborted ? FederatedQuery::QueryMeta::ABORTING_BY_USER : Params.Status).release());
+        CreateFinalizer(IsAborted ? FederatedQuery::QueryMeta::ABORTING_BY_USER : Params.Status);
     }
 
     void Handle(const TEvYdbCompute::TEvFinalizerResponse::TPtr ev) {
         // Pinger is no longer available at this place.
         // The query can be restarted only after the expiration of lease in case of error
         auto& response = *ev->Get();
-        LOG_I("FinalizerResponse ( " << (response.Status == NYdb::EStatus::SUCCESS ? "success" : "failed") << ") " << response.Status << " Issues: " << response.Issues.ToOneLineString());
+        LOG_I("FinalizerResponse ( " << (response.Status == NYdb::EStatus::SUCCESS ? "success" : "failed") << " ) " << response.Status << " Issues: " << response.Issues.ToOneLineString());
         FinishAndPassAway();
     }
 
     void Handle(TEvents::TEvQueryActionResult::TPtr& ev) {
         LOG_I("QueryActionResult: " << FederatedQuery::QueryAction_Name(ev->Get()->Action));
-        if (Params.OperationId.GetKind() != Ydb::TOperationId::UNUSED && !IsAborted) {
+        // Start cancel operation only when StatusTracker or ResultWriter is running
+        if (Params.OperationId.GetKind() != Ydb::TOperationId::UNUSED && !IsAborted && !FinalizationStarted) {
             IsAborted = true;
-            Register(ActorFactory->CreateStopper(SelfId(), Connector, Params.OperationId).release());
+            Register(ActorFactory->CreateStopper(SelfId(), Connector, Pinger, Params.OperationId).release());
         }
     }
 
@@ -160,7 +179,7 @@ public:
             return;
         }
         LOG_I("StopperResponse (success) " << response.Status << " Issues: " << response.Issues.ToOneLineString());
-        Register(ActorFactory->CreateResourcesCleaner(SelfId(), Connector, Params.OperationId).release());
+        CreateResourcesCleaner();
     }
 
     void Run() { // recover points
@@ -177,18 +196,18 @@ public:
             break;
         case FederatedQuery::QueryMeta::COMPLETING:
             if (Params.OperationId.GetKind() != Ydb::TOperationId::UNUSED) {
-                Register(ActorFactory->CreateResultWriter(SelfId(), Connector, Pinger, Params.OperationId).release());
+                Register(ActorFactory->CreateResultWriter(SelfId(), Connector, Pinger, Params.OperationId, false).release());
             } else {
-                Register(ActorFactory->CreateFinalizer(Params, SelfId(), Pinger, ExecStatus, Params.Status).release());
+                CreateFinalizer(Params.Status);
             }
             break;
         case FederatedQuery::QueryMeta::FAILING:
         case FederatedQuery::QueryMeta::ABORTING_BY_USER:
         case FederatedQuery::QueryMeta::ABORTING_BY_SYSTEM:
             if (Params.OperationId.GetKind() != Ydb::TOperationId::UNUSED) {
-                Register(ActorFactory->CreateResourcesCleaner(SelfId(), Connector, Params.OperationId).release());
+                Register(ActorFactory->CreateStatusTracker(SelfId(), Connector, Pinger, Params.OperationId).release());
             } else {
-                Register(ActorFactory->CreateFinalizer(Params, SelfId(), Pinger, ExecStatus, Params.Status).release());
+                CreateFinalizer(Params.Status);
             }
             break;
         default:
@@ -197,6 +216,7 @@ public:
     }
 
     void ResignAndPassAway(const NYql::TIssues& issues) {
+        Send(FetcherId, new NActors::TEvents::TEvPoisonTaken());
         Fq::Private::PingTaskRequest pingTaskRequest;
         NYql::IssuesToMessage(issues, pingTaskRequest.mutable_transient_issues());
         pingTaskRequest.set_resign_query(true);
@@ -208,12 +228,39 @@ public:
     }
 
     void FinishAndPassAway() {
+        Send(FetcherId, new NActors::TEvents::TEvPoisonTaken());
         Send(Connector, new NActors::TEvents::TEvPoisonPill());
         PassAway();
     }
 
+    void CreateResourcesCleaner() {
+        FinalizationStarted = true;
+        Register(ActorFactory->CreateResourcesCleaner(SelfId(), Connector, Params.OperationId).release());
+    }
+
+    void CreateFinalizer(FederatedQuery::QueryMeta::ComputeStatus status) {
+        FinalizationStarted = true;
+        Register(ActorFactory->CreateFinalizer(Params, SelfId(), Pinger, ExecStatus, status).release());
+    }
+
+    bool CancelOperationIsRunning(const TString& stage) const {
+        if (!IsAborted) {
+            return false;
+        }
+
+        LOG_I(stage << "Stop task execution, cancel operation now is running");
+        return true;
+    }
+
+    bool OperationIsFailing() const {
+        return Params.Status == FederatedQuery::QueryMeta::FAILING
+            || Params.Status == FederatedQuery::QueryMeta::ABORTING_BY_USER
+            || Params.Status == FederatedQuery::QueryMeta::ABORTING_BY_SYSTEM;
+    }
+
 private:
     bool IsAborted = false;
+    bool FinalizationStarted = false;
     TActorId FetcherId;
     NYdb::NQuery::EExecStatus ExecStatus = NYdb::NQuery::EExecStatus::Unspecified;
     TRunActorParams Params;

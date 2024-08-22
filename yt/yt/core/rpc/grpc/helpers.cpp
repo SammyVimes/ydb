@@ -49,11 +49,6 @@ TStringBuf ToStringBuf(const grpc_slice& slice)
         GRPC_SLICE_LENGTH(slice));
 }
 
-TString ToString(const grpc_slice& slice)
-{
-    return TString(ToStringBuf(slice));
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
 TStringBuf TGrpcMetadataArray::Find(const char* key) const
@@ -73,7 +68,7 @@ THashMap<TString, TString> TGrpcMetadataArray::ToMap() const
     THashMap<TString, TString> result;
     for (size_t index = 0; index < Native_.count; ++index) {
         const auto& metadata = Native_.metadata[index];
-        result[ToString(metadata.key)] = ToString(metadata.value);
+        result[NYT::ToString(metadata.key)] = NYT::ToString(metadata.value);
     }
     return result;
 }
@@ -108,7 +103,7 @@ size_t TGrpcSlice::Size() const
 
 TString TGrpcSlice::AsString() const
 {
-    return NGrpc::ToString(Native_);
+    return NYT::ToString(Native_);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -267,7 +262,8 @@ struct TMessageTag
 
 TMessageWithAttachments ByteBufferToMessageWithAttachments(
     grpc_byte_buffer* buffer,
-    std::optional<ui32> messageBodySize)
+    std::optional<ui32> messageBodySize,
+    bool enveloped)
 {
     TMessageWithAttachments result;
 
@@ -279,28 +275,39 @@ TMessageWithAttachments ByteBufferToMessageWithAttachments(
         messageBodySize = bufferSize;
     }
 
-    NYT::NProto::TSerializedMessageEnvelope envelope;
-    // Codec remains "none".
+    TSharedMutableRef data;
+    char* targetMessage;
 
-    TEnvelopeFixedHeader fixedHeader;
-    fixedHeader.EnvelopeSize = envelope.ByteSize();
-    fixedHeader.MessageSize = *messageBodySize;
+    if (enveloped) {
+        NYT::NProto::TSerializedMessageEnvelope envelope;
+        // Codec remains "none".
 
-    size_t totalMessageSize =
-        sizeof (TEnvelopeFixedHeader) +
-        fixedHeader.EnvelopeSize +
-        fixedHeader.MessageSize;
+        TEnvelopeFixedHeader fixedHeader;
+        fixedHeader.EnvelopeSize = envelope.ByteSize();
+        fixedHeader.MessageSize = *messageBodySize;
 
-    auto data = TSharedMutableRef::Allocate<TMessageTag>(
-        totalMessageSize,
-        {.InitializeStorage = false});
+        size_t totalMessageSize =
+            sizeof (TEnvelopeFixedHeader) +
+            fixedHeader.EnvelopeSize +
+            fixedHeader.MessageSize;
 
-    char* targetFixedHeader = data.Begin();
-    char* targetHeader = targetFixedHeader + sizeof (TEnvelopeFixedHeader);
-    char* targetMessage = targetHeader + fixedHeader.EnvelopeSize;
+        data = TSharedMutableRef::Allocate<TMessageTag>(
+            totalMessageSize,
+            {.InitializeStorage = false});
 
-    memcpy(targetFixedHeader, &fixedHeader, sizeof (fixedHeader));
-    YT_VERIFY(envelope.SerializeToArray(targetHeader, fixedHeader.EnvelopeSize));
+        char* targetFixedHeader = data.Begin();
+        char* targetHeader = targetFixedHeader + sizeof (TEnvelopeFixedHeader);
+        targetMessage = targetHeader + fixedHeader.EnvelopeSize;
+
+        memcpy(targetFixedHeader, &fixedHeader, sizeof (fixedHeader));
+        YT_VERIFY(envelope.SerializeToArray(targetHeader, fixedHeader.EnvelopeSize));
+    } else {
+        data = TSharedMutableRef::Allocate<TMessageTag>(
+            *messageBodySize,
+            {.InitializeStorage = false});
+
+        targetMessage = data.begin();
+    }
 
     TGrpcByteBufferStream stream(buffer);
 
@@ -600,3 +607,8 @@ void TGuardedGrpcCompletionQueue::Release()
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NYT::NRpc::NGrpc
+
+void FormatValue(NYT::TStringBuilderBase* builder, const grpc_slice& slice, TStringBuf spec)
+{
+    FormatValue(builder, NYT::NRpc::NGrpc::ToStringBuf(slice), spec);
+}

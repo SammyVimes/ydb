@@ -1,4 +1,5 @@
 #include "restore_corrupted_blob_actor.h"
+#include <ydb/core/blobstorage/vdisk/hulldb/base/hullds_heap_it.h>
 
 namespace NKikimr {
 
@@ -196,6 +197,8 @@ namespace NKikimr {
         }
 
         void IssueQuery() {
+            STLOG(PRI_DEBUG, BS_VDISK_SCRUB, VDS00, VDISKP(LogPrefix, "IssueQuery"), (SelfId, SelfId()));
+
             std::unique_ptr<TEvRecoverBlob> ev;
             for (size_t i = 0; i < Items.size(); ++i) {
                 const auto& item = Items[i];
@@ -205,6 +208,8 @@ namespace NKikimr {
                         ev->Deadline = Deadline;
                     }
                     ev->Items.emplace_back(item.BlobId, TStackVec<TRope, 8>(item.Parts), item.PartsMask, item.Needed, TDiskPart(), i);
+                    STLOG(PRI_DEBUG, BS_VDISK_SCRUB, VDS17, VDISKP(LogPrefix, "IssueQuery item"), (SelfId, SelfId()),
+                        (BlobId, item.BlobId), (PartsMask, item.PartsMask), (Needed, item.Needed));
                 }
             }
             if (ev) {
@@ -222,6 +227,8 @@ namespace NKikimr {
         }
 
         void Handle(TEvRecoverBlobResult::TPtr ev) {
+            STLOG(PRI_DEBUG, BS_VDISK_SCRUB, VDS24, VDISKP(LogPrefix, "Handle(TEvRecoverBlobResult)"), (SelfId, SelfId()));
+
             for (auto& item : ev->Get()->Items) {
                 auto& myItem = Items[item.Cookie];
                 Y_ABORT_UNLESS(myItem.Status == NKikimrProto::UNKNOWN);
@@ -233,6 +240,8 @@ namespace NKikimr {
                         IssueWrite(myItem, item.Cookie);
                     }
                 }
+                STLOG(PRI_DEBUG, BS_VDISK_SCRUB, VDS43, VDISKP(LogPrefix, "Handle(TEvRecoverBlobResult) item"),
+                    (SelfId, SelfId()), (BlobId, item.BlobId), (Status, item.Status), (PartsMask, item.PartsMask));
             }
             for (const auto& item : Items) {
                 if (item.Status == NKikimrProto::UNKNOWN) {

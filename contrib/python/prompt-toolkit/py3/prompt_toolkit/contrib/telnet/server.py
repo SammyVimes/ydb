@@ -1,13 +1,14 @@
 """
 Telnet server.
 """
+
 from __future__ import annotations
 
 import asyncio
 import contextvars
 import socket
 from asyncio import get_running_loop
-from typing import Awaitable, Callable, TextIO, cast
+from typing import Any, Callable, Coroutine, TextIO, cast
 
 from prompt_toolkit.application.current import create_app_session, get_app
 from prompt_toolkit.application.run_in_terminal import run_in_terminal
@@ -99,7 +100,7 @@ class _ConnectionStdout:
             if not self._closed:
                 self._connection.send(b"".join(self._buffer))
         except OSError as e:
-            logger.warning("Couldn't send data over socket: %s" % e)
+            logger.warning(f"Couldn't send data over socket: {e}")
 
         self._buffer = []
 
@@ -124,7 +125,7 @@ class TelnetConnection:
         self,
         conn: socket.socket,
         addr: tuple[str, int],
-        interact: Callable[[TelnetConnection], Awaitable[None]],
+        interact: Callable[[TelnetConnection], Coroutine[Any, Any, None]],
         server: TelnetServer,
         encoding: str,
         style: BaseStyle | None,
@@ -186,7 +187,7 @@ class TelnetConnection:
                 self.feed(data)
             else:
                 # Connection closed by client.
-                logger.info("Connection closed by client. %r %r" % self.addr)
+                logger.info("Connection closed by client. {!r} {!r}".format(*self.addr))
                 self.close()
 
         # Add reader.
@@ -283,7 +284,9 @@ class TelnetServer:
         self,
         host: str = "127.0.0.1",
         port: int = 23,
-        interact: Callable[[TelnetConnection], Awaitable[None]] = _dummy_interact,
+        interact: Callable[
+            [TelnetConnection], Coroutine[Any, Any, None]
+        ] = _dummy_interact,
         encoding: str = "utf-8",
         style: BaseStyle | None = None,
         enable_cpr: bool = True,
@@ -414,7 +417,7 @@ class TelnetServer:
                 # Unhandled control-c propagated by a prompt.
                 logger.info("Unhandled KeyboardInterrupt in telnet application.")
             except BaseException as e:
-                print("Got %s" % type(e).__name__, e)
+                print(f"Got {type(e).__name__}", e)
                 import traceback
 
                 traceback.print_exc()

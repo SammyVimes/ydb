@@ -1,11 +1,14 @@
 #pragma once
 
 #include "actorsystem.h"
+#include "config.h"
 #include "executor_thread.h"
+#include "executor_thread_ctx.h"
 #include "executor_pool_basic_feature_flags.h"
 #include "scheduler_queue.h"
 #include "executor_pool_base.h"
 #include "harmonizer.h"
+#include <memory>
 #include <ydb/library/actors/actor_type/indexes.h>
 #include <ydb/library/actors/util/unordered_cache.h>
 #include <ydb/library/actors/util/threadparkpad.h>
@@ -18,6 +21,9 @@
 #include <queue>
 
 namespace NActors {
+
+    class TExecutorPoolJail;
+    class TBasicExecutorPoolSanitizer;
 
     struct TWaitingStatsConstants {
         static constexpr ui64 BucketCount = 128;
@@ -122,46 +128,22 @@ namespace NActors {
         }
     };
 
+
+
     class TBasicExecutorPool: public TExecutorPoolBase {
-        struct TThreadCtx {
-            TAutoPtr<TExecutorThread> Thread;
-            TThreadParkPad WaitingPad;
-            TAtomic WaitingFlag;
-            std::atomic<i64> StartWakingTs;
-            std::atomic<i64> EndWakingTs;
-
-            enum EWaitState {
-                WS_NONE,
-                WS_ACTIVE,
-                WS_BLOCKED,
-                WS_RUNNING
-            };
-
-            TThreadCtx()
-                : WaitingFlag(WS_NONE)
-            {
-            }
-        };
-
-        struct TTimers {
-            NHPTimer::STime Elapsed = 0;
-            NHPTimer::STime Parked = 0;
-            NHPTimer::STime HPStart = GetCycleCountFast();
-            NHPTimer::STime HPNow;
-        };
+        friend class TBasicExecutorPoolSanitizer;
 
         NThreading::TPadded<std::atomic_bool> AllThreadsSleep = true;
         const ui64 DefaultSpinThresholdCycles;
         std::atomic<ui64> SpinThresholdCycles;
         std::unique_ptr<NThreading::TPadded< std::atomic<ui64>>[]> SpinThresholdCyclesPerThread;
 
-        TArrayHolder<NThreading::TPadded<TThreadCtx>> Threads;
+        TArrayHolder<NThreading::TPadded<TExecutorThreadCtx>> Threads;
         static_assert(sizeof(std::decay_t<decltype(Threads[0])>) == PLATFORM_CACHE_LINE);
         TArrayHolder<NThreading::TPadded<std::queue<ui32>>> LocalQueues;
         TArrayHolder<TWaitingStats<ui64>> WaitingStats;
         TArrayHolder<TWaitingStats<double>> MovingWaitingStats;
         std::atomic<ui16> LocalQueueSize;
-
 
         TArrayHolder<NSchedulerQueue::TReader> ScheduleReaders;
         TArrayHolder<NSchedulerQueue::TWriter> ScheduleWriters;
@@ -169,28 +151,38 @@ namespace NActors {
         const TString PoolName;
         const TDuration TimePerMailbox;
         const ui32 EventsPerMailbox;
-        EASProfile ActorSystemProfile;
 
         const int RealtimePriority;
 
-        TAtomic ThreadUtilization;
-        TAtomic MaxUtilizationCounter;
-        TAtomic MaxUtilizationAccumulator;
-        TAtomic WrongWakenedThreadCount;
+        TAtomic ThreadUtilization = 0;
+        TAtomic MaxUtilizationCounter = 0;
+        TAtomic MaxUtilizationAccumulator = 0;
+        TAtomic WrongWakenedThreadCount = 0;
         std::atomic<ui64> SpinningTimeUs;
 
         TAtomic ThreadCount;
         TMutex ChangeThreadsLock;
 
-        i16 MinThreadCount;
-        i16 MaxThreadCount;
-        i16 DefaultThreadCount;
+        float MinThreadCount;
+        i16 MinFullThreadCount;
+        float MaxThreadCount;
+        i16 MaxFullThreadCount;
+        float DefaultThreadCount;
+        i16 DefaultFullThreadCount;
         IHarmonizer *Harmonizer;
-        i16 SharedExecutorsCount = 0;
         ui64 SoftProcessingDurationTs = 0;
+        bool HasOwnSharedThread = false;
 
         const i16 Priority = 0;
         const ui32 ActorSystemIndex = NActors::TActorTypeOperator::GetActorSystemIndex();
+        TExecutorPoolJail *Jail = nullptr;
+
+        static constexpr ui64 MaxSharedThreadsForPool = 2;
+        NThreading::TPadded<std::atomic_uint64_t> SharedThreadsCount = 0;
+        NThreading::TPadded<std::atomic<TSharedExecutorThreadCtx*>> SharedThreads[MaxSharedThreadsForPool] = {nullptr, nullptr};
+
+        std::unique_ptr<TBasicExecutorPoolSanitizer> Sanitizer;
+
     public:
         struct TSemaphore {
             i64 OldSemaphore = 0; // 34 bits
@@ -199,7 +191,7 @@ namespace NActors {
             // Sign bit
             i16 CurrentThreadCount = 0; // 14 bits
 
-            inline i64 ConverToI64() {
+            inline i64 ConvertToI64() {
                 i64 value = (1ll << 34) + OldSemaphore;
                 return value
                     | (((i64)CurrentSleepThreadCount + (1 << 14)) << 35)
@@ -215,6 +207,7 @@ namespace NActors {
             }
         };
 
+        const EASProfile ActorSystemProfile;
         static constexpr TDuration DEFAULT_TIME_PER_MAILBOX = TBasicExecutorPoolConfig::DEFAULT_TIME_PER_MAILBOX;
         static constexpr ui32 DEFAULT_EVENTS_PER_MAILBOX = TBasicExecutorPoolConfig::DEFAULT_EVENTS_PER_MAILBOX;
 
@@ -231,11 +224,11 @@ namespace NActors {
                            i16 minThreadCount = 0,
                            i16 maxThreadCount = 0,
                            i16 defaultThreadCount = 0,
-                           i16 priority = 0);
-        explicit TBasicExecutorPool(const TBasicExecutorPoolConfig& cfg, IHarmonizer *harmonizer);
+                           i16 priority = 0,
+                           bool hasOwnSharedThread = false,
+                           TExecutorPoolJail *jail = nullptr);
+        explicit TBasicExecutorPool(const TBasicExecutorPoolConfig& cfg, IHarmonizer *harmonizer, TExecutorPoolJail *jail=nullptr);
         ~TBasicExecutorPool();
-
-        void SetSharedExecutorsCount(i16 count);
 
         void Initialize(TWorkerContext& wctx) override;
         ui32 GetReadyActivation(TWorkerContext& wctx, ui64 revolvingReadCounter) override;
@@ -258,17 +251,23 @@ namespace NActors {
         void Shutdown() override;
 
         void GetCurrentStats(TExecutorPoolStats& poolStats, TVector<TExecutorThreadStats>& statsCopy) const override;
+        void GetExecutorPoolState(TExecutorPoolState &poolState) const override;
         TString GetName() const override {
             return PoolName;
         }
 
         void SetRealTimeMode() const override;
 
-        i16 GetThreadCount() const override;
-        void SetThreadCount(i16 threads) override;
-        i16 GetDefaultThreadCount() const override;
-        i16 GetMinThreadCount() const override;
-        i16 GetMaxThreadCount() const override;
+        ui32 GetThreads() const override;
+        float GetThreadCount() const override;
+        i16 GetFullThreadCount() const override;
+        void SetFullThreadCount(i16 threads) override;
+        float GetDefaultThreadCount() const override;
+        i16 GetDefaultFullThreadCount() const override;
+        float GetMinThreadCount() const override;
+        i16 GetMinFullThreadCount() const override;
+        float GetMaxThreadCount() const override;
+        i16 GetMaxFullThreadCount() const override;
         TCpuConsumption GetThreadCpuConsumption(i16 threadIdx) override;
         i16 GetBlockingThreadCount() const override;
         i16 GetPriority() const override;
@@ -279,13 +278,13 @@ namespace NActors {
         void CalcSpinPerThread(ui64 wakingUpConsumption);
         void ClearWaitingStats() const;
 
+        TSharedExecutorThreadCtx* ReleaseSharedThread();
+        void AddSharedThread(TSharedExecutorThreadCtx* thread);
+
     private:
         void AskToGoToSleep(bool *needToWait, bool *needToBlock);
 
         void WakeUpLoop(i16 currentThreadCount);
-        bool GoToWaiting(TThreadCtx& threadCtx, TTimers &timers, bool needToBlock);
-        ui32 GoToSpin(TThreadCtx& threadCtx, i64 start, i64 &end);
-        bool GoToSleep(TThreadCtx& threadCtx, TTimers &timers);
-        bool GoToBeBlocked(TThreadCtx& threadCtx, TTimers &timers);
+        bool WakeUpLoopShared();
     };
 }

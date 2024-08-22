@@ -3,7 +3,7 @@
 (let Unequals (lambda '(value) (lambda '(x) (!= x value))))
 
 (let FindIndex (lambda '(list predicate) (block '(
-   (let enumerated (Enumerate list))
+   (let enumerated (Enumerate (Coalesce list (EmptyList))))
    (let filtered (Filter enumerated (lambda '(x) (Coalesce (Apply predicate (Nth x '1)) (Bool '0)))))
    (return (Nth (ToOptional filtered) '0))
 ))))
@@ -85,8 +85,9 @@ def signature(script, name):
         name = name.decode("utf-8")
 
     try:
-        exec(script)
-        func = locals()[name]
+        local_variables = {}
+        exec(script, None, local_variables)
+        func = local_variables[name]
         if typing is not None and hasattr(func, "__annotations__"):
             ann = func.__annotations__
             if ann:

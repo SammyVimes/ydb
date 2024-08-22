@@ -44,6 +44,7 @@
 #include <ydb/core/persqueue/pq.h>
 #include <ydb/core/sys_view/processor/processor.h>
 #include <ydb/core/statistics/aggregator/aggregator.h>
+#include <ydb/core/graph/api/shard.h>
 
 #include <ydb/core/testlib/basics/storage.h>
 #include <ydb/core/testlib/basics/appdata.h>
@@ -87,14 +88,14 @@ namespace NKikimr {
             const ui64 tabletId = ev->Get()->TabletId;
             auto& entry = Entries[tabletId];
             if (!entry) {
-                entry = new TMediatorTimecastEntry();
+                entry = new TMediatorTimecastSharedEntry();
             }
 
-            ctx.Send(ev->Sender, new TEvMediatorTimecast::TEvRegisterTabletResult(tabletId, entry));
+            ctx.Send(ev->Sender, new TEvMediatorTimecast::TEvRegisterTabletResult(tabletId, new TMediatorTimecastEntry(entry, entry)));
         }
 
     private:
-        THashMap<ui64, TIntrusivePtr<TMediatorTimecastEntry>> Entries;
+        THashMap<ui64, TIntrusivePtr<TMediatorTimecastSharedEntry>> Entries;
     };
 
     void SetupMediatorTimecastProxy(TTestActorRuntime& runtime, ui32 nodeIndex, bool useFake = false)
@@ -132,15 +133,12 @@ namespace NKikimr {
             }
 
             const auto& domainsInfo = app->Domains;
-            if (!domainsInfo || domainsInfo->Domains.size() == 0) {
+            if (!domainsInfo || !domainsInfo->Domain) {
                 return;
             }
 
-            Y_ABORT_UNLESS(domainsInfo->Domains.size() == 1);
-            for (const auto &xpair : domainsInfo->Domains) {
-                const TDomainsInfo::TDomain *domain = xpair.second.Get();
-                UseFakeTimeCast |= domain->Mediators.size() == 0;
-            }
+            const TDomainsInfo::TDomain *domain = domainsInfo->GetDomain();
+            UseFakeTimeCast |= domain->Mediators.size() == 0;
         }
 
         void Birth(ui32 node) noexcept override
@@ -669,9 +667,8 @@ namespace NKikimr {
         return prev;
     }
 
-    void SetupChannelProfiles(TAppPrepare &app, ui32 domainId, ui32 nchannels) {
-        Y_ABORT_UNLESS(app.Domains && app.Domains->Domains.contains(domainId));
-        auto& poolKinds = app.Domains->GetDomain(domainId).StoragePoolTypes;
+    void SetupChannelProfiles(TAppPrepare &app, ui32 nchannels) {
+        auto& poolKinds = app.Domains->GetDomain()->StoragePoolTypes;
         Y_ABORT_UNLESS(!poolKinds.empty());
 
         TIntrusivePtr<TChannelProfiles> channelProfiles = new TChannelProfiles;
@@ -716,7 +713,7 @@ namespace NKikimr {
         app.SetChannels(std::move(channelProfiles));
     }
 
-    void SetupBoxAndStoragePool(TTestActorRuntime &runtime, const TActorId& sender, ui32 domainId, ui32 nGroups) {
+    void SetupBoxAndStoragePool(TTestActorRuntime &runtime, const TActorId& sender, ui32 nGroups) {
         NTabletPipe::TClientConfig pipeConfig;
         pipeConfig.RetryPolicy = NTabletPipe::TClientRetryPolicy::WithRetries();
 
@@ -746,13 +743,13 @@ namespace NKikimr {
         host.SetHostConfigId(hostConfig.GetHostConfigId());
         bsConfigureRequest->Record.MutableRequest()->AddCommand()->MutableDefineBox()->CopyFrom(boxConfig);
 
-        for (const auto& [kind, pool] : runtime.GetAppData().DomainsInfo->Domains[domainId]->StoragePoolTypes) {
+        for (const auto& [kind, pool] : runtime.GetAppData().DomainsInfo->GetDomain()->StoragePoolTypes) {
             NKikimrBlobStorage::TDefineStoragePool storagePool(pool);
             storagePool.SetNumGroups(nGroups);
             bsConfigureRequest->Record.MutableRequest()->AddCommand()->MutableDefineStoragePool()->CopyFrom(storagePool);
         }
 
-        runtime.SendToPipe(MakeBSControllerID(domainId), sender, bsConfigureRequest.Release(), 0, GetPipeConfigWithRetries());
+        runtime.SendToPipe(MakeBSControllerID(), sender, bsConfigureRequest.Release(), 0, GetPipeConfigWithRetries());
 
         TAutoPtr<IEventHandle> handleConfigureResponse;
         auto configureResponse = runtime.GrabEdgeEventRethrow<TEvBlobStorage::TEvControllerConfigResponse>(handleConfigureResponse);
@@ -895,7 +892,6 @@ namespace NKikimr {
         if (SUPPRESS_REBOOTS || GetEnv("FAST_UT")=="1")
             return;
 
-        ui32 runCount = 0;
         ui32 eventCountBeforeReboot = 0;
         if (selectedReboot != Max<ui32>()) {
             eventCountBeforeReboot = selectedReboot;
@@ -913,7 +909,6 @@ namespace NKikimr {
                 Cout << "===> BEGIN dispatch: " << dispatchName << "\n";
 
             try {
-                ++runCount;
                 activeZone = false;
                 TTestActorRuntime::TEventFilter filter = filterFactory();
                 TPipeResetObserver pipeResetingObserver(eventCountBeforeReboot, activeZone, filter, tabletIds);
@@ -1147,6 +1142,8 @@ namespace NKikimr {
                 HFunc(TEvHive::TEvInitiateTabletExternalBoot, Handle);
                 HFunc(TEvHive::TEvUpdateTabletsObject, Handle);
                 HFunc(TEvFakeHive::TEvSubscribeToTabletDeletion, Handle);
+                HFunc(TEvHive::TEvUpdateDomain, Handle);
+                HFunc(TEvFakeHive::TEvRequestDomainInfo, Handle);
                 HFunc(TEvents::TEvPoisonPill, Handle);
             }
         }
@@ -1221,6 +1218,8 @@ namespace NKikimr {
                     bootstrapperActorId = Boot(ctx, type, &CreatePersQueue, DataGroupErasure);
                 } else if (type == TTabletTypes::StatisticsAggregator) {
                     bootstrapperActorId = Boot(ctx, type, &NStat::CreateStatisticsAggregator, DataGroupErasure);
+                } else if (type == TTabletTypes::GraphShard) {
+                    bootstrapperActorId = Boot(ctx, type, &NGraph::CreateGraphShard, DataGroupErasure);
                 } else {
                     status = NKikimrProto::ERROR;
                 }
@@ -1435,6 +1434,29 @@ namespace NKikimr {
             response->Record.SetTxId(ev->Get()->Record.GetTxId());
             response->Record.SetTxPartId(ev->Get()->Record.GetTxPartId());
             ctx.Send(ev->Sender, response.release(), 0, ev->Cookie);
+        }
+
+        void Handle(TEvHive::TEvUpdateDomain::TPtr &ev, const TActorContext &ctx) {
+            LOG_INFO_S(ctx, NKikimrServices::HIVE, "[" << TabletID() << "] TEvUpdateDomain, msg: " << ev->Get()->Record.ShortDebugString());
+            
+            const TSubDomainKey subdomainKey(ev->Get()->Record.GetDomainKey());
+            NHive::TDomainInfo& domainInfo = State->Domains[subdomainKey];
+            if (ev->Get()->Record.HasServerlessComputeResourcesMode()) {
+                domainInfo.ServerlessComputeResourcesMode = ev->Get()->Record.GetServerlessComputeResourcesMode();
+            } else {
+                domainInfo.ServerlessComputeResourcesMode.Clear();
+            }
+            
+            auto response = std::make_unique<TEvHive::TEvUpdateDomainReply>();
+            response->Record.SetTxId(ev->Get()->Record.GetTxId());
+            response->Record.SetOrigin(TabletID());
+            ctx.Send(ev->Sender, response.release(), 0, ev->Cookie);
+        }
+
+        void Handle(TEvFakeHive::TEvRequestDomainInfo::TPtr &ev, const TActorContext &ctx) {
+            LOG_INFO_S(ctx, NKikimrServices::HIVE, "[" << TabletID() << "] TEvRequestDomainInfo, " << ev->Get()->DomainKey);
+            auto response = std::make_unique<TEvFakeHive::TEvRequestDomainInfoReply>(State->Domains[ev->Get()->DomainKey]);
+            ctx.Send(ev->Sender, response.release());
         }
 
         void Handle(TEvFakeHive::TEvSubscribeToTabletDeletion::TPtr &ev, const TActorContext &ctx) {

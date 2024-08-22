@@ -20,6 +20,7 @@
 #include <yt/yt/core/ytree/convert.h>
 #include <yt/yt/core/ytree/ephemeral_node_factory.h>
 #include <yt/yt/core/ytree/tree_builder.h>
+#include <yt/yt/core/ytree/fluent.h>
 
 #include <yt/yt_proto/yt/core/ytree/proto/attributes.pb.h>
 
@@ -77,7 +78,7 @@ namespace {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-const NLogging::TLogger Logger("ProtobufInterop");
+YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "ProtobufInterop");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -131,14 +132,15 @@ bool IsMapKeyType(FieldDescriptor::Type type)
 TString ToUnderscoreCase(const TString& protobufName)
 {
     TStringBuilder builder;
-    for (auto ch : protobufName) {
-        if (isupper(ch)) {
-            if (builder.GetLength() > 0 && builder.GetBuffer()[builder.GetLength() - 1] != '_') {
+    for (size_t i = 0; i < protobufName.size(); ++i) {
+        if (isupper(protobufName[i])) {
+            size_t length = builder.GetLength();
+            if (length && builder.GetBuffer()[length - 1] != '_' && !isupper(protobufName[i - 1])) {
                 builder.AppendChar('_');
             }
-            builder.AppendChar(tolower(ch));
+            builder.AppendChar(tolower(protobufName[i]));
         } else {
-            builder.AppendChar(ch);
+            builder.AppendChar(protobufName[i]);
         }
     }
     return builder.Flush();
@@ -157,7 +159,7 @@ TString DeriveYsonName(const TString& protobufName, const google::protobuf::File
 
 struct TProtobufInteropConfigSingleton
 {
-    TAtomicIntrusivePtr<TProtobufInteropDynamicConfig> Config{New<TProtobufInteropDynamicConfig>()};
+    TAtomicIntrusivePtr<TProtobufInteropConfig> Config{New<TProtobufInteropConfig>()};
 };
 
 TProtobufInteropConfigSingleton* GlobalProtobufInteropConfig()
@@ -165,7 +167,7 @@ TProtobufInteropConfigSingleton* GlobalProtobufInteropConfig()
     return LeakySingleton<TProtobufInteropConfigSingleton>();
 }
 
-TProtobufInteropDynamicConfigPtr GetProtobufInteropConfig()
+TProtobufInteropConfigPtr GetProtobufInteropConfig()
 {
     return GlobalProtobufInteropConfig()->Config.Acquire();
 }
@@ -176,10 +178,12 @@ TProtobufInteropDynamicConfigPtr GetProtobufInteropConfig()
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void SetProtobufInteropConfig(TProtobufInteropDynamicConfigPtr config)
+void SetProtobufInteropConfig(TProtobufInteropConfigPtr config)
 {
     GlobalProtobufInteropConfig()->Config.Store(std::move(config));
 }
+
+void WriteSchema(const TProtobufEnumType* enumType, IYsonConsumer* consumer);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -193,7 +197,7 @@ public:
 
         return GetYsonNameFromDescriptor(
             descriptor,
-            descriptor->options().GetExtension(NYT::NYson::NProto::field_name));
+            FromProto<TString>(descriptor->options().GetExtension(NYT::NYson::NProto::field_name)));
     }
 
     //! This method is called while reflecting types.
@@ -202,9 +206,9 @@ public:
         VERIFY_SPINLOCK_AFFINITY(Lock_);
 
         std::vector<TStringBuf> aliases;
-        auto extensions = descriptor->options().GetRepeatedExtension(NYT::NYson::NProto::field_name_alias);
+        const auto& extensions = descriptor->options().GetRepeatedExtension(NYT::NYson::NProto::field_name_alias);
         for (const auto& alias : extensions) {
-            aliases.push_back(InternString(alias));
+            aliases.push_back(InternString(FromProto<TString>(alias)));
         }
         return aliases;
     }
@@ -216,7 +220,7 @@ public:
 
         return GetYsonNameFromDescriptor(
             descriptor,
-            descriptor->options().GetExtension(NYT::NYson::NProto::enum_value_name));
+            FromProto<TString>(descriptor->options().GetExtension(NYT::NYson::NProto::enum_value_name)));
     }
 
     const TProtobufMessageType* ReflectMessageType(const Descriptor* descriptor)
@@ -273,7 +277,7 @@ public:
         int fieldNumber,
         const TProtobufMessageBytesFieldConverter& converter)
     {
-        EmplaceOrCrash(MessageFieldConverterMap_, std::make_pair(descriptor, fieldNumber), converter);
+        EmplaceOrCrash(MessageFieldConverterMap_, std::pair(descriptor, fieldNumber), converter);
     }
 
     //! This method is called while reflecting types.
@@ -300,7 +304,7 @@ public:
         VERIFY_SPINLOCK_AFFINITY(Lock_);
 
         auto fieldNumber = descriptor->field(fieldIndex)->number();
-        auto it = MessageFieldConverterMap_.find(std::make_pair(descriptor, fieldNumber));
+        auto it = MessageFieldConverterMap_.find(std::pair(descriptor, fieldNumber));
         if (it == MessageFieldConverterMap_.end()) {
             return std::nullopt;
         } else {
@@ -330,7 +334,9 @@ private:
     template <class TDescriptor>
     TStringBuf GetYsonNameFromDescriptor(const TDescriptor* descriptor, const TString& annotatedName)
     {
-        auto ysonName = annotatedName ? annotatedName : DeriveYsonName(descriptor->name(), descriptor->file());
+        auto ysonName = annotatedName
+            ? annotatedName
+            : DeriveYsonName(FromProto<TString>(descriptor->name()), descriptor->file());
         return InternString(ysonName);
     }
 
@@ -354,7 +360,7 @@ private:
     YT_DECLARE_SPIN_LOCK(TForkAwareSpinLock, Lock_);
     THashMap<const Descriptor*, std::unique_ptr<TProtobufMessageType>> MessageTypeMap_;
     TForkAwareSyncMap<const Descriptor*, const TProtobufMessageType*> MessageTypeSyncMap_;
-    THashMap<const EnumDescriptor*,std::unique_ptr<TProtobufEnumType>> EnumTypeMap_;
+    THashMap<const EnumDescriptor*, std::unique_ptr<TProtobufEnumType>> EnumTypeMap_;
     TForkAwareSyncMap<const EnumDescriptor*, const TProtobufEnumType*> EnumTypeSyncMap_;
 
     THashMap<const Descriptor*, TProtobufMessageConverter> MessageTypeConverterMap_;
@@ -373,6 +379,7 @@ public:
     TProtobufField(TProtobufTypeRegistry* registry, const FieldDescriptor* descriptor)
         : Underlying_(descriptor)
         , YsonName_(registry->GetYsonName(descriptor))
+        , FullName_(FromProto<TString>(Underlying_->full_name()))
         , YsonNameAliases_(registry->GetYsonNameAliases(descriptor))
         , MessageType_(descriptor->type() == FieldDescriptor::TYPE_MESSAGE ? registry->ReflectMessageTypeInternal(
             descriptor->message_type()) : nullptr)
@@ -382,7 +389,9 @@ public:
         , YsonMap_(descriptor->options().GetExtension(NYT::NYson::NProto::yson_map))
         , Required_(descriptor->options().GetExtension(NYT::NYson::NProto::required))
         , Converter_(registry->FindMessageBytesFieldConverter(descriptor->containing_type(), descriptor->index()))
-        , EnumYsonStorageType_(descriptor->options().GetExtension(NYT::NYson::NProto::enum_yson_storage_type))
+        , EnumYsonStorageType_(descriptor->options().HasExtension(NYT::NYson::NProto::enum_yson_storage_type) ?
+            std::optional(descriptor->options().GetExtension(NYT::NYson::NProto::enum_yson_storage_type)) :
+            std::nullopt)
     {
         if (YsonMap_ && !descriptor->is_map()) {
             THROW_ERROR_EXCEPTION("Field %v is not a map and cannot be annotated with \"yson_map\" option",
@@ -410,7 +419,7 @@ public:
 
     const TString& GetFullName() const
     {
-        return Underlying_->full_name();
+        return FullName_;
     }
 
     TStringBuf GetYsonName() const
@@ -493,14 +502,96 @@ public:
         return Converter_;
     }
 
-    const NYT::NYson::NProto::EEnumYsonStorageType& GetEnumYsonStorageType() const
+    EEnumYsonStorageType GetEnumYsonStorageType() const
     {
-        return EnumYsonStorageType_;
+        if (EnumYsonStorageType_) {
+            switch (*EnumYsonStorageType_) {
+                case NYT::NYson::NProto::EEnumYsonStorageType::EYST_STRING:
+                    return EEnumYsonStorageType::String;
+                case NYT::NYson::NProto::EEnumYsonStorageType::EYST_INT:
+                    return EEnumYsonStorageType::Int;
+            }
+        }
+
+        auto config = GetProtobufInteropConfig();
+        return config->DefaultEnumYsonStorageType;
+    }
+
+    void WriteSchema(IYsonConsumer* consumer) const
+    {
+        if (IsYsonMap()) {
+            BuildYsonFluently(consumer)
+                .BeginMap()
+                    .Item("type_name").Value("dict")
+                    .Item("key").Do([&] (auto fluent) {
+                        GetYsonMapKeyField()->WriteSchema(fluent.GetConsumer());
+                    })
+                    .Item("value").Do([&] (auto fluent) {
+                        GetYsonMapValueField()->WriteSchema(fluent.GetConsumer());
+                    })
+                .EndMap();
+
+            return;
+        }
+        if (IsRepeated()) {
+            consumer->OnBeginMap();
+            consumer->OnKeyedItem("type_name");
+            consumer->OnStringScalar("list");
+            consumer->OnKeyedItem("item");
+        }
+
+        switch (GetType()) {
+            case FieldDescriptor::TYPE_FIXED32:
+            case FieldDescriptor::TYPE_UINT32:
+                consumer->OnStringScalar("uint32");
+                break;
+            case FieldDescriptor::TYPE_FIXED64:
+            case FieldDescriptor::TYPE_UINT64:
+                consumer->OnStringScalar("uint64");
+                break;
+            case FieldDescriptor::TYPE_INT32:
+            case FieldDescriptor::TYPE_SINT32:
+            case FieldDescriptor::TYPE_SFIXED32:
+                consumer->OnStringScalar("int32");
+                break;
+            case FieldDescriptor::TYPE_INT64:
+            case FieldDescriptor::TYPE_SINT64:
+            case FieldDescriptor::TYPE_SFIXED64:
+                consumer->OnStringScalar("int64");
+                break;
+            case FieldDescriptor::TYPE_BOOL:
+                consumer->OnStringScalar("bool");
+                break;
+            case FieldDescriptor::TYPE_FLOAT:
+                consumer->OnStringScalar("float");
+                break;
+            case FieldDescriptor::TYPE_DOUBLE:
+                consumer->OnStringScalar("double");
+                break;
+            case FieldDescriptor::TYPE_STRING:
+                consumer->OnStringScalar("utf8");
+                break;
+            case FieldDescriptor::TYPE_BYTES:
+                consumer->OnStringScalar("string");
+                break;
+            case FieldDescriptor::TYPE_ENUM:
+                NYson::WriteSchema(GetEnumType(), consumer);
+                break;
+            case FieldDescriptor::TYPE_MESSAGE:
+                NYson::WriteSchema(GetMessageType(), consumer);
+                break;
+            default:
+                break;
+        }
+        if (IsRepeated()) {
+            consumer->OnEndMap();
+        }
     }
 
 private:
     const FieldDescriptor* const Underlying_;
     const TStringBuf YsonName_;
+    const TString FullName_;
     const std::vector<TStringBuf> YsonNameAliases_;
     const TProtobufMessageType* MessageType_;
     const TProtobufEnumType* EnumType_;
@@ -508,7 +599,7 @@ private:
     const bool YsonMap_;
     const bool Required_;
     const std::optional<TProtobufMessageBytesFieldConverter> Converter_;
-    const NYT::NYson::NProto::EEnumYsonStorageType EnumYsonStorageType_;
+    const std::optional<NYT::NYson::NProto::EEnumYsonStorageType> EnumYsonStorageType_;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -520,6 +611,7 @@ public:
         : Registry_(registry)
         , Underlying_(descriptor)
         , AttributeDictionary_(descriptor->options().GetExtension(NYT::NYson::NProto::attribute_dictionary))
+        , FullName_(FromProto<TString>(Underlying_->full_name()))
         , Converter_(registry->FindMessageTypeConverter(descriptor))
     { }
 
@@ -538,7 +630,7 @@ public:
         }
 
         for (int index = 0; index < Underlying_->reserved_name_count(); ++index) {
-            ReservedFieldNames_.insert(Underlying_->reserved_name(index));
+            ReservedFieldNames_.insert(FromProto<TString>(Underlying_->reserved_name(index)));
         }
     }
 
@@ -554,7 +646,7 @@ public:
 
     const TString& GetFullName() const
     {
-        return Underlying_->full_name();
+        return FullName_;
     }
 
     const std::vector<int>& GetRequiredFieldNumbers() const
@@ -617,10 +709,32 @@ public:
         }
     }
 
+    void WriteSchema(IYsonConsumer* consumer) const
+    {
+        BuildYsonFluently(consumer).BeginMap()
+            .Item("type_name").Value("struct")
+            .Item("members").DoListFor(0, Underlying_->field_count(), [&] (auto fluent, int index) {
+                auto* field = GetFieldByNumber(Underlying_->field(index)->number());
+                fluent.Item()
+                    .BeginMap()
+                        .Item("name").Value(field->GetYsonName())
+                        .Item("type").Do([&] (auto fluent) {
+                            field->WriteSchema(fluent.GetConsumer());
+                        })
+                        .DoIf(!field->IsYsonMap() && !field->IsRepeated() && !field->IsOptional(), [] (auto fluent) {
+                            fluent.Item("required").Value(true);
+                        })
+                    .EndMap();
+            })
+            .EndMap();
+    }
+
 private:
     TProtobufTypeRegistry* const Registry_;
     const Descriptor* const Underlying_;
     const bool AttributeDictionary_;
+
+    const TString FullName_;
 
     std::vector<std::unique_ptr<TProtobufField>> Fields_;
     std::vector<int> RequiredFieldNumbers_;
@@ -679,7 +793,8 @@ TProtobufElement TProtobufField::GetElement(bool insideRepeated) const
         });
     } else {
         return std::make_unique<TProtobufScalarElement>(TProtobufScalarElement{
-            static_cast<TProtobufScalarElement::TType>(GetType())
+            static_cast<TProtobufScalarElement::TType>(GetType()),
+            GetEnumYsonStorageType()
         });
     }
 }
@@ -692,6 +807,7 @@ public:
     TProtobufEnumType(TProtobufTypeRegistry* registry, const EnumDescriptor* descriptor)
         : Registry_(registry)
         , Underlying_(descriptor)
+        , FullName_(FromProto<TString>(Underlying_->full_name()))
     { }
 
     void Build()
@@ -714,7 +830,7 @@ public:
 
     const TString& GetFullName() const
     {
-        return Underlying_->full_name();
+        return FullName_;
     }
 
     std::optional<int> FindValueByLiteral(TStringBuf literal) const
@@ -729,9 +845,23 @@ public:
         return it == ValueToLiteral_.end() ? TStringBuf() : it->second;
     }
 
+    void WriteSchema(IYsonConsumer* consumer) const
+    {
+        BuildYsonFluently(consumer)
+            .BeginMap()
+                .Item("type_name").Value("enum")
+                .Item("enum_name").Value(Underlying_->name())
+                .Item("values").DoListFor(0, Underlying_->value_count(), [&] (auto fluent, int index) {
+                    fluent.Item().Value(FindLiteralByValue(Underlying_->value(index)->number()));
+                })
+            .EndMap();
+    }
+
 private:
     TProtobufTypeRegistry* const Registry_;
     const EnumDescriptor* const Underlying_;
+
+    const TString FullName_;
 
     THashMap<TStringBuf, int> LiteralToValue_;
     THashMap<int, TStringBuf> ValueToLiteral_;
@@ -901,22 +1031,20 @@ protected:
         }
         switch (config->Utf8Check) {
             case EUtf8Check::Disable:
-                break;
+                return;
             case EUtf8Check::LogOnFail:
-                YT_LOG_WARNING("Field %v accepts only valid UTF-8 sequence, but got (%Qv)",
+                YT_LOG_WARNING("String field got non UTF-8 value (Path: %v, Value: %v)",
                     YPathStack_.GetHumanReadablePath(),
                     data);
-                break;
+                return;
             case EUtf8Check::ThrowOnFail:
-                THROW_ERROR_EXCEPTION("Field %v accepts only valid UTF-8 sequence, but got (%Qv)",
-                    YPathStack_.GetHumanReadablePath(),
-                    data)
+                THROW_ERROR_EXCEPTION("Non UTF-8 value in string field %v",
+                    YPathStack_.GetHumanReadablePath())
+                    << TErrorAttribute("non_utf8_string", data)
                     << TErrorAttribute("ypath", YPathStack_.GetPath())
                     << TErrorAttribute("proto_field", fieldFullName);
-                break;
         }
     }
-
 };
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -950,7 +1078,7 @@ private:
     const TProtobufMessageType* const RootType_;
     const TProtobufWriterOptions Options_;
 
-    TString BodyString_;
+    TProtobufString BodyString_;
     google::protobuf::io::StringOutputStream BodyOutputStream_;
     google::protobuf::io::CodedOutputStream BodyCodedStream_;
 
@@ -1004,7 +1132,7 @@ private:
     TStringOutput YsonStringStream_;
     TBufferedBinaryYsonWriter YsonStringWriter_;
 
-    TString SerializedMessage_;
+    TProtobufString SerializedMessage_;
     TString BytesString_;
 
     TString UnknownYsonFieldKey_;
@@ -1792,10 +1920,10 @@ private:
                 std::unique_ptr<Message> message(MessageFactory::generated_factory()->GetPrototype(messageType->GetUnderlying())->New());
                 converter.Deserializer(message.get(), node);
                 SerializedMessage_.clear();
-                Y_PROTOBUF_SUPPRESS_NODISCARD message->SerializeToString(&SerializedMessage_);
+                Y_UNUSED(message->SerializeToString(&SerializedMessage_));
                 WriteTag();
                 BodyCodedStream_.WriteVarint64(SerializedMessage_.length());
-                BodyCodedStream_.WriteRaw(SerializedMessage_.begin(), static_cast<int>(SerializedMessage_.length()));
+                BodyCodedStream_.WriteRaw(SerializedMessage_.data(), static_cast<int>(SerializedMessage_.length()));
                 FieldStack_.pop_back();
                 YPathStack_.Pop();
             });
@@ -2395,13 +2523,12 @@ private:
 
                     case FieldDescriptor::TYPE_ENUM: {
                         ParseScalar([&] {
-                            using NYT::NYson::NProto::EEnumYsonStorageType;
-                            switch(field->GetEnumYsonStorageType()) {
-                                case EEnumYsonStorageType::EYST_INT:
-                                    storeEnumAsInt(unsignedValue);
-                                    break;
-                                case EEnumYsonStorageType::EYST_STRING:
+                            switch (field->GetEnumYsonStorageType()) {
+                                case EEnumYsonStorageType::String:
                                     storeEnumAsString(unsignedValue);
+                                    break;
+                                case EEnumYsonStorageType::Int:
+                                    storeEnumAsInt(unsignedValue);
                                     break;
                             }
                         });
@@ -2565,7 +2692,7 @@ private:
                             std::unique_ptr<Message> message(MessageFactory::generated_factory()->GetPrototype(messageType->GetUnderlying())->New());
                             PooledString_.resize(length);
                             CodedStream_.ReadRaw(PooledString_.data(), PooledString_.size());
-                            Y_PROTOBUF_SUPPRESS_NODISCARD message->ParseFromArray(PooledString_.data(), PooledString_.size());
+                            Y_UNUSED(message->ParseFromArray(PooledString_.data(), PooledString_.size()));
                             converter.Serializer(Consumer_, message.get());
                             YPathStack_.Pop();
                         } else {
@@ -2638,13 +2765,12 @@ private:
 
                     case FieldDescriptor::TYPE_ENUM: {
                         ParseVarintPacked<ui32>(length, field, [&] (auto value) {
-                            using NYT::NYson::NProto::EEnumYsonStorageType;
-                            switch(field->GetEnumYsonStorageType()) {
-                                case EEnumYsonStorageType::EYST_INT:
-                                    storeEnumAsInt(value);
-                                    break;
-                                case EEnumYsonStorageType::EYST_STRING:
+                            switch (field->GetEnumYsonStorageType()) {
+                                case EEnumYsonStorageType::String:
                                     storeEnumAsString(value);
+                                    break;
+                                case EEnumYsonStorageType::Int:
+                                    storeEnumAsInt(value);
                                     break;
                             }
                         });
@@ -3030,11 +3156,21 @@ TString YsonStringToProto(
     const TProtobufMessageType* payloadType,
     TProtobufWriterOptions options)
 {
-    TString serializedProto;
+    TProtobufString serializedProto;
     google::protobuf::io::StringOutputStream protobufStream(&serializedProto);
     auto protobufWriter = CreateProtobufWriter(&protobufStream, payloadType, std::move(options));
     ParseYsonStringBuffer(ysonString.AsStringBuf(), EYsonType::Node, protobufWriter.get());
-    return serializedProto;
+    return FromProto<TString>(serializedProto);
+}
+
+void WriteSchema(const TProtobufEnumType* type, IYsonConsumer* consumer)
+{
+    type->WriteSchema(consumer);
+}
+
+void WriteSchema(const TProtobufMessageType* type, IYsonConsumer* consumer)
+{
+    type->WriteSchema(consumer);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

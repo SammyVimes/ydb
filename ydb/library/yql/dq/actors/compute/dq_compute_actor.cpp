@@ -1,4 +1,4 @@
-#include "dq_compute_actor_impl.h"
+#include "dq_sync_compute_actor_base.h"
 #include "dq_compute_actor.h"
 #include "dq_task_runner_exec_ctx.h"
 
@@ -27,8 +27,8 @@ TDqExecutionSettings& GetDqExecutionSettingsForTests() {
     return ExecutionSettings;
 }
 
-class TDqComputeActor : public TDqComputeActorBase<TDqComputeActor> {
-    using TBase = TDqComputeActorBase<TDqComputeActor>;
+class TDqComputeActor : public TDqSyncComputeActorBase<TDqComputeActor> {
+    using TBase = TDqSyncComputeActorBase<TDqComputeActor>;
 
 public:
     static constexpr char ActorName[] = "DQ_COMPUTE_ACTOR";
@@ -41,7 +41,9 @@ public:
         ::NMonitoring::TDynamicCounterPtr taskCounters)
         : TBase(executerId, txId, task, std::move(asyncIoFactory), functionRegistry, settings, memoryLimits, true, false, taskCounters)
         , TaskRunnerFactory(taskRunnerFactory)
-    {}
+    {
+        InitializeTask();
+    }
 
     void DoBootstrap() {
         const TActorSystem* actorSystem = TlsActivationContext->ActorSystem();
@@ -54,10 +56,11 @@ public:
             };
         }
 
-        auto taskRunner = TaskRunnerFactory(Task, RuntimeSettings.StatsMode, logger);
+        auto taskRunner = TaskRunnerFactory(GetAllocatorPtr(), Task, RuntimeSettings.StatsMode, logger);
         SetTaskRunner(taskRunner);
-        auto wakeup = [this]{ ContinueExecute(EResumeSource::CABootstrapWakeup); };
-        TDqTaskRunnerExecutionContext execCtx(TxId, RuntimeSettings.UseSpilling, std::move(wakeup));
+        auto wakeupCallback = [this]{ ContinueExecute(EResumeSource::CABootstrapWakeup); };
+        auto errorCallback = [this](const TString& error){ SendError(error); };
+        TDqTaskRunnerExecutionContext execCtx(TxId, std::move(wakeupCallback), std::move(errorCallback));
         PrepareTaskRunner(execCtx);
 
         ContinueExecute(EResumeSource::CABootstrap);

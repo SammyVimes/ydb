@@ -2,7 +2,7 @@ import hashlib
 
 from typing import Sequence
 
-from utils.schema import Schema
+from ydb.library.yql.providers.generic.connector.tests.utils.schema import Schema
 from ydb.public.api.protos.ydb_value_pb2 import Type
 
 
@@ -21,13 +21,13 @@ def generate_table_data(schema: Schema, bytes_soft_limit: int) -> Sequence[Seque
                     row.append(ix)
                     actual_size += 8
                 case Type.UTF8:
-                    value = hashlib.md5(str(2).encode('utf-8')).hexdigest()
+                    value = hashlib.md5(str(ix).encode('ascii')).hexdigest()
                     row.append(value)
                     actual_size += len(value)
                 case _:
                     raise ValueError(f'unexpected type {col.ydb_type}')
 
-            rows.append(row)
+        rows.append(row)
 
         ix += 1
 

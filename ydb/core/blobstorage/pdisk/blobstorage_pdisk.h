@@ -173,7 +173,7 @@ struct TEvYardInitResult : public TEventLocal<TEvYardInitResult, TEvBlobStorage:
     TEvYardInitResult(const NKikimrProto::EReplyStatus status, const TString &errorReason)
         : Status(status)
         , StatusFlags(0)
-        , PDiskParams(new TPDiskParams(0, 0, 0, 0, 0, 0, 0, 0, 0, 0))
+        , PDiskParams(new TPDiskParams(0, 0, 0, 0, 0, 0, 0, 0, 0, 0, DEVICE_TYPE_ROT))
         , ErrorReason(errorReason)
     {
         Y_ABORT_UNLESS(status != NKikimrProto::OK, "Single-parameter constructor is for error responses only");
@@ -183,7 +183,7 @@ struct TEvYardInitResult : public TEventLocal<TEvYardInitResult, TEvBlobStorage:
             ui64 writeSpeedBps, ui64 readBlockSize, ui64 writeBlockSize,
             ui64 bulkWriteBlockSize, ui32 chunkSize, ui32 appendBlockSize,
             TOwner owner, TOwnerRound ownerRound, TStatusFlags statusFlags, TVector<TChunkIdx> ownedChunks,
-            const TString &errorReason)
+            EDeviceType trueMediaType, const TString &errorReason)
         : Status(status)
         , StatusFlags(statusFlags)
         , PDiskParams(new TPDiskParams(
@@ -196,8 +196,8 @@ struct TEvYardInitResult : public TEventLocal<TEvYardInitResult, TEvBlobStorage:
                     writeSpeedBps,
                     readBlockSize,
                     writeBlockSize,
-                    bulkWriteBlockSize
-                    ))
+                    bulkWriteBlockSize,
+                    trueMediaType))
         , OwnedChunks(std::move(ownedChunks))
         , ErrorReason(errorReason)
     {}
@@ -327,12 +327,9 @@ struct TEvLog : public TEventLocal<TEvLog, TEvBlobStorage::EvLog> {
 };
 
 struct TEvMultiLog : public TEventLocal<TEvMultiLog, TEvBlobStorage::EvMultiLog> {
-    TBatchedVec<THolder<TEvLog>> Logs;
-    TLsnSeg LsnSeg;
-
-    void AddLog(THolder<TEvLog> &&ev) {
-        Logs.emplace_back(std::move(ev));
-        auto &log = *Logs.back();
+    void AddLog(THolder<TEvLog> &&ev, NWilson::TTraceId traceId = {}) {
+        Logs.emplace_back(std::move(ev), std::move(traceId));
+        auto &log = *Logs.back().Event;
         if (Logs.size() == 1) {
             LsnSeg = TLsnSeg(log.LsnSegmentStart, log.Lsn);
         } else {
@@ -350,11 +347,24 @@ struct TEvMultiLog : public TEventLocal<TEvMultiLog, TEvBlobStorage::EvMultiLog>
         TStringBuilder str;
         str << '{';
         for (ui64 idx = 0; idx < record.Logs.size(); ++idx) {
-            str << (idx ? ", " : "") << idx << "# " << record.Logs[idx]->ToString();
+            str << (idx ? ", " : "") << idx << "# " << record.Logs[idx].Event->ToString();
         }
         str << '}';
         return str;
     }
+
+    struct TItem {
+        TItem(THolder<TEvLog>&& event, NWilson::TTraceId&& traceId)
+            : Event(std::move(event))
+            , TraceId(std::move(traceId))
+        {}
+
+        THolder<TEvLog> Event;
+        NWilson::TTraceId TraceId;
+    };
+
+    TBatchedVec<TItem> Logs;
+    TLsnSeg LsnSeg;
 };
 
 struct TEvLogResult : public TEventLocal<TEvLogResult, TEvBlobStorage::EvLogResult> {
@@ -608,7 +618,7 @@ struct TEvChunkUnlock : public TEventLocal<TEvChunkUnlock, TEvBlobStorage::EvChu
     TOwner Owner = 0;
     TVDiskID VDiskId = TVDiskID::InvalidId;
     bool IsGenerationSet = true;
-    
+
     TEvChunkUnlock(TEvChunkLock::ELockFrom lockFrom)
         : LockFrom(lockFrom)
     {
@@ -643,7 +653,7 @@ struct TEvChunkUnlock : public TEventLocal<TEvChunkUnlock, TEvBlobStorage::EvChu
         str << "{EvChunkLock LockFrom# " << TEvChunkLock::ELockFrom_Name(record.LockFrom);
         if (record.Owner) {
             str << " Owner# " << record.Owner;
-        } 
+        }
         if (record.ByVDiskId) {
             if (record.IsGenerationSet) {
                 str << " VDiskId# " << record.VDiskId.ToString();
@@ -1309,9 +1319,11 @@ struct TEvCheckSpaceResult : public TEventLocal<TEvCheckSpaceResult, TEvBlobStor
     ui32 NumSlots; // number of VSlots over PDisk
     double Occupancy = 0;
     TString ErrorReason;
+    TStatusFlags LogStatusFlags;
 
     TEvCheckSpaceResult(NKikimrProto::EReplyStatus status, TStatusFlags statusFlags, ui32 freeChunks,
-            ui32 totalChunks, ui32 usedChunks, ui32 numSlots, const TString &errorReason)
+            ui32 totalChunks, ui32 usedChunks, ui32 numSlots, const TString &errorReason,
+            TStatusFlags logStatusFlags = {})
         : Status(status)
         , StatusFlags(statusFlags)
         , FreeChunks(freeChunks)
@@ -1319,6 +1331,7 @@ struct TEvCheckSpaceResult : public TEventLocal<TEvCheckSpaceResult, TEvBlobStor
         , UsedChunks(usedChunks)
         , NumSlots(numSlots)
         , ErrorReason(errorReason)
+        , LogStatusFlags(logStatusFlags)
     {}
 
     TString ToString() const {
@@ -1330,6 +1343,7 @@ struct TEvCheckSpaceResult : public TEventLocal<TEvCheckSpaceResult, TEvBlobStor
         str << " UsedChunks# " << UsedChunks;
         str << " NumSlots# " << NumSlots;
         str << " ErrorReason# \"" << ErrorReason << "\"";
+        str << " LogStatusFlags# " << StatusFlagsToString(LogStatusFlags);
         str << "}";
         return str.Str();
     }
@@ -1509,14 +1523,17 @@ struct TEvReadMetadata : TEventLocal<TEvReadMetadata, TEvBlobStorage::EvReadMeta
 struct TEvReadMetadataResult : TEventLocal<TEvReadMetadataResult, TEvBlobStorage::EvReadMetadataResult> {
     EPDiskMetadataOutcome Outcome;
     TRcBuf Metadata;
+    std::optional<ui64> PDiskGuid;
 
-    TEvReadMetadataResult(EPDiskMetadataOutcome outcome)
+    TEvReadMetadataResult(EPDiskMetadataOutcome outcome, std::optional<ui64> pdiskGuid)
         : Outcome(outcome)
+        , PDiskGuid(pdiskGuid)
     {}
 
-    TEvReadMetadataResult(TRcBuf&& metadata)
+    TEvReadMetadataResult(TRcBuf&& metadata, std::optional<ui64> pdiskGuid)
         : Outcome(EPDiskMetadataOutcome::OK)
         , Metadata(std::move(metadata))
+        , PDiskGuid(pdiskGuid)
     {}
 };
 
@@ -1530,9 +1547,11 @@ struct TEvWriteMetadata : TEventLocal<TEvWriteMetadata, TEvBlobStorage::EvWriteM
 
 struct TEvWriteMetadataResult : TEventLocal<TEvWriteMetadataResult, TEvBlobStorage::EvWriteMetadataResult> {
     EPDiskMetadataOutcome Outcome;
+    std::optional<ui64> PDiskGuid;
 
-    TEvWriteMetadataResult(EPDiskMetadataOutcome outcome)
+    TEvWriteMetadataResult(EPDiskMetadataOutcome outcome, std::optional<ui64> pdiskGuid)
         : Outcome(outcome)
+        , PDiskGuid(pdiskGuid)
     {}
 };
 

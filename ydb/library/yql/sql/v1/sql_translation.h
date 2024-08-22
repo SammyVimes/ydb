@@ -1,6 +1,6 @@
 #pragma once
 #include "context.h"
-#include <ydb/library/yql/parser/proto_ast/gen/v1_proto/SQLv1Parser.pb.h>
+#include <ydb/library/yql/parser/proto_ast/gen/v1_proto_split/SQLv1Parser.pb.main.h>
 #include <library/cpp/charset/ci_string.h>
 
 namespace NSQLTranslationV1 {
@@ -101,8 +101,6 @@ TDeferredAtom PureColumnOrNamed(const TRule_pure_column_or_named& node, TTransla
 
 bool PureColumnOrNamedListStr(const TRule_pure_column_or_named_list& node, TTranslation& ctx, TVector<TDeferredAtom>& outList);
 
-bool CreateTableIndex(const TRule_table_index& node, TTranslation& ctx, TVector<TIndexDescription>& indexes);
-
 std::pair<TString, TViewDescription> TableKeyImpl(const std::pair<bool, TString>& nameWithAt, TViewDescription view, TTranslation& ctx);
 
 std::pair<TString, TViewDescription> TableKeyImpl(const TRule_table_key& node, TTranslation& ctx, bool hasAt);
@@ -149,7 +147,7 @@ protected:
 
     bool ImportStatement(const TRule_import_stmt& stmt, TVector<TString>* namesPtr = nullptr);
     TNodePtr DoStatement(const TRule_do_stmt& stmt, bool makeLambda, const TVector<TString>& args = {});
-    bool DefineActionOrSubqueryStatement(const TRule_define_action_or_subquery_stmt& stmt);
+    bool DefineActionOrSubqueryStatement(const TRule_define_action_or_subquery_stmt& stmt, TSymbolNameWithPos& nameAndPos, TNodePtr& lambda);
     bool DefineActionOrSubqueryBody(TSqlQuery& query, TBlocks& blocks, const TRule_define_action_or_subquery_body& body);
     TNodePtr IfStatement(const TRule_if_stmt& stmt);
     TNodePtr ForStatement(const TRule_for_stmt& stmt);
@@ -161,7 +159,7 @@ protected:
     bool ApplyTableBinding(const TString& binding, TTableRef& tr, TTableHints& hints);
 
     TMaybe<TColumnSchema> ColumnSchemaImpl(const TRule_column_schema& node);
-    bool CreateTableEntry(const TRule_create_table_entry& node, TCreateTableParameters& params);
+    bool CreateTableEntry(const TRule_create_table_entry& node, TCreateTableParameters& params, const bool isCreateTableAs);
 
     bool FillFamilySettingsEntry(const TRule_family_settings_entry& settingNode, TFamilyEntry& family);
     bool FillFamilySettings(const TRule_family_settings& settingsNode, TFamilyEntry& family);
@@ -170,10 +168,22 @@ protected:
         ETableType tableType, bool alter, bool reset);
     bool StoreTableSettingsEntry(const TIdentifier& id, const TRule_table_setting_value* value, TTableSettings& settings,
         bool alter, bool reset);
-    bool StoreExternalTableSettingsEntry(const TIdentifier& id, const TRule_table_setting_value* value, TTableSettings& settings);
+    bool StoreExternalTableSettingsEntry(const TIdentifier& id, const TRule_table_setting_value* value, TTableSettings& settings,
+        bool alter, bool reset);
     bool StoreTableSettingsEntry(const TIdentifier& id, const TRule_table_setting_value& value, TTableSettings& settings, ETableType tableType, bool alter = false);
     bool StoreDataSourceSettingsEntry(const TIdentifier& id, const TRule_table_setting_value* value, std::map<TString, TDeferredAtom>& result);
+    bool StoreDataSourceSettingsEntry(const TRule_alter_table_setting_entry& entry, std::map<TString, TDeferredAtom>& result);
+    bool StoreResourcePoolSettingsEntry(const TIdentifier& id, const TRule_table_setting_value* value, std::map<TString, TDeferredAtom>& result);
+    bool StoreResourcePoolSettingsEntry(const TRule_alter_table_setting_entry& entry, std::map<TString, TDeferredAtom>& result);
+    bool StoreResourcePoolClassifierSettingsEntry(const TIdentifier& id, const TRule_table_setting_value* value, std::map<TString, TDeferredAtom>& result);
+    bool StoreResourcePoolClassifierSettingsEntry(const TRule_alter_table_setting_entry& entry, std::map<TString, TDeferredAtom>& result);
     bool ResetTableSettingsEntry(const TIdentifier& id, TTableSettings& settings, ETableType tableType);
+
+    bool CreateTableIndex(const TRule_table_index& node, TVector<TIndexDescription>& indexes);
+    bool CreateIndexSettings(const TRule_with_index_settings& settingsNode, TIndexDescription::EType indexType, TIndexDescription::TIndexSettings& indexSettings);
+    bool CreateIndexSettingEntry(const TIdentifier& id, const TRule_index_setting_value& value, TIndexDescription::EType indexType, TIndexDescription::TIndexSettings& indexSettings);
+    template<typename T>
+    std::tuple<bool, T, TString> GetIndexSettingValue(const TRule_index_setting_value& node);
 
     TIdentifier GetTopicConsumerId(const TRule_topic_consumer_ref& node);
     bool CreateConsumerSettings(const TRule_topic_consumer_settings& settingsNode, TTopicConsumerSettings& settings);
@@ -208,8 +218,8 @@ protected:
     TNodePtr ListLiteral(const TRule_list_literal& node);
     TNodePtr DictLiteral(const TRule_dict_literal& node);
     TNodePtr StructLiteral(const TRule_struct_literal& node);
-    TMaybe<TTableHints> TableHintsImpl(const TRule_table_hints& node);
-    bool TableHintImpl(const TRule_table_hint& rule, TTableHints& hints);
+    TMaybe<TTableHints> TableHintsImpl(const TRule_table_hints& node, const TString& provider, const TString& keyFunc = "");
+    bool TableHintImpl(const TRule_table_hint& rule, TTableHints& hints, const TString& provider, const TString& keyFunc = "");
     bool SimpleTableRefImpl(const TRule_simple_table_ref& node, TTableRef& result);
     bool TopicRefImpl(const TRule_topic_ref& node, TTopicRef& result);
     TWindowSpecificationPtr WindowSpecification(const TRule_window_specification_details& rule);
@@ -223,15 +233,28 @@ protected:
     bool BindParameterClause(const TRule_bind_parameter& node, TDeferredAtom& result);
     bool ObjectFeatureValueClause(const TRule_object_feature_value& node, TDeferredAtom& result);
     bool ParseObjectFeatures(std::map<TString, TDeferredAtom>& result, const TRule_object_features& features);
-    bool ParseExternalDataSourceSettings(std::map<TString, TDeferredAtom> & result, const TRule_with_table_settings & settings);
+    bool ParseExternalDataSourceSettings(std::map<TString, TDeferredAtom>& result, const TRule_with_table_settings& settings);
+    bool ParseExternalDataSourceSettings(std::map<TString, TDeferredAtom>& result, std::set<TString>& toReset, const TRule_alter_external_data_source_action& alterActions);
+    bool ParseViewOptions(std::map<TString, TDeferredAtom>& features, const TRule_with_table_settings& options);
+    bool ParseViewQuery(std::map<TString, TDeferredAtom>& features, const TRule_select_stmt& query);
+    bool ParseResourcePoolSettings(std::map<TString, TDeferredAtom>& result, const TRule_with_table_settings& settings);
+    bool ParseResourcePoolSettings(std::map<TString, TDeferredAtom>& result, std::set<TString>& toReset, const TRule_alter_resource_pool_action& alterAction);
+    bool ParseResourcePoolClassifierSettings(std::map<TString, TDeferredAtom>& result, const TRule_with_table_settings& settings);
+    bool ParseResourcePoolClassifierSettings(std::map<TString, TDeferredAtom>& result, std::set<TString>& toReset, const TRule_alter_resource_pool_classifier_action& alterAction);
     bool RoleNameClause(const TRule_role_name& node, TDeferredAtom& result, bool allowSystemRoles);
     bool RoleParameters(const TRule_create_user_option& node, TRoleParameters& result);
     bool PermissionNameClause(const TRule_permission_name_target& node, TVector<TDeferredAtom>& result, bool withGrantOption);
     bool PermissionNameClause(const TRule_permission_name& node, TDeferredAtom& result);
     bool PermissionNameClause(const TRule_permission_id& node, TDeferredAtom& result);
+    bool StoreStringSettingsEntry(const TIdentifier& id, const TRule_table_setting_value* value, std::map<TString, TDeferredAtom>& result);
+    bool StoreStringSettingsEntry(const TRule_alter_table_setting_entry& entry, std::map<TString, TDeferredAtom>& result);
+    bool ParseBackupCollectionSettings(std::map<TString, TDeferredAtom>& result, const TRule_backup_collection_settings& settings);
+    bool ParseBackupCollectionSettings(std::map<TString, TDeferredAtom>& result, std::set<TString>& toReset, const TRule_alter_backup_collection_actions& actions);
 
     bool ValidateAuthMethod(const std::map<TString, TDeferredAtom>& result);
     bool ValidateExternalTable(const TCreateTableParameters& params);
+
+    TNodePtr ReturningList(const ::NSQLv1Generated::TRule_returning_columns_list& columns);
 private:
     bool SimpleTableRefCoreImpl(const TRule_simple_table_ref_core& node, TTableRef& result);
     static bool IsValidFrameSettings(TContext& ctx, const TFrameSpecification& frameSpec, size_t sortSpecSize);

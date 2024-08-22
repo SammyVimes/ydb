@@ -35,7 +35,7 @@ using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const auto& Logger = NodeTrackerClientLogger;
+static constexpr auto& Logger = NodeTrackerClientLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -78,7 +78,7 @@ TNodeDescriptor::TNodeDescriptor()
 { }
 
 TNodeDescriptor::TNodeDescriptor(const TString& defaultAddress)
-    : Addresses_{std::make_pair(DefaultNetworkName, defaultAddress)}
+    : Addresses_{std::pair(DefaultNetworkName, defaultAddress)}
     , DefaultAddress_(defaultAddress)
 { }
 
@@ -181,6 +181,37 @@ void TNodeDescriptor::Persist(const TStreamPersistenceContext& context)
     }
 }
 
+void SerializeFragment(const TNodeDescriptor& descriptor, NYson::IYsonConsumer* consumer)
+{
+    BuildYsonMapFragmentFluently(consumer)
+        .Item("addresses").Value(descriptor.Addresses_)
+        .Item("default_address").Value(descriptor.DefaultAddress_)
+        .OptionalItem("host", descriptor.Host_)
+        .OptionalItem("rack", descriptor.Rack_)
+        .OptionalItem("data_center", descriptor.DataCenter_)
+        .Item("tags").Value(descriptor.Tags_);
+}
+
+void DeserializeFragment(TNodeDescriptor& descriptor, NYTree::INodePtr node)
+{
+    descriptor = {};
+
+    auto mapNode = node->AsMap();
+
+    Deserialize(descriptor.Addresses_, mapNode->GetChildOrThrow("addresses"));
+    Deserialize(descriptor.DefaultAddress_, mapNode->GetChildOrThrow("default_address"));
+    if (auto child = mapNode->FindChild("host")) {
+        Deserialize(descriptor.Host_, child);
+    }
+    if (auto child = mapNode->FindChild("rack")) {
+        Deserialize(descriptor.Rack_, child);
+    }
+    if (auto child = mapNode->FindChild("data_center")) {
+        Deserialize(descriptor.DataCenter_, child);
+    }
+    Deserialize(descriptor.Tags_, mapNode->GetChildOrThrow("tags"));
+}
+
 void FormatValue(TStringBuilderBase* builder, const TNodeDescriptor& descriptor, TStringBuf /*spec*/)
 {
     if (descriptor.IsNull()) {
@@ -201,11 +232,6 @@ void FormatValue(TStringBuilderBase* builder, const TNodeDescriptor& descriptor,
         builder->AppendChar('#');
         builder->AppendString(*dataCenter);
     }
-}
-
-TString ToString(const TNodeDescriptor& descriptor)
-{
-    return ToStringViaBuilder(descriptor);
 }
 
 std::optional<TString> FindDefaultAddress(const TAddressMap& addresses)
@@ -371,11 +397,6 @@ bool operator == (const TNodeDescriptor& lhs, const TNodeDescriptor& rhs)
         GetSortedTags(lhs.GetTags()) == GetSortedTags(rhs.GetTags());
 }
 
-bool operator != (const TNodeDescriptor& lhs, const TNodeDescriptor& rhs)
-{
-    return !(lhs == rhs);
-}
-
 bool operator == (const TNodeDescriptor& lhs, const NProto::TNodeDescriptor& rhs)
 {
     if (std::ssize(lhs.Addresses()) != rhs.addresses().entries_size()) {
@@ -419,11 +440,6 @@ bool operator == (const TNodeDescriptor& lhs, const NProto::TNodeDescriptor& rhs
     }
 
     return true;
-}
-
-bool operator != (const TNodeDescriptor& lhs, const NProto::TNodeDescriptor& rhs)
-{
-    return !(lhs == rhs);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

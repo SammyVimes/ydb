@@ -10,6 +10,7 @@ message TYdbDriverConfig {
     uint64 NetworkThreadsNum = 1; // default: 2
     uint64 ClientThreadsNum = 2; // default: 0 that means adaptive thread pool
     uint64 GrpcMemoryQuota = 3; // default: 0 (unlimited)
+    uint32 MonitoringPort = 4; // default: 0 (disabled)
 }
 
 message TCommonConfig {
@@ -27,5 +28,6 @@ message TCommonConfig {
     uint64 MaxTasksPerStage = 12;
     bool KeepInternalErrors = 13;
     bool UseNativeProtocolForClickHouse = 14;
-    uint64 MaxDPccpDPTableSize = 15;
+    bool DisableSslForGenericDataSources = 15;
+    bool ShowQueryTimeline = 16;
 }

@@ -7,6 +7,8 @@
 #include <yt/yt/core/misc/ref_counted_tracker.h>
 #include <yt/yt/core/misc/proc.h>
 
+#include <yt/yt/core/logging/log.h>
+
 namespace NYT {
 namespace {
 
@@ -15,7 +17,7 @@ using namespace NThreading;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-const NLogging::TLogger Logger("Test");
+YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "Test");
 
 ////////////////////////////////////////////////////////////////////////////////
 

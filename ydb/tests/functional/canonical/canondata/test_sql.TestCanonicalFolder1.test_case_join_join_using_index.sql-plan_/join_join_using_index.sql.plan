@@ -12,6 +12,9 @@
                         "Fk21",
                         "Value"
                     ],
+                    "lookup_by": [
+                        "Key (3)"
+                    ],
                     "type": "Lookup"
                 }
             ]
@@ -36,7 +39,7 @@
                         "Key1",
                         "Key2"
                     ],
-                    "type": "Lookup"
+                    "type": "Scan"
                 }
             ]
         }

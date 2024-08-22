@@ -1,44 +1,48 @@
 #include "cpu_manager.h"
+#include "executor_pool_jail.h"
+#include "mon_stats.h"
 #include "probes.h"
 
 #include "executor_pool_basic.h"
 #include "executor_pool_io.h"
-#include "executor_pool_united.h"
 
 namespace NActors {
     LWTRACE_USING(ACTORLIB_PROVIDER);
 
     TCpuManager::TCpuManager(THolder<TActorSystemSetup>& setup)
         : ExecutorPoolCount(setup->GetExecutorsCount())
-        , Balancer(setup->Balancer)
         , Config(setup->CpuManager)
     {
         if (setup->Executors) { // Explicit mode w/o united pools
             Executors.Reset(setup->Executors.Release());
-            for (ui32 excIdx = 0; excIdx != ExecutorPoolCount; ++excIdx) {
-                IExecutorPool* pool = Executors[excIdx].Get();
-                Y_ABORT_UNLESS(dynamic_cast<TUnitedExecutorPool*>(pool) == nullptr,
-                    "united executor pool is prohibited in explicit mode of NActors::TCpuManager");
-            }
         } else {
             Setup();
         }
     }
 
+    TCpuManager::~TCpuManager() {
+    }
+
     void TCpuManager::Setup() {
         TAffinity available;
         available.Current();
-        TCpuAllocationConfig allocation(available, Config);
 
-        if (allocation) {
-            if (!Balancer) {
-                Balancer.Reset(MakeBalancer(Config.UnitedWorkers.Balancer, Config.United, GetCycleCountFast()));
-            }
-            UnitedWorkers.Reset(new TUnitedWorkers(Config.UnitedWorkers, Config.United, allocation, Balancer.Get()));
+        if (Config.Jail) {
+            Jail = std::make_unique<TExecutorPoolJail>(ExecutorPoolCount, *Config.Jail);
         }
 
+        std::vector<i16> poolsWithSharedThreads;
+        for (TBasicExecutorPoolConfig& cfg : Config.Basic) {
+            if (cfg.HasSharedThread) {
+                poolsWithSharedThreads.push_back(cfg.PoolId);
+            }
+        }
+        Shared.reset(new TSharedExecutorPool(Config.Shared, ExecutorPoolCount, poolsWithSharedThreads));
+        auto sharedPool = static_cast<TSharedExecutorPool*>(Shared.get());
+
         ui64 ts = GetCycleCountFast();
-        Harmonizer.Reset(MakeHarmonizer(ts));
+        Harmonizer.reset(MakeHarmonizer(ts));
+        Harmonizer->SetSharedPool(sharedPool);
 
         Executors.Reset(new TAutoPtr<IExecutorPool>[ExecutorPoolCount]);
 
@@ -53,11 +57,15 @@ namespace NActors {
     }
 
     void TCpuManager::PrepareStart(TVector<NSchedulerQueue::TReader*>& scheduleReaders, TActorSystem* actorSystem) {
-        if (UnitedWorkers) {
-            UnitedWorkers->Prepare(actorSystem, scheduleReaders);
+        NSchedulerQueue::TReader* readers;
+        ui32 readersCount = 0;
+        if (Shared) {
+            Shared->Prepare(actorSystem, &readers, &readersCount);
+            for (ui32 i = 0; i != readersCount; ++i, ++readers) {
+                scheduleReaders.push_back(readers);
+            }
         }
         for (ui32 excIdx = 0; excIdx != ExecutorPoolCount; ++excIdx) {
-            NSchedulerQueue::TReader* readers;
             ui32 readersCount = 0;
             Executors[excIdx]->Prepare(actorSystem, &readers, &readersCount);
             for (ui32 i = 0; i != readersCount; ++i, ++readers) {
@@ -67,8 +75,8 @@ namespace NActors {
     }
 
     void TCpuManager::Start() {
-        if (UnitedWorkers) {
-            UnitedWorkers->Start();
+        if (Shared) {
+            Shared->Start();
         }
         for (ui32 excIdx = 0; excIdx != ExecutorPoolCount; ++excIdx) {
             Executors[excIdx]->Start();
@@ -79,8 +87,8 @@ namespace NActors {
         for (ui32 excIdx = 0; excIdx != ExecutorPoolCount; ++excIdx) {
             Executors[excIdx]->PrepareStop();
         }
-        if (UnitedWorkers) {
-            UnitedWorkers->PrepareStop();
+        if (Shared) {
+            Shared->PrepareStop();
         }
     }
 
@@ -88,8 +96,8 @@ namespace NActors {
         for (ui32 excIdx = 0; excIdx != ExecutorPoolCount; ++excIdx) {
             Executors[excIdx]->Shutdown();
         }
-        if (UnitedWorkers) {
-            UnitedWorkers->Shutdown();
+        if (Shared) {
+            Shared->Shutdown();
         }
         for (ui32 round = 0, done = 0; done < ExecutorPoolCount && round < 3; ++round) {
             done = 0;
@@ -98,6 +106,9 @@ namespace NActors {
                     ++done;
                 }
             }
+        }
+        if (Shared) {
+            Shared->Cleanup();
         }
     }
 
@@ -111,25 +122,33 @@ namespace NActors {
                 }
             }
         }
+        if (Shared) {
+            Shared->Cleanup();
+        }
         Executors.Destroy();
-        UnitedWorkers.Destroy();
+        if (Shared) {
+            Shared.reset();
+        }
     }
 
     IExecutorPool* TCpuManager::CreateExecutorPool(ui32 poolId) {
         for (TBasicExecutorPoolConfig& cfg : Config.Basic) {
             if (cfg.PoolId == poolId) {
-                return new TBasicExecutorPool(cfg, Harmonizer.Get());
+                if (cfg.HasSharedThread) {
+                    auto *sharedPool = static_cast<TSharedExecutorPool*>(Shared.get());
+                    auto *pool = new TBasicExecutorPool(cfg, Harmonizer.get(), Jail.get());
+                    if (pool) {
+                        pool->AddSharedThread(sharedPool->GetSharedThread(poolId));
+                    }
+                    return pool;
+                } else {
+                    return new TBasicExecutorPool(cfg, Harmonizer.get(), Jail.get());
+                }
             }
         }
         for (TIOExecutorPoolConfig& cfg : Config.IO) {
             if (cfg.PoolId == poolId) {
                 return new TIOExecutorPool(cfg);
-            }
-        }
-        for (TUnitedExecutorPoolConfig& cfg : Config.United) {
-            if (cfg.PoolId == poolId) {
-                IExecutorPool* result = new TUnitedExecutorPool(cfg, UnitedWorkers.Get());
-                return result;
             }
         }
         Y_ABORT("missing PoolId: %d", int(poolId));
@@ -143,6 +162,28 @@ namespace NActors {
             }
         }
         return pools;
+    }
+
+    void TCpuManager::GetPoolStats(ui32 poolId, TExecutorPoolStats& poolStats, TVector<TExecutorThreadStats>& statsCopy, TVector<TExecutorThreadStats>& sharedStatsCopy) const {
+        if (poolId < ExecutorPoolCount) {
+            Executors[poolId]->GetCurrentStats(poolStats, statsCopy);
+        }
+        if (Shared) {
+            Shared->GetSharedStats(poolId, sharedStatsCopy);
+        }
+    }
+
+    void TCpuManager::GetExecutorPoolState(i16 poolId, TExecutorPoolState &state) const {
+        if (static_cast<ui32>(poolId) < ExecutorPoolCount) {
+            Executors[poolId]->GetExecutorPoolState(state);
+        }
+    }
+
+    void TCpuManager::GetExecutorPoolStates(std::vector<TExecutorPoolState> &states) const {
+        states.resize(ExecutorPoolCount);
+        for (i16 poolId = 0; poolId < static_cast<ui16>(ExecutorPoolCount); ++poolId) {
+            GetExecutorPoolState(poolId, states[poolId]);
+        }
     }
 
 }

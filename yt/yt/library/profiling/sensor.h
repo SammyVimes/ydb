@@ -15,6 +15,8 @@
 
 #include <library/cpp/yt/misc/enum.h>
 
+#include <library/cpp/yt/string/format.h>
+
 #include <vector>
 
 namespace NYT::NProfiling {
@@ -142,10 +144,10 @@ class TGaugeHistogram
 public:
     void Add(double value, int count = 1) const noexcept;
     void Remove(double value, int count = 1) const noexcept;
-    void Reset() noexcept;
+    void Reset() const noexcept;
 
     THistogramSnapshot GetSnapshot() const;
-    void LoadSnapshot(THistogramSnapshot snapshot);
+    void LoadSnapshot(THistogramSnapshot snapshot) const;
 
     explicit operator bool() const;
 
@@ -160,17 +162,13 @@ private:
 class TRateHistogram
 {
 public:
-    void Add(double value, int count = 1) noexcept;
-    void Remove(double value, int count = 1) noexcept;
-    void Reset() noexcept;
-
-    THistogramSnapshot GetSnapshot() const;
-    void LoadSnapshot(THistogramSnapshot snapshot);
+    void Add(double value, int count = 1) const noexcept;
 
     explicit operator bool() const;
 
 private:
     friend class TProfiler;
+    friend struct TTesting;
 
     IHistogramImplPtr Histogram_;
 };
@@ -223,7 +221,7 @@ struct TSensorOptions
     bool IsCompatibleWith(const TSensorOptions& other) const;
 };
 
-TString ToString(const TSensorOptions& options);
+void FormatValue(TStringBuilderBase* builder, const TSensorOptions& options, TStringBuf spec);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -402,6 +400,11 @@ public:
         const TRefCountedPtr& owner,
         std::function<double()> reader) const;
 
+    //! AddProducer is used to batch sensor reports.
+    /*!
+     *  If many producers of the same profiler report a metric (whether it's a counter or a gauge) with the same set of tags,
+     *  the resulting value registered in the profiler will be a sum of the values reported by each producer.
+     */
     void AddProducer(
         const TString& prefix,
         const ISensorProducerPtr& producer) const;

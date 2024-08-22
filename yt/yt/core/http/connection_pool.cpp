@@ -31,14 +31,9 @@ TConnectionPool::TConnectionPool(
     , Config_(std::move(config))
     , Connections_(Config_->MaxIdleConnections)
     , ExpiredConnectionsCollector_(
-          New<TPeriodicExecutor>(
+        New<TPeriodicExecutor>(
             std::move(invoker),
-            BIND([weakThis = MakeWeak(this)] {
-                auto this_ = weakThis.Lock();
-                if (this_) {
-                    this_->DropExpiredConnections();
-                }
-            }),
+            BIND(&TConnectionPool::DropExpiredConnections, MakeWeak(this)),
             TPeriodicExecutorOptions::WithJitter(
                 Config_->ConnectionIdleTimeout)))
 {
@@ -52,7 +47,9 @@ TConnectionPool::~TConnectionPool()
     YT_UNUSED_FUTURE(ExpiredConnectionsCollector_->Stop());
 }
 
-TFuture<IConnectionPtr> TConnectionPool::Connect(const TNetworkAddress& address)
+TFuture<IConnectionPtr> TConnectionPool::Connect(
+    const TNetworkAddress& address,
+    TDialerContextPtr context)
 {
     {
         auto guard = Guard(SpinLock_);
@@ -64,7 +61,7 @@ TFuture<IConnectionPtr> TConnectionPool::Connect(const TNetworkAddress& address)
         }
     }
 
-    return Dialer_->Dial(address);
+    return Dialer_->Dial(address, std::move(context));
 }
 
 void TConnectionPool::Release(const IConnectionPtr& connection)

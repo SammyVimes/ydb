@@ -29,7 +29,7 @@ SRCS(
     location.h
     logoblob.cpp
     logoblob.h
-    memobserver.h
+    memory_controller_iface.h
     nameservice.h
     path.cpp
     pool_stats_collector.cpp
@@ -48,8 +48,6 @@ SRCS(
     statestorage_monitoring.cpp
     statestorage_proxy.cpp
     statestorage_replica.cpp
-    statestorage_replica_probe.cpp
-    statestorage_warden.cpp
     storage_pools.cpp
     storage_pools.h
     subdomain.h
@@ -88,9 +86,9 @@ PEERDIR(
     ydb/core/base/services
     ydb/core/debug
     ydb/core/erasure
+    ydb/core/graph/api
     ydb/core/protos
     ydb/core/protos/out
-    ydb/core/scheme
     ydb/library/aclib
     ydb/library/login
     ydb/library/pdisk_io
@@ -106,6 +104,8 @@ PEERDIR(
     library/cpp/dwarf_backtrace
 )
 ENDIF()
+
+GENERATE_ENUM_SERIALIZATION(memory_controller_iface.h)
 
 END()
 

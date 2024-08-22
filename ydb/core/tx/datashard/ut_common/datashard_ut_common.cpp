@@ -1,6 +1,7 @@
 #include "datashard_ut_common.h"
 
 #include <ydb/core/base/tablet.h>
+#include <ydb/core/base/tablet_pipecache.h>
 #include <ydb/core/base/tablet_resolver.h>
 #include <ydb/core/scheme/scheme_types_defs.h>
 #include <ydb/core/scheme/scheme_types_proto.h>
@@ -8,10 +9,13 @@
 #include <ydb/core/tablet_flat/shared_cache_events.h>
 #include <ydb/core/testlib/basics/appdata.h>
 #include <ydb/core/tx/balance_coverage/balance_coverage_builder.h>
+#include <ydb/core/tx/data_events/events.h>
+#include <ydb/core/tx/data_events/payload_helper.h>
 #include <ydb/core/tx/tx_allocator/txallocator.h>
 #include <ydb/core/tx/tx_proxy/proxy.h>
 #include <ydb/core/tx/tx_proxy/upload_rows.h>
 #include <ydb/core/tx/schemeshard/schemeshard_build_index.h>
+#include <ydb/core/protos/follower_group.pb.h>
 #include <ydb/public/sdk/cpp/client/ydb_result/result.h>
 
 #include <ydb/library/yql/minikql/mkql_node_serialization.h>
@@ -30,6 +34,65 @@ using namespace Tests;
 const bool ENABLE_DATASHARD_LOG = true;
 const bool DUMP_RESULT = false;
 
+namespace {
+
+    TEvDataShard::TEvGetInfoResponse* GetEvGetInfo(
+        Tests::TServer::TPtr server,
+        ui64 tabletId,
+        TAutoPtr<IEventHandle>& handle)
+    {
+        auto &runtime = *server->GetRuntime();
+
+        auto sender = runtime.AllocateEdgeActor();
+        auto request = MakeHolder<TEvDataShard::TEvGetInfoRequest>();
+        runtime.SendToPipe(tabletId, sender, request.Release(), 0, GetPipeConfigWithRetries());
+
+        TTableInfoMap result;
+
+        return runtime.GrabEdgeEventRethrow<TEvDataShard::TEvGetInfoResponse>(handle);
+    }
+
+    void SendReadTablePart(
+        Tests::TServer::TPtr server,
+        ui64 tabletId,
+        const TTableId& tableId,
+        const NKikimrSchemeOp::TTableDescription& description,
+        ui64 readId,
+        NKikimrDataEvents::EDataFormat format)
+    {
+        auto& runtime = *server->GetRuntime();
+        auto sender = runtime.AllocateEdgeActor();
+
+        auto request = GetBaseReadRequest(tableId, description, readId, format);
+
+        AddFullRangeQuery(*request);
+
+        SendReadAsync(server, tabletId, request.release(), sender);
+    }
+
+    void PrintTableFromResult(TStringBuilder& out, const TEvDataShard::TEvReadResult& event, const NKikimrSchemeOp::TTableDescription& description) {
+        auto nrows = event.GetRowsCount();
+        for (size_t i = 0; i < nrows; ++i) {
+            const auto& cellArray = event.GetCells(i);
+            UNIT_ASSERT_VALUES_EQUAL(cellArray.size(), description.ColumnsSize());
+            bool first = true;
+            for (size_t j = 0; j < cellArray.size(); ++j) {
+                if (first) {
+                    first = false;
+                } else {
+                    out << ", ";
+                }
+                const auto& columnDescription = description.GetColumns(j);
+                TString cellValue;
+                DbgPrintValue(cellValue, cellArray[j], NScheme::TTypeInfo(columnDescription.GetTypeId()));
+                out << columnDescription.GetName() << " = " << cellValue;
+            }
+            out << '\n';
+        }
+    }
+
+} // namespace
+
 void TTester::Setup(TTestActorRuntime& runtime, const TOptions& opts) {
     Y_UNUSED(opts);
     if (ENABLE_DATASHARD_LOG) {
@@ -42,15 +105,12 @@ void TTester::Setup(TTestActorRuntime& runtime, const TOptions& opts) {
 
     TAppPrepare app;
 
-
     auto domain = TDomainsInfo::TDomain::ConstructDomainWithExplicitTabletIds(
                       "dc-1", domainId, FAKE_SCHEMESHARD_TABLET_ID,
-                      domainId, domainId, TVector<ui32>{domainId},
-                      domainId, TVector<ui32>{domainId},
                       planResolution,
-                      TVector<ui64>{TDomainsInfo::MakeTxCoordinatorIDFixed(domainId, 1)},
+                      TVector<ui64>{TDomainsInfo::MakeTxCoordinatorIDFixed(1)},
                       TVector<ui64>{},
-                      TVector<ui64>{TDomainsInfo::MakeTxAllocatorIDFixed(domainId, 1)});
+                      TVector<ui64>{TDomainsInfo::MakeTxAllocatorIDFixed(1)});
 
     TVector<ui64> ids = runtime.GetTxAllocatorTabletIds();
     ids.insert(ids.end(), domain->TxAllocators.begin(), domain->TxAllocators.end());
@@ -816,8 +876,10 @@ ui64 TFakeMiniKQLProxy::Plan(ui64 stepId, const TMap<ui64, TFakeProxyTx::TPtr>& 
         return TTestActorRuntime::EEventAction::PROCESS;
     };
 
-    if (immEvents || DelayedReadSets || DelayedData) {
-        Tester.Runtime.SetObserverFunc(observer);
+    NActors::TTestActorRuntime::TEventObserver prevObserver;
+    bool catchEvents = immEvents || DelayedReadSets || DelayedData;
+    if (catchEvents) {
+        prevObserver = Tester.Runtime.SetObserverFunc(observer);
     }
 
     while (acks || plans || (results && waitForResult) || streams) {
@@ -992,6 +1054,10 @@ ui64 TFakeMiniKQLProxy::Plan(ui64 stepId, const TMap<ui64, TFakeProxyTx::TPtr>& 
         }
     }
 
+    if (catchEvents) {
+        Tester.Runtime.SetObserverFunc(prevObserver);
+    }
+
     return stepId;
 }
 
@@ -1090,16 +1156,12 @@ static ui64 RunSchemeTx(
     runtime.Send(new IEventHandle(MakeTxProxyID(), sender, request.Release()), 0, viaActorSystem);
     auto ev = runtime.GrabEdgeEventRethrow<TEvTxUserProxy::TEvProposeTransactionStatus>(sender);
 
-    for (auto i : ev->Get()->Record.GetIssues()) {
-        Cerr << "Issue: " << i.AsJSON() << Endl;
-    }
-
-    UNIT_ASSERT_VALUES_EQUAL(ev->Get()->Record.GetStatus(), expectedStatus);
+    UNIT_ASSERT_VALUES_EQUAL_C(ev->Get()->Record.GetStatus(), expectedStatus, "Status: " << ev->Get()->Record.GetStatus() << " Issues: " << ev->Get()->Record.GetIssues());
 
     return ev->Get()->Record.GetTxId();
 }
 
-void CreateShardedTable(
+std::tuple<TVector<ui64>, TTableId> CreateShardedTable(
         Tests::TServer::TPtr server,
         TActorId sender,
         const TString &root,
@@ -1121,6 +1183,10 @@ void CreateShardedTable(
 
     UNIT_ASSERT(desc);
     desc->SetName(name);
+
+    if (opts.AllowSystemColumnNames_) {
+        desc->SetSystemColumnNamesAllowed(true);
+    }
 
     std::vector<TString> defaultFromSequences;
 
@@ -1180,6 +1246,9 @@ void CreateShardedTable(
     if (!opts.EnableOutOfOrder_)
         desc->MutablePartitionConfig()->MutablePipelineConfig()->SetEnableOutOfOrder(false);
 
+    if (opts.DataTxCacheSize_)
+        desc->MutablePartitionConfig()->MutablePipelineConfig()->SetDataTxCacheSize(*opts.DataTxCacheSize_);
+
     if (opts.Policy_) {
         opts.Policy_->Serialize(*desc->MutablePartitionConfig()->MutableCompactionPolicy());
     }
@@ -1217,9 +1286,15 @@ void CreateShardedTable(
     }
 
     WaitTxNotification(server, sender, RunSchemeTx(*server->GetRuntime(), std::move(request), sender));
+
+    TString path = TStringBuilder() << root << "/" << name;
+    const auto& shards = GetTableShards(server, sender, path);
+    TTableId tableId = ResolveTableId(server, sender, path);
+
+    return {shards, tableId};
 }
 
-void CreateShardedTable(
+std::tuple<TVector<ui64>, TTableId> CreateShardedTable(
         Tests::TServer::TPtr server,
         TActorId sender,
         const TString &root,
@@ -1234,7 +1309,7 @@ void CreateShardedTable(
         .EnableOutOfOrder(enableOutOfOrder)
         .Policy(policy)
         .ShadowData(shadowData);
-    CreateShardedTable(server, sender, root, name, opts);
+    return CreateShardedTable(server, sender, root, name, opts);
 }
 
 ui64 AsyncCreateCopyTable(
@@ -1264,22 +1339,42 @@ NKikimrTxDataShard::TEvCompactTableResult CompactTable(
     return ev->Get()->Record;
 }
 
+NKikimrTxDataShard::TEvCompactBorrowedResult CompactBorrowed(TTestActorRuntime& runtime, ui64 shardId, const TTableId& tableId) {
+    auto request = MakeHolder<TEvDataShard::TEvCompactBorrowed>(tableId.PathId);
+    auto sender = runtime.AllocateEdgeActor();
+    runtime.SendToPipe(shardId, sender, request.Release(), 0, GetPipeConfigWithRetries());
+
+    auto ev = runtime.GrabEdgeEventRethrow<TEvDataShard::TEvCompactBorrowedResult>(sender);
+    return ev->Get()->Record;
+}
+
 std::pair<TTableInfoMap, ui64> GetTables(
     Tests::TServer::TPtr server,
     ui64 tabletId)
 {
-    auto &runtime = *server->GetRuntime();
-
-    auto sender = runtime.AllocateEdgeActor();
-    auto request = MakeHolder<TEvDataShard::TEvGetInfoRequest>();
-    runtime.SendToPipe(tabletId, sender, request.Release(), 0, GetPipeConfigWithRetries());
-
     TTableInfoMap result;
 
     TAutoPtr<IEventHandle> handle;
-    auto response = runtime.GrabEdgeEventRethrow<TEvDataShard::TEvGetInfoResponse>(handle);
+    auto response = GetEvGetInfo(server, tabletId, handle);
     for (auto& table: response->Record.GetUserTables()) {
         result[table.GetName()] = table;
+    }
+
+    auto ownerId = response->Record.GetTabletInfo().GetSchemeShard();
+
+    return std::make_pair(result, ownerId);
+}
+
+std::pair<TTableInfoByPathIdMap, ui64> GetTablesByPathId(
+    Tests::TServer::TPtr server,
+    ui64 tabletId)
+{
+    TTableInfoByPathIdMap result;
+
+    TAutoPtr<IEventHandle> handle;
+    auto response = GetEvGetInfo(server, tabletId, handle);
+    for (auto& table: response->Record.GetUserTables()) {
+        result[PathIdFromPathId(table.GetDescription().GetPathId())] = table;
     }
 
     auto ownerId = response->Record.GetTabletInfo().GetSchemeShard();
@@ -1709,6 +1804,66 @@ ui64 AsyncAlterDropStream(
     return RunSchemeTx(*server->GetRuntime(), std::move(request));
 }
 
+ui64 AsyncAlterDropReplicationConfig(
+        Tests::TServer::TPtr server,
+        const TString& workingDir,
+        const TString& tableName)
+{
+    auto request = SchemeTxTemplate(NKikimrSchemeOp::ESchemeOpAlterTable, workingDir);
+    auto& tx = *request->Record.MutableTransaction()->MutableModifyScheme();
+    tx.SetInternal(true);
+
+    auto& desc = *tx.MutableAlterTable();
+    desc.SetName(tableName);
+    desc.MutableReplicationConfig()->SetMode(NKikimrSchemeOp::TTableReplicationConfig::REPLICATION_MODE_NONE);
+
+    return RunSchemeTx(*server->GetRuntime(), std::move(request));
+}
+
+ui64 AsyncCreateContinuousBackup(
+        Tests::TServer::TPtr server,
+        const TString& workingDir,
+        const TString& tableName)
+{
+    auto request = SchemeTxTemplate(NKikimrSchemeOp::ESchemeOpCreateContinuousBackup, workingDir);
+
+    auto& desc = *request->Record.MutableTransaction()->MutableModifyScheme()->MutableCreateContinuousBackup();
+    desc.SetTableName(tableName);
+
+    return RunSchemeTx(*server->GetRuntime(), std::move(request));
+}
+
+ui64 AsyncAlterTakeIncrementalBackup(
+        Tests::TServer::TPtr server,
+        const TString& workingDir,
+        const TString& srcTableName,
+        const TString& dstTableName)
+{
+    auto request = SchemeTxTemplate(NKikimrSchemeOp::ESchemeOpAlterContinuousBackup, workingDir);
+
+    auto& desc = *request->Record.MutableTransaction()->MutableModifyScheme()->MutableAlterContinuousBackup();
+    desc.SetTableName(srcTableName);
+    auto& incBackup = *desc.MutableTakeIncrementalBackup();
+    incBackup.SetDstPath(dstTableName);
+
+    return RunSchemeTx(*server->GetRuntime(), std::move(request));
+}
+
+ui64 AsyncAlterRestoreIncrementalBackup(
+        Tests::TServer::TPtr server,
+        const TString& workingDir,
+        const TString& srcTableName,
+        const TString& dstTableName)
+{
+    auto request = SchemeTxTemplate(NKikimrSchemeOp::ESchemeOpRestoreIncrementalBackup, workingDir);
+
+    auto& desc = *request->Record.MutableTransaction()->MutableModifyScheme()->MutableRestoreIncrementalBackup();
+    desc.SetSrcTableName(srcTableName);
+    desc.SetDstTableName(dstTableName);
+
+    return RunSchemeTx(*server->GetRuntime(), std::move(request));
+}
+
 void WaitTxNotification(Tests::TServer::TPtr server, TActorId sender, ui64 txId) {
     auto &runtime = *server->GetRuntime();
     auto &settings = server->GetSettings();
@@ -1724,6 +1879,34 @@ void WaitTxNotification(Tests::TServer::TPtr server, ui64 txId) {
     auto &runtime = *server->GetRuntime();
     auto sender = runtime.AllocateEdgeActor();
     WaitTxNotification(server, sender, txId);
+}
+
+NKikimrTxDataShard::TEvPeriodicTableStats WaitTableStats(TTestActorRuntime& runtime, ui64 tabletId, ui64 minPartCount, ui64 minRows) {
+    NKikimrTxDataShard::TEvPeriodicTableStats stats;
+    bool captured = false;
+
+    auto observer = runtime.AddObserver<TEvDataShard::TEvPeriodicTableStats>([&](auto& ev) {
+        const auto& record = ev->Get()->Record;
+        if (record.GetDatashardId() == tabletId) {
+            Cerr << "Captured TEvDataShard::TEvPeriodicTableStats " << record.ShortDebugString() << Endl;
+            if (record.GetTableStats().GetPartCount() >= minPartCount && record.GetTableStats().GetRowCount() >= minRows) {
+                stats = record;
+                captured = true;
+            }
+        }
+    });
+
+    for (int i = 0; i < 5 && !captured; ++i) {
+        TDispatchOptions options;
+        options.CustomFinalCondition = [&]() { return captured; };
+        runtime.DispatchEvents(options, TDuration::Seconds(5));
+    }
+
+    observer.Remove();
+
+    UNIT_ASSERT(captured);
+
+    return stats;
 }
 
 void SimulateSleep(Tests::TServer::TPtr server, TDuration duration) {
@@ -1789,12 +1972,279 @@ void ExecSQL(Tests::TServer::TPtr server,
              Ydb::StatusIds::StatusCode code)
 {
     auto &runtime = *server->GetRuntime();
-    TAutoPtr<IEventHandle> handle;
-
     auto request = MakeSQLRequest(sql, dml);
-    runtime.Send(new IEventHandle(NKqp::MakeKqpProxyID(runtime.GetNodeId()), sender, request.Release()));
+    runtime.Send(new IEventHandle(NKqp::MakeKqpProxyID(runtime.GetNodeId()), sender, request.Release(), 0, 0, nullptr));
     auto ev = runtime.GrabEdgeEventRethrow<NKqp::TEvKqp::TEvQueryResponse>(sender);
-    UNIT_ASSERT_VALUES_EQUAL(ev->Get()->Record.GetRef().GetYdbStatus(), code);
+    auto& response = ev->Get()->Record.GetRef();
+    auto& issues = response.GetResponse().GetQueryIssues();
+    UNIT_ASSERT_VALUES_EQUAL_C(response.GetYdbStatus(),
+                               code,
+                               issues.empty() ? response.DebugString() : issues.Get(0).DebugString()
+    );
+}
+
+TRowVersion AcquireReadSnapshot(TTestActorRuntime& runtime, const TString& databaseName, ui32 nodeIndex) {
+    TActorId sender = runtime.AllocateEdgeActor(nodeIndex);
+    runtime.Send(
+        NLongTxService::MakeLongTxServiceID(sender.NodeId()),
+        sender,
+        new NLongTxService::TEvLongTxService::TEvAcquireReadSnapshot(databaseName),
+        nodeIndex,
+        true);
+    auto ev = runtime.GrabEdgeEventRethrow<NLongTxService::TEvLongTxService::TEvAcquireReadSnapshotResult>(sender);
+    const auto& record = ev->Get()->Record;
+    UNIT_ASSERT_VALUES_EQUAL(record.GetStatus(), Ydb::StatusIds::SUCCESS);
+    return TRowVersion(record.GetSnapshotStep(), record.GetSnapshotTxId());
+}
+
+void AddValueToCells(ui64 value, const TString& columnType, TVector<TCell>& cells, TVector<TString>& stringValues) {
+    if (columnType == "Uint64") {
+        cells.emplace_back(TCell((const char*)&value, sizeof(ui64)));
+    } else if (columnType == "Uint32") {
+        ui32 value32 = (ui32)value;
+        cells.emplace_back(TCell((const char*)&value32, sizeof(ui32)));
+    } else if (columnType == "Utf8") {
+        stringValues.emplace_back(Sprintf("String_%" PRIu64, value));
+        cells.emplace_back(TCell(stringValues.back().c_str(), stringValues.back().size()));
+    } else {
+        Y_ABORT("Unsupported column type");
+    }  
+}
+
+
+std::unique_ptr<NEvents::TDataEvents::TEvWrite> MakeWriteRequest(std::optional<ui64> txId, NKikimrDataEvents::TEvWrite::ETxMode txMode, NKikimrDataEvents::TEvWrite_TOperation::EOperationType operationType, const TTableId& tableId, const TVector<TShardedTableOptions::TColumn>& columns, ui32 rowCount, ui64 seed) {
+    std::vector<ui32> columnIds;
+    for (ui32 col = 0; col < columns.size(); ++col) {
+        const auto& column = columns[col];
+        if (column.IsKey || operationType != NKikimrDataEvents::TEvWrite::TOperation::OPERATION_DELETE)
+            columnIds.push_back(col + 1);
+    }
+
+    TVector<TString> stringValues;
+    TVector<TCell> cells;
+
+    for (ui32 row = 0; row < rowCount; ++row) {
+        for (ui32 col = 0; col < columns.size(); ++col) {
+            const auto& column = columns[col];
+            if (!column.IsKey && operationType == NKikimrDataEvents::TEvWrite::TOperation::OPERATION_DELETE)
+                continue;
+            ui64 value = row * columns.size() + col + seed;
+            AddValueToCells(value, column.Type, cells, stringValues);
+        }
+    }
+
+    TSerializedCellMatrix matrix(cells, rowCount, columnIds.size());
+    TString blobData = matrix.ReleaseBuffer();
+
+    UNIT_ASSERT(blobData.size() < 8_MB);
+
+    std::unique_ptr<NKikimr::NEvents::TDataEvents::TEvWrite> evWrite = txId ? std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(*txId, txMode) : std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(txMode);
+    ui64 payloadIndex = NKikimr::NEvWrite::TPayloadWriter<NKikimr::NEvents::TDataEvents::TEvWrite>(*evWrite).AddDataToPayload(std::move(blobData));
+    evWrite->AddOperation(operationType, tableId, columnIds, payloadIndex, NKikimrDataEvents::FORMAT_CELLVEC);
+
+    return evWrite;
+}
+
+std::unique_ptr<NEvents::TDataEvents::TEvWrite> MakeWriteRequestOneKeyValue(std::optional<ui64> txId, NKikimrDataEvents::TEvWrite::ETxMode txMode, NKikimrDataEvents::TEvWrite_TOperation::EOperationType operationType, const TTableId& tableId, const TVector<TShardedTableOptions::TColumn>& columns, ui64 key, ui64 value) {
+    UNIT_ASSERT_VALUES_EQUAL(columns.size(), 2);
+
+    std::vector<ui32> columnIds = {1, 2};
+
+    TVector<TString> stringValues;
+    TVector<TCell> cells;
+
+    AddValueToCells(key, columns[0].Type, cells, stringValues);
+    AddValueToCells(value, columns[1].Type, cells, stringValues);
+
+    TSerializedCellMatrix matrix(cells, 1, 2);
+    TString blobData = matrix.ReleaseBuffer();
+
+    std::unique_ptr<NKikimr::NEvents::TDataEvents::TEvWrite> evWrite = txId ? std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(*txId, txMode) : std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(txMode);
+    ui64 payloadIndex = NKikimr::NEvWrite::TPayloadWriter<NKikimr::NEvents::TDataEvents::TEvWrite>(*evWrite).AddDataToPayload(std::move(blobData));
+    evWrite->AddOperation(operationType, tableId, columnIds, payloadIndex, NKikimrDataEvents::FORMAT_CELLVEC);
+
+    return evWrite;
+}
+
+NKikimrDataEvents::TEvWriteResult Write(TTestActorRuntime& runtime, TActorId sender, ui64 shardId, std::unique_ptr<NEvents::TDataEvents::TEvWrite>&& request, NKikimrDataEvents::TEvWriteResult::EStatus expectedStatus)
+{
+    auto txMode = request->Record.GetTxMode();
+    runtime.SendToPipe(shardId, sender, request.release(), 0, GetPipeConfigWithRetries(), TActorId(), 0, {});
+
+    auto ev = runtime.GrabEdgeEventRethrow<NEvents::TDataEvents::TEvWriteResult>(sender);
+    auto resultRecord = ev->Get()->Record;
+    
+    if (expectedStatus == NKikimrDataEvents::TEvWriteResult::STATUS_UNSPECIFIED) {
+        switch (txMode) {
+            case NKikimrDataEvents::TEvWrite::MODE_IMMEDIATE:
+                expectedStatus = NKikimrDataEvents::TEvWriteResult::STATUS_COMPLETED;
+                break;
+            case NKikimrDataEvents::TEvWrite::MODE_PREPARE:
+            case NKikimrDataEvents::TEvWrite::MODE_VOLATILE_PREPARE:
+                expectedStatus = NKikimrDataEvents::TEvWriteResult::STATUS_PREPARED;
+                break;
+            default:
+                expectedStatus = NKikimrDataEvents::TEvWriteResult::STATUS_UNSPECIFIED;
+                UNIT_ASSERT_C(false, "Unexpected txMode: " << txMode);
+                break;
+        }
+    }
+    UNIT_ASSERT_C(resultRecord.GetStatus() == expectedStatus, "Status: " << resultRecord.GetStatus() << " Issues: " << resultRecord.GetIssues());
+
+    return resultRecord;
+}
+
+NKikimrDataEvents::TEvWriteResult Upsert(TTestActorRuntime& runtime, TActorId sender, ui64 shardId, const TTableId& tableId, const TVector<TShardedTableOptions::TColumn>& columns, ui32 rowCount, std::optional<ui64> txId, NKikimrDataEvents::TEvWrite::ETxMode txMode, NKikimrDataEvents::TEvWriteResult::EStatus expectedStatus)
+{
+    auto request = MakeWriteRequest(txId, txMode, NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT, tableId, columns, rowCount);
+    return Write(runtime, sender, shardId, std::move(request), expectedStatus);
+}
+
+NKikimrDataEvents::TEvWriteResult UpsertOneKeyValue(TTestActorRuntime& runtime, TActorId sender, ui64 shardId, const TTableId& tableId, const TVector<TShardedTableOptions::TColumn>& columns, ui64 key, ui64 value, std::optional<ui64> txId, NKikimrDataEvents::TEvWrite::ETxMode txMode, NKikimrDataEvents::TEvWriteResult::EStatus expectedStatus)
+{
+    auto request = MakeWriteRequestOneKeyValue(txId, txMode, NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT, tableId, columns, key, value);
+    return Write(runtime, sender, shardId, std::move(request), expectedStatus);
+}
+
+
+NKikimrDataEvents::TEvWriteResult Replace(TTestActorRuntime& runtime, TActorId sender, ui64 shardId, const TTableId& tableId, const TVector<TShardedTableOptions::TColumn>& columns, ui32 rowCount, std::optional<ui64> txId, NKikimrDataEvents::TEvWrite::ETxMode txMode, NKikimrDataEvents::TEvWriteResult::EStatus expectedStatus)
+{
+    auto request = MakeWriteRequest(txId, txMode, NKikimrDataEvents::TEvWrite::TOperation::OPERATION_REPLACE, tableId, columns, rowCount);
+    return Write(runtime, sender, shardId, std::move(request), expectedStatus);
+}
+
+NKikimrDataEvents::TEvWriteResult Delete(TTestActorRuntime& runtime, TActorId sender, ui64 shardId, const TTableId& tableId, const TVector<TShardedTableOptions::TColumn>& columns, ui32 rowCount, std::optional<ui64> txId, NKikimrDataEvents::TEvWrite::ETxMode txMode, NKikimrDataEvents::TEvWriteResult::EStatus expectedStatus)
+{
+    auto request = MakeWriteRequest(txId, txMode, NKikimrDataEvents::TEvWrite::TOperation::OPERATION_DELETE, tableId, columns, rowCount);
+    return Write(runtime, sender, shardId, std::move(request), expectedStatus);
+}
+
+NKikimrDataEvents::TEvWriteResult Insert(TTestActorRuntime& runtime, TActorId sender, ui64 shardId, const TTableId& tableId, const TVector<TShardedTableOptions::TColumn>& columns, ui32 rowCount, std::optional<ui64> txId, NKikimrDataEvents::TEvWrite::ETxMode txMode, NKikimrDataEvents::TEvWriteResult::EStatus expectedStatus)
+{
+    auto request = MakeWriteRequest(txId, txMode, NKikimrDataEvents::TEvWrite::TOperation::OPERATION_INSERT, tableId, columns, rowCount);
+    return Write(runtime, sender, shardId, std::move(request), expectedStatus);
+}
+
+NKikimrDataEvents::TEvWriteResult Update(TTestActorRuntime& runtime, TActorId sender, ui64 shardId, const TTableId& tableId, const TVector<TShardedTableOptions::TColumn>& columns, ui32 rowCount, std::optional<ui64> txId, NKikimrDataEvents::TEvWrite::ETxMode txMode, NKikimrDataEvents::TEvWriteResult::EStatus expectedStatus)
+{
+    auto request = MakeWriteRequest(txId, txMode, NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPDATE, tableId, columns, rowCount);
+    return Write(runtime, sender, shardId, std::move(request), expectedStatus);
+}
+
+TTestActorRuntimeBase::TEventObserverHolderPair ReplaceEvProposeTransactionWithEvWrite(TTestActorRuntime& runtime, TEvWriteRows& rows) {
+    if (rows.empty())
+        return {};
+
+    auto requestObserver = runtime.AddObserver([&rows](TAutoPtr<IEventHandle>& event) {
+        if (event->GetTypeRewrite() != TEvDataShard::EvProposeTransaction)
+            return;
+
+        const auto& record = event->Get<TEvDataShard::TEvProposeTransaction>()->Record;
+
+        if (record.GetTxKind() != NKikimrTxDataShard::TX_KIND_DATA)
+            return;
+
+        // Parse original TEvProposeTransaction
+        const ui64 txId = record.GetTxId();
+        const TString& txBody = record.GetTxBody();
+        NKikimrTxDataShard::TDataTransaction tx;
+        Y_VERIFY(tx.ParseFromArray(txBody.data(), txBody.size()));
+
+        // Construct new EvWrite
+        TVector<TCell> cells;
+        TTableId tableId;
+        ui16 colCount = 0;
+        for (const auto& task : tx.GetKqpTransaction().GetTasks()) {
+            NKikimrTxDataShard::TKqpTransaction::TDataTaskMeta meta;
+            Y_VERIFY(task.GetMeta().UnpackTo(&meta));
+            if (!meta.HasWrites())
+                continue;
+
+            const auto& tableMeta = meta.GetTable();
+            TTableId tableIdProto(tableMeta.GetTableId().GetOwnerId(), tableMeta.GetTableId().GetTableId(), tableMeta.GetSchemaVersion());
+            Y_VERIFY_S(tableId == TTableId{} || tableId == tableIdProto, "Only writes to one table is supported now");
+            tableId = tableIdProto;
+            const auto& writes = meta.GetWrites();
+            Y_VERIFY_S(colCount == 0 || colCount == writes.GetColumns().size(), "Only equal column count is supported now.");
+            colCount = writes.GetColumns().size();
+
+            const auto& row = rows.ProcessRow(tableId, txId);
+            Y_VERIFY(row.Cells.size() == colCount);
+            std::copy(row.Cells.begin(), row.Cells.end(), std::back_inserter(cells));
+        }
+
+        Cerr << "TEvProposeTransaction " << txId << " is observed and will be replaced with EvWrite: " << record.ShortDebugString() << Endl;
+
+        auto txMode = NKikimr::NDataShard::NEvWrite::TConvertor::GetTxMode(record.GetFlags());
+
+        auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(txId, txMode);
+
+        if (!cells.empty()) {
+            TSerializedCellMatrix matrix(cells, cells.size() / colCount, colCount);
+            TString blobData = matrix.ReleaseBuffer();
+
+            UNIT_ASSERT(blobData.size() < 8_MB);
+
+            std::vector<ui32> columnIds(colCount);
+            std::iota(columnIds.begin(), columnIds.end(), 1);
+
+            ui64 payloadIndex = NKikimr::NEvWrite::TPayloadWriter<NKikimr::NEvents::TDataEvents::TEvWrite>(*evWrite).AddDataToPayload(std::move(blobData));
+            evWrite->AddOperation(NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT, tableId, columnIds, payloadIndex, NKikimrDataEvents::FORMAT_CELLVEC);
+        }
+
+        // Copy locks
+        if (tx.HasLockTxId())
+            evWrite->Record.SetLockTxId(tx.GetLockTxId());
+        if (tx.HasLockNodeId())
+            evWrite->Record.SetLockNodeId(tx.GetLockNodeId());
+        if (tx.GetKqpTransaction().HasLocks())
+            evWrite->Record.MutableLocks()->CopyFrom(tx.GetKqpTransaction().GetLocks());
+
+        if (record.HasMvccSnapshot()) {
+            *evWrite->Record.MutableMvccSnapshot() = record.GetMvccSnapshot();
+        }
+
+        // Replace event
+        auto handle = new IEventHandle(event->Recipient, event->Sender, evWrite.release(), 0, event->Cookie);
+        handle->Rewrite(handle->GetTypeRewrite(), event->GetRecipientRewrite());
+        event.Reset(handle);
+    });
+
+    auto responseObserver = runtime.AddObserver([](TAutoPtr<IEventHandle>& event) {
+        if (event->GetTypeRewrite() != NEvents::TDataEvents::EvWriteResult)
+            return;
+
+        const auto& record = event->Get<NEvents::TDataEvents::TEvWriteResult>()->Record;
+        ui64 txId = record.GetTxId();
+
+        Cerr << "EvWriteResult " << txId << " is observed and will be replaced with EvProposeTransactionResult: " << record.ShortDebugString() << Endl;
+
+        // Construct new EvProposeTransactionResult
+        ui64 origin = record.GetOrigin();
+        auto status = NKikimr::NDataShard::NEvWrite::TConvertor::GetStatus(record.GetStatus());
+
+        auto evResult = std::make_unique<TEvDataShard::TEvProposeTransactionResult>(NKikimrTxDataShard::TX_KIND_DATA, origin, txId, status);
+        
+        if (status == NKikimrTxDataShard::TEvProposeTransactionResult::PREPARED) {
+            evResult->SetPrepared(record.GetMinStep(), record.GetMaxStep(), {});
+            evResult->Record.MutableDomainCoordinators()->CopyFrom(record.GetDomainCoordinators());
+        }
+
+        // Replace event
+        auto handle = new IEventHandle(event->Recipient, event->Sender, evResult.release(), 0, event->Cookie);
+        handle->Rewrite(handle->GetTypeRewrite(), event->GetRecipientRewrite());
+        event.Reset(handle);
+    });
+
+    return {std::move(requestObserver), std::move(responseObserver)};
+}
+
+NKikimrDataEvents::TEvWriteResult WaitForWriteCompleted(TTestActorRuntime& runtime, TActorId sender, NKikimrDataEvents::TEvWriteResult::EStatus expectedStatus)
+{
+    auto ev = runtime.GrabEdgeEventRethrow<NEvents::TDataEvents::TEvWriteResult>(sender);
+    auto resultRecord = ev->Get()->Record;
+    UNIT_ASSERT_C(resultRecord.GetStatus() == expectedStatus, "Status: " << resultRecord.GetStatus() << " Issues: " << resultRecord.GetIssues());
+    return resultRecord;
 }
 
 void UploadRows(TTestActorRuntime& runtime, const TString& tablePath, const TVector<std::pair<TString, Ydb::Type_PrimitiveTypeId>>& types, const TVector<TCell>& keys, const TVector<TCell>& values)
@@ -1817,7 +2267,32 @@ void UploadRows(TTestActorRuntime& runtime, const TString& tablePath, const TVec
     runtime.Register(actor);
 
     auto ev = runtime.GrabEdgeEventRethrow<TEvTxUserProxy::TEvUploadRowsResponse>(uploadSender);
-    UNIT_ASSERT_VALUES_EQUAL_C(ev->Get()->Status, Ydb::StatusIds::SUCCESS, "Status: " << ev->Get()->Status << " Issues: " << ev->Get()->Issues.ToOneLineString());
+    UNIT_ASSERT_VALUES_EQUAL_C(ev->Get()->Status, Ydb::StatusIds::SUCCESS, "Status: " << ev->Get()->Status << " Issues: " << ev->Get()->Issues);
+}
+
+void SendProposeToCoordinator(
+        TTestActorRuntime& runtime,
+        const TActorId& sender,
+        const std::vector<ui64>& shards,
+        const TSendProposeToCoordinatorOptions& options)
+{
+    auto req = std::make_unique<TEvTxProxy::TEvProposeTransaction>(
+        options.Coordinator, options.TxId, 0, options.MinStep, options.MaxStep);
+    auto* tx = req->Record.MutableTransaction();
+
+    auto* affectedSet = tx->MutableAffectedSet();
+    affectedSet->Reserve(shards.size());
+    for (ui64 shardId : shards) {
+        auto* x = affectedSet->Add();
+        x->SetTabletId(shardId);
+        x->SetFlags(TEvTxProxy::TEvProposeTransaction::AffectedWrite);
+    }
+
+    if (options.Volatile) {
+        tx->SetFlags(TEvTxProxy::TEvProposeTransaction::FlagVolatile);
+    }
+
+    SendViaPipeCache(runtime, options.Coordinator, sender, std::move(req));
 }
 
 void WaitTabletBecomesOffline(TServer::TPtr server, ui64 tabletId)
@@ -1825,9 +2300,10 @@ void WaitTabletBecomesOffline(TServer::TPtr server, ui64 tabletId)
     struct IsShardStateChange
     {
         IsShardStateChange(ui64 tabletId)
-            : TabletId(tabletId)
-        {
-        }
+            :
+                TabletId(tabletId)
+                {
+                }
 
         bool operator()(IEventHandle& ev)
         {
@@ -1881,7 +2357,8 @@ namespace {
             , Snapshot(snapshot)
             , Ordered(ordered)
             , State(pause ? EState::PauseWait : EState::Normal)
-        { }
+        {
+        }
 
         void Bootstrap(const TActorContext& ctx) {
             auto request = MakeHolder<TEvTxUserProxy::TEvProposeTransaction>();
@@ -2025,6 +2502,9 @@ namespace {
             PRINT_PRIMITIVE(Date);
             PRINT_PRIMITIVE(Datetime);
             PRINT_PRIMITIVE(Timestamp);
+            PRINT_PRIMITIVE(Date32);
+            PRINT_PRIMITIVE(Datetime64);
+            PRINT_PRIMITIVE(Timestamp64);
             PRINT_PRIMITIVE(String);
             PRINT_PRIMITIVE(DyNumber);
 
@@ -2089,6 +2569,142 @@ TString ReadShardedTable(
         TRowVersion snapshot)
 {
     return StartReadShardedTable(server, path, snapshot, /* pause = */ false).Result;
+}
+
+void SendViaPipeCache(
+    TTestActorRuntime& runtime,
+    ui64 tabletId, const TActorId& sender,
+    std::unique_ptr<IEventBase> msg,
+    const TSendViaPipeCacheOptions& options)
+{
+    ui32 nodeIndex = sender.NodeId() - runtime.GetNodeId(0);
+    runtime.Send(
+        new IEventHandle(
+            MakePipePerNodeCacheID(options.Follower),
+            sender,
+            new TEvPipeCache::TEvForward(msg.release(), tabletId, options.Subscribe),
+            options.Flags,
+            options.Cookie),
+        nodeIndex,
+        /* viaActorSystem */ true);
+}
+
+void AddKeyQuery(
+    TEvDataShard::TEvRead& request,
+    const std::vector<ui32>& keys)
+{
+    // convertion is ugly, but for tests is OK
+    auto cells = ToCells(keys);
+    request.Keys.emplace_back(cells);
+}
+
+void AddFullRangeQuery(TEvDataShard::TEvRead& request) {
+    auto fromBuf = TSerializedCellVec::Serialize(TVector<TCell>());
+    auto toBuf = TSerializedCellVec::Serialize(TVector<TCell>());
+    request.Ranges.emplace_back(fromBuf, toBuf, true, true);
+}
+
+std::unique_ptr<TEvDataShard::TEvRead> GetBaseReadRequest(
+    const TTableId& tableId,
+    const NKikimrSchemeOp::TTableDescription& description,
+    ui64 readId,
+    NKikimrDataEvents::EDataFormat format,
+    const TRowVersion& readVersion)
+{
+    auto request = std::make_unique<TEvDataShard::TEvRead>();
+    auto& record = request->Record;
+
+    record.SetReadId(readId);
+    record.MutableTableId()->SetOwnerId(tableId.PathId.OwnerId);
+    record.MutableTableId()->SetTableId(tableId.PathId.LocalPathId);
+
+    for (const auto& column: description.GetColumns()) {
+        record.AddColumns(column.GetId());
+    }
+
+    record.MutableTableId()->SetSchemaVersion(description.GetTableSchemaVersion());
+
+    if (readVersion) {
+        record.MutableSnapshot()->SetStep(readVersion.Step);
+        record.MutableSnapshot()->SetTxId(readVersion.TxId);
+    }
+
+    record.SetResultFormat(format);
+
+    return request;
+}
+
+std::unique_ptr<TEvDataShard::TEvReadResult> WaitReadResult(Tests::TServer::TPtr server, TDuration timeout) {
+    auto& runtime = *server->GetRuntime();
+    TAutoPtr<IEventHandle> handle;
+    runtime.GrabEdgeEventRethrow<TEvDataShard::TEvReadResult>(handle, timeout);
+    if (!handle) {
+        return nullptr;
+    }
+    std::unique_ptr<TEvDataShard::TEvReadResult> event(handle->Release<TEvDataShard::TEvReadResult>().Release());
+    return event;
+}
+
+void SendReadAsync(
+    Tests::TServer::TPtr server,
+    ui64 tabletId,
+    TEvDataShard::TEvRead* request,
+    TActorId sender,
+    ui32 node,
+    const NTabletPipe::TClientConfig& clientConfig,
+    TActorId clientId)
+{
+    auto &runtime = *server->GetRuntime();
+    runtime.SendToPipe(
+        tabletId,
+        sender,
+        request,
+        node,
+        clientConfig,
+        clientId);
+}
+
+std::unique_ptr<TEvDataShard::TEvReadResult> SendRead(
+    Tests::TServer::TPtr server,
+    ui64 tabletId,
+    TEvDataShard::TEvRead* request,
+    TActorId sender,
+    ui32 node,
+    const NTabletPipe::TClientConfig& clientConfig,
+    TActorId clientId,
+    TDuration timeout)
+{
+    SendReadAsync(server, tabletId, request, sender, node, clientConfig, clientId);
+
+    return WaitReadResult(server, timeout);
+}
+
+TString ReadTable(
+    Tests::TServer::TPtr server,
+    std::span<const ui64> tabletIds,
+    const TTableId& tableId,
+    ui64 startReadId)
+{
+    TStringBuilder result;
+
+    auto readId = startReadId;
+    for (const auto& tabletId : tabletIds) {
+        auto [tablesMap, ownerId] = GetTablesByPathId(server, tabletId);
+        const auto& userTable = tablesMap.at(tableId.PathId);
+        const auto& description = userTable.GetDescription();
+
+        SendReadTablePart(server, tabletId, tableId, description, readId++, NKikimrDataEvents::FORMAT_CELLVEC);
+
+        std::unique_ptr<TEvDataShard::TEvReadResult> readResult;
+        do {
+            readResult = WaitReadResult(server);
+            UNIT_ASSERT(readResult);
+            UNIT_ASSERT_VALUES_EQUAL(readResult->Record.GetStatus().GetCode(), Ydb::StatusIds::SUCCESS);
+            PrintTableFromResult(result, *readResult, description);
+        } while (!readResult->Record.GetFinished());
+    }
+
+    return result;
 }
 
 }

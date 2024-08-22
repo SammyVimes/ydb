@@ -61,14 +61,11 @@ class YQLRun(object):
         if gateway_config is not None:
             text_format.Merge(gateway_config, self.gateway_config)
 
-        if cfg_dir is None:
-            cfg_dir = 'ydb/library/yql/cfg/tests'
-        with open(yql_utils.yql_source_path(cfg_dir + '/' + yql_utils.get_gateway_cfg_filename())) as f:
-            text_format.Merge(f.read(), self.gateway_config)
+        yql_utils.merge_default_gateway_cfg(cfg_dir or 'ydb/library/yql/cfg/tests', self.gateway_config)
 
         self.fs_config = file_storage_pb2.TFileStorageConfig()
 
-        with open(yql_utils.yql_source_path(cfg_dir + '/fs.conf')) as f:
+        with open(yql_utils.yql_source_path(os.path.join(cfg_dir or 'ydb/library/yql/cfg/tests', 'fs.conf'))) as f:
             text_format.Merge(f.read(), self.fs_config)
 
         if fs_config is not None:
@@ -121,7 +118,14 @@ class YQLRun(object):
                 cmd.append('--ansi-lexer')
             env = {'YQL_DETERMINISTIC_MODE': '1'}
             env.update(extra_env)
-            for var in ['LLVM_PROFILE_FILE', 'GO_COVERAGE_PREFIX', 'PYTHON_COVERAGE_PREFIX', 'NLG_COVERAGE_FILENAME']:
+            for var in [
+                'LLVM_PROFILE_FILE',
+                'GO_COVERAGE_PREFIX',
+                'PYTHON_COVERAGE_PREFIX',
+                'NLG_COVERAGE_FILENAME',
+                'YQL_EXPORT_PG_FUNCTIONS_DIR',
+                'YQL_ALLOW_ALL_PG_FUNCTIONS',
+                    ]:
                 if var in os.environ:
                     env[var] = os.environ[var]
             yatest.common.process.execute(cmd, cwd=res_dir, env=env)
@@ -257,7 +261,14 @@ class YQLRun(object):
 
         env = {'YQL_DETERMINISTIC_MODE': '1'}
         env.update(extra_env)
-        for var in ['LLVM_PROFILE_FILE', 'GO_COVERAGE_PREFIX', 'PYTHON_COVERAGE_PREFIX', 'NLG_COVERAGE_FILENAME']:
+        for var in [
+            'LLVM_PROFILE_FILE',
+            'GO_COVERAGE_PREFIX',
+            'PYTHON_COVERAGE_PREFIX',
+            'NLG_COVERAGE_FILENAME',
+            'YQL_EXPORT_PG_FUNCTIONS_DIR',
+            'YQL_ALLOW_ALL_PG_FUNCTIONS',
+                ]:
             if var in os.environ:
                 env[var] = os.environ[var]
         if yql_utils.get_param('STDERR'):

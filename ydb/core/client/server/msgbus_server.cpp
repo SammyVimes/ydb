@@ -2,7 +2,6 @@
 #include <ydb/core/base/appdata.h>
 #include <ydb/core/node_whiteboard/node_whiteboard.h>
 #include "msgbus_server.h"
-#include "msgbus_server_tracer.h"
 #include "msgbus_http_server.h"
 #include "grpc_server.h"
 
@@ -91,7 +90,6 @@ public:
             MTYPE(TBusResponse)
             MTYPE(TBusFakeConfigDummy)
             MTYPE(TBusSchemeInitRoot)
-            MTYPE(TBusBSAdm)
             MTYPE(TBusTypesRequest)
             MTYPE(TBusTypesResponse)
             MTYPE(TBusHiveCreateTablet)
@@ -104,8 +102,6 @@ public:
             MTYPE(TBusOldKeyValue)
             MTYPE(TBusKeyValueResponse)
             MTYPE(TBusPersQueue)
-            MTYPE(TBusMessageBusTraceRequest)
-            MTYPE(TBusMessageBusTraceStatus)
             MTYPE(TBusTabletKillRequest)
             MTYPE(TBusTabletStateRequest)
             MTYPE(TBusTabletCountersRequest)
@@ -116,20 +112,11 @@ public:
             MTYPE(TBusSchemeDescribe)
             MTYPE(TBusOldFlatDescribeRequest)
             MTYPE(TBusOldFlatDescribeResponse)
-            MTYPE(TBusBsTestLoadRequest)
-            MTYPE(TBusBsTestLoadResponse)
-            MTYPE(TBusBsGetRequest)
-            MTYPE(TBusBsGetResponse)
-            MTYPE(TBusDbSchema)
-            MTYPE(TBusDbOperation)
-            MTYPE(TBusDbResponse)
-            MTYPE(TBusDbBatch)
             MTYPE(TBusBlobStorageConfigRequest)
             MTYPE(TBusNodeRegistrationRequest)
             MTYPE(TBusCmsRequest)
             MTYPE(TBusChooseProxy)
             MTYPE(TBusSqsRequest)
-            MTYPE(TBusWhoAmI)
             MTYPE(TBusStreamRequest)
             MTYPE(TBusInterconnectDebug)
             MTYPE(TBusConsoleRequest)
@@ -137,7 +124,6 @@ public:
             MTYPE(TBusFillNode)
             MTYPE(TBusDrainNode)
             MTYPE(TBusTestShardControlRequest)
-            MTYPE(TBusLoginRequest)
 #undef MTYPE
         }
 
@@ -175,8 +161,6 @@ public:
             }
 
             REPLY_OPTION(TBusResponse)
-            REPLY_OPTION(TBusDbResponse)
-            REPLY_OPTION(TBusBsTestLoadResponse)
             REPLY_OPTION(TBusNodeRegistrationResponse)
             REPLY_OPTION(TBusCmsResponse)
             REPLY_OPTION(TBusSqsResponse)
@@ -506,8 +490,6 @@ void TMessageBusServer::OnMessage(TBusMessageContext &msg) {
         return ClientProxyRequest<TEvBusProxy::TEvRequest>(msg);
     case MTYPE_CLIENT_SCHEME_INITROOT:
         return ClientProxyRequest<TEvBusProxy::TEvInitRoot>(msg);
-    case MTYPE_CLIENT_BSADM:
-        return ClientActorRequest(CreateMessageBusBSAdm, msg);
     case MTYPE_CLIENT_SCHEME_NAVIGATE:
         return ClientProxyRequest<TEvBusProxy::TEvNavigate>(msg);
     case MTYPE_CLIENT_TYPES_REQUEST:
@@ -542,16 +524,6 @@ void TMessageBusServer::OnMessage(TBusMessageContext &msg) {
     case MTYPE_CLIENT_FLAT_DESCRIBE_REQUEST:
     case MTYPE_CLIENT_OLD_FLAT_DESCRIBE_REQUEST:
         return ClientProxyRequest<TEvBusProxy::TEvFlatDescribeRequest>(msg);
-    case MTYPE_CLIENT_LOAD_REQUEST:
-        return ClientActorRequest(CreateMessageBusBlobStorageLoadRequest, msg);
-    case MTYPE_CLIENT_GET_REQUEST:
-        return ClientActorRequest(CreateMessageBusBlobStorageGetRequest, msg);
-    case MTYPE_CLIENT_DB_SCHEMA:
-        return ClientProxyRequest<TEvBusProxy::TEvDbSchema>(msg);
-    case MTYPE_CLIENT_DB_OPERATION:
-        return ClientProxyRequest<TEvBusProxy::TEvDbOperation>(msg);
-    case MTYPE_CLIENT_DB_BATCH:
-        return ClientProxyRequest<TEvBusProxy::TEvDbBatch>(msg);
     case MTYPE_CLIENT_BLOB_STORAGE_CONFIG_REQUEST:
         return ClientActorRequest(CreateMessageBusBlobStorageConfig, msg);
     case MTYPE_CLIENT_DRAIN_NODE:
@@ -564,16 +536,12 @@ void TMessageBusServer::OnMessage(TBusMessageContext &msg) {
         return ClientActorRequest(CreateMessageBusCmsRequest, msg);
     case MTYPE_CLIENT_SQS_REQUEST:
         return ClientActorRequest(CreateMessageBusSqsRequest, msg);
-    case MTYPE_CLIENT_WHOAMI:
-        return ClientActorRequest(CreateMessageBusWhoAmI, msg);
     case MTYPE_CLIENT_INTERCONNECT_DEBUG:
         return ClientActorRequest(CreateMessageBusInterconnectDebug, msg);
     case MTYPE_CLIENT_CONSOLE_REQUEST:
         return ClientActorRequest(CreateMessageBusConsoleRequest, msg);
     case MTYPE_CLIENT_TEST_SHARD_CONTROL:
         return ClientActorRequest(CreateMessageBusTestShardControl, msg);
-    case MTYPE_CLIENT_LOGIN_REQUEST:
-        return ClientActorRequest(CreateMessageBusLoginRequest, msg);
     default:
         return UnknownMessage(msg);
     }

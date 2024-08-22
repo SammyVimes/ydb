@@ -4,6 +4,8 @@
 #include <yt/yt/client/api/journal_reader.h>
 #include <yt/yt/client/api/journal_writer.h>
 #include <yt/yt/client/api/transaction.h>
+#include <yt/yt/client/api/dynamic_table_transaction_mixin.h>
+#include <yt/yt/client/api/queue_transaction_mixin.h>
 
 #include <library/cpp/testing/gtest_extensions/gtest_extensions.h>
 
@@ -12,7 +14,9 @@ namespace NYT::NApi {
 ////////////////////////////////////////////////////////////////////////////////
 
 class TMockTransaction
-    : public ITransaction
+    : public virtual ITransaction
+    , public TDynamicTableTransactionMixin
+    , public TQueueTransactionMixin
 {
 public:
     MOCK_METHOD(IConnectionPtr, GetConnection, (), (override));
@@ -33,7 +37,7 @@ public:
         const TSharedRange<NTableClient::TLegacyKey>& keys,
         const TVersionedLookupRowsOptions& options), (override));
 
-    MOCK_METHOD(TFuture<std::vector<TUnversionedLookupRowsResult>>, MultiLookup, (
+    MOCK_METHOD(TFuture<std::vector<TUnversionedLookupRowsResult>>, MultiLookupRows, (
         const std::vector<TMultiLookupSubrequest>& subrequests,
         const TMultiLookupOptions& options), (override));
 
@@ -195,11 +199,38 @@ public:
     MOCK_METHOD(void, SubscribeAborted, (const TAbortedHandler& callback), (override));
     MOCK_METHOD(void, UnsubscribeAborted, (const TAbortedHandler& callback), (override));
 
+    using TQueueTransactionMixin::AdvanceQueueConsumer;
+    MOCK_METHOD(TFuture<void>, AdvanceQueueConsumer, (
+        const NYPath::TRichYPath& consumerPath,
+        const NYPath::TRichYPath& queuePath,
+        int partitionIndex,
+        std::optional<i64> oldOffset,
+        i64 newOffset,
+        const TAdvanceQueueConsumerOptions& options), (override));
+
     MOCK_METHOD(void, ModifyRows, (
         const NYPath::TYPath& path,
         NTableClient::TNameTablePtr nameTable,
         TSharedRange<TRowModification> modifications,
         const TModifyRowsOptions& options), (override));
+
+    MOCK_METHOD(TFuture<TPushQueueProducerResult>, PushQueueProducer, (
+        const NYPath::TRichYPath& producerPath,
+        const NYPath::TRichYPath& queuePath,
+        const NQueueClient::TQueueProducerSessionId& sessionId,
+        NQueueClient::TQueueProducerEpoch epoch,
+        NTableClient::TNameTablePtr nameTable,
+        TSharedRange<NTableClient::TUnversionedRow> rows,
+        const TPushQueueProducerOptions& options), (override));
+
+    MOCK_METHOD(TFuture<TPushQueueProducerResult>, PushQueueProducer, (
+        const NYPath::TRichYPath& producerPath,
+        const NYPath::TRichYPath& queuePath,
+        const NQueueClient::TQueueProducerSessionId& sessionId,
+        NQueueClient::TQueueProducerEpoch epoch,
+        NTableClient::TNameTablePtr nameTable,
+        const std::vector<TSharedRef>& serializedRows,
+        const TPushQueueProducerOptions& options), (override));
 };
 
 DEFINE_REFCOUNTED_TYPE(TMockTransaction)

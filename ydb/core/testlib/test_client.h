@@ -21,14 +21,17 @@
 #include <ydb/core/testlib/basics/runtime.h>
 #include <ydb/core/testlib/basics/appdata.h>
 #include <ydb/core/protos/kesus.pb.h>
+#include <ydb/core/protos/table_service_config.pb.h>
 #include <ydb/core/kesus/tablet/events.h>
 #include <ydb/core/kqp/federated_query/kqp_federated_query_helpers.h>
 #include <ydb/core/security/ticket_parser.h>
+#include <ydb/core/security/ticket_parser_settings.h>
 #include <ydb/core/base/grpc_service_factory.h>
 #include <ydb/core/persqueue/actor_persqueue_client_iface.h>
 #include <ydb/core/fq/libs/shared_resources/interface/shared_resources.h>
 #include <ydb/core/http_proxy/auth_factory.h>
 #include <ydb/library/accessor/accessor.h>
+#include <ydb/library/yql/providers/s3/actors_factory/yql_s3_actors_factory.h>
 
 #include <ydb/library/grpc/server/grpc_server.h>
 
@@ -53,13 +56,13 @@ namespace Tests {
 
     constexpr const char* TestDomainName = "dc-1";
     const ui32 TestDomain = 1;
-    const ui64 DummyTablet1 = 0x840100;
-    const ui64 DummyTablet2 = 0x840101;
-    const ui64 Coordinator = 0x800001;
-    const ui64 Mediator = 0x810001;
-    const ui64 TxAllocator = 0x820001;
-    const ui64 SchemeRoot = 0x850100;
-    const ui64 Hive = 0xA001;
+    const ui64 DummyTablet1 = MakeTabletID(false, 0x840100);
+    const ui64 DummyTablet2 = MakeTabletID(false, 0x840101);
+    const ui64 Coordinator = MakeTabletID(false, 0x800001);
+    const ui64 Mediator = MakeTabletID(false, 0x810001);
+    const ui64 TxAllocator = MakeTabletID(false, 0x820001);
+    const ui64 SchemeRoot = MakeTabletID(false, 0x850100);
+    const ui64 Hive = MakeTabletID(false, 0xA001);
 
     struct TServerSetup {
         TString IpAddress;
@@ -78,10 +81,17 @@ namespace Tests {
     bool IsServerRedirected();
     TServerSetup GetServerSetup();
 
-    ui64 ChangeDomain(ui64 tabletId, ui32 domainUid);
-    ui64 ChangeStateStorage(ui64 tabletId, ui32 ssUid);
-    NMiniKQL::IFunctionRegistry* DefaultFrFactory(const NScheme::TTypeRegistry& typeRegistry);
+    inline ui64 ChangeDomain(ui64 tabletId, ui32 id) {
+        const ui64 mask = static_cast<ui64>(0xfff) << 44;
+        return (tabletId & ~mask) | static_cast<ui64>(id & 0xfff) << 44;
+    }
 
+    inline ui64 ChangeStateStorage(ui64 tabletId, ui32 id) {
+        const ui64 mask = static_cast<ui64>(0xff) << 56;
+        return (tabletId & ~mask) | static_cast<ui64>(id & 0xff) << 56;
+    }
+
+    NMiniKQL::IFunctionRegistry* DefaultFrFactory(const NScheme::TTypeRegistry& typeRegistry);
 
     struct TServerSettings: public TThrRefBase, public TTestFeatureFlagsHolder<TServerSettings> {
         static constexpr ui64 BOX_ID = 999;
@@ -97,6 +107,9 @@ namespace Tests {
         ui16 Port;
         ui16 GrpcPort = 0;
         int GrpcMaxMessageSize = 0;  // 0 - default (4_MB), -1 - no limit
+        ui16 MonitoringPortOffset = 0;
+        bool MonitoringTypeAsync = false;
+        bool NeedStatsCollectors = false;
         NKikimrProto::TAuthConfig AuthConfig;
         NKikimrPQ::TPQConfig PQConfig;
         NKikimrPQ::TPQClusterDiscoveryConfig PQClusterDiscoveryConfig;
@@ -127,11 +140,12 @@ namespace Tests {
         TDuration KeepSnapshotTimeout = TDuration::Zero();
         ui64 ChangesQueueItemsLimit = 0;
         ui64 ChangesQueueBytesLimit = 0;
-        NKikimrConfig::TAppConfig AppConfig;
+        std::shared_ptr<NKikimrConfig::TAppConfig> AppConfig;
         std::shared_ptr<TKikimrRunConfig> KikimrRunConfig;
         NKikimrConfig::TCompactionConfig CompactionConfig;
         TMap<ui32, TString> NodeKeys;
         ui64 DomainPlanResolution = 0;
+        ui32 DomainTimecastBuckets = 0;
         std::shared_ptr<NKikimr::NMsgBusProxy::IPersQueueGetReadSessionsInfoWorkerFactory> PersQueueGetReadSessionsInfoWorkerFactory;
         std::shared_ptr<NKikimr::NHttpProxy::IAuthFactory> DataStreamsAuthFactory;
         std::shared_ptr<NKikimr::NPQ::TPersQueueMirrorReaderFactory> PersQueueMirrorReaderFactory = std::make_shared<NKikimr::NPQ::TPersQueueMirrorReaderFactory>();
@@ -140,13 +154,20 @@ namespace Tests {
         TString AwsRegion;
         NKqp::IKqpFederatedQuerySetupFactory::TPtr FederatedQuerySetupFactory = std::make_shared<NKqp::TKqpFederatedQuerySetupFactoryNoop>();
         NYql::ISecuredServiceAccountCredentialsFactory::TPtr CredentialsFactory;
+        NMiniKQL::TComputationNodeFactory ComputationFactory;
+        NYql::IYtGateway::TPtr YtGateway;
         bool InitializeFederatedQuerySetupFactory = false;
+        TString ServerCertFilePath;
+        bool Verbose = true;
 
-        std::function<IActor*(const NKikimrProto::TAuthConfig&)> CreateTicketParser = NKikimr::CreateTicketParser;
+        std::function<IActor*(const TTicketParserSettings&)> CreateTicketParser = NKikimr::CreateTicketParser;
         std::shared_ptr<TGrpcServiceFactory> GrpcServiceFactory;
+        std::shared_ptr<NYql::NDq::IS3ActorsFactory> S3ActorsFactory = NYql::NDq::CreateDefaultS3ActorsFactory();
 
         TServerSettings& SetGrpcPort(ui16 value) { GrpcPort = value; return *this; }
         TServerSettings& SetGrpcMaxMessageSize(int value) { GrpcMaxMessageSize = value; return *this; }
+        TServerSettings& SetMonitoringPortOffset(ui16 value, bool monitoringTypeAsync = false) { MonitoringPortOffset = value; MonitoringTypeAsync = monitoringTypeAsync; return *this; }
+        TServerSettings& SetNeedStatsCollectors(bool value) { NeedStatsCollectors = value; return *this; }
         TServerSettings& SetSupportsRedirect(bool value) { SupportsRedirect = value; return *this; }
         TServerSettings& SetTracePath(const TString& value) { TracePath = value; return *this; }
         TServerSettings& SetDomain(ui32 value) { Domain = value; return *this; }
@@ -167,12 +188,13 @@ namespace Tests {
         TServerSettings& SetEnableNodeBroker(bool value) { EnableNodeBroker = value; return *this; }
         TServerSettings& SetEnableConfigsDispatcher(bool value) { EnableConfigsDispatcher = value; return *this; }
         TServerSettings& SetUseRealThreads(bool value) { UseRealThreads = value; return *this; }
-        TServerSettings& SetAppConfig(const NKikimrConfig::TAppConfig value) { AppConfig = value; return *this; }
-        TServerSettings& InitKikimrRunConfig() { KikimrRunConfig = std::make_shared<TKikimrRunConfig>(AppConfig); return *this; }
+        TServerSettings& SetAppConfig(const NKikimrConfig::TAppConfig& value) { AppConfig = std::make_shared<NKikimrConfig::TAppConfig>(value); return *this; }
+        TServerSettings& InitKikimrRunConfig() { KikimrRunConfig = std::make_shared<TKikimrRunConfig>(*AppConfig); return *this; }
         TServerSettings& SetKeyFor(ui32 nodeId, TString keyValue) { NodeKeys[nodeId] = keyValue; return *this; }
         TServerSettings& SetEnableKqpSpilling(bool value) { EnableKqpSpilling = value; return *this; }
         TServerSettings& SetEnableForceFollowers(bool value) { EnableForceFollowers = value; return *this; }
         TServerSettings& SetDomainPlanResolution(ui64 resolution) { DomainPlanResolution = resolution; return *this; }
+        TServerSettings& SetDomainTimecastBuckets(ui32 buckets) { DomainTimecastBuckets = buckets; return *this; }
         TServerSettings& SetFeatureFlags(const NKikimrConfig::TFeatureFlags& value) { FeatureFlags = value; return *this; }
         TServerSettings& SetCompactionConfig(const NKikimrConfig::TCompactionConfig& value) { CompactionConfig = value; return *this; }
         TServerSettings& SetEnableDbCounters(bool value) { FeatureFlags.SetEnableDbCounters(value); return *this; }
@@ -185,7 +207,10 @@ namespace Tests {
         TServerSettings& SetAwsRegion(const TString& value) { AwsRegion = value; return *this; }
         TServerSettings& SetFederatedQuerySetupFactory(NKqp::IKqpFederatedQuerySetupFactory::TPtr value) { FederatedQuerySetupFactory = value; return *this; }
         TServerSettings& SetCredentialsFactory(NYql::ISecuredServiceAccountCredentialsFactory::TPtr credentialsFactory) { CredentialsFactory = std::move(credentialsFactory); return *this; }
+        TServerSettings& SetComputationFactory(NMiniKQL::TComputationNodeFactory computationFactory) { ComputationFactory = std::move(computationFactory); return *this; }
+        TServerSettings& SetYtGateway(NYql::IYtGateway::TPtr ytGateway) { YtGateway = std::move(ytGateway); return *this; }
         TServerSettings& SetInitializeFederatedQuerySetupFactory(bool value) { InitializeFederatedQuerySetupFactory = value; return *this; }
+        TServerSettings& SetVerbose(bool value) { Verbose = value; return *this; }
         TServerSettings& SetPersQueueGetReadSessionsInfoWorkerFactory(
             std::shared_ptr<NKikimr::NMsgBusProxy::IPersQueueGetReadSessionsInfoWorkerFactory> factory
         ) {
@@ -219,14 +244,15 @@ namespace Tests {
             , PQConfig(pqConfig)
         {
             AddStoragePool("test", "/" + DomainName + ":test");
-            AppConfig.MutableTableServiceConfig()->MutableResourceManager()->MutableShardsScanningPolicy()->SetParallelScanningAvailable(true);
-            AppConfig.MutableTableServiceConfig()->MutableResourceManager()->MutableShardsScanningPolicy()->SetShardSplitFactor(16);
-            AppConfig.MutableHiveConfig()->SetWarmUpBootWaitingPeriod(10);
-            AppConfig.MutableHiveConfig()->SetMaxNodeUsageToKick(100);
-            AppConfig.MutableHiveConfig()->SetMinCounterScatterToBalance(100);
-            AppConfig.MutableHiveConfig()->SetMinScatterToBalance(100);
-            AppConfig.MutableHiveConfig()->SetObjectImbalanceToBalance(100);
-            AppConfig.MutableColumnShardConfig()->SetDisabledOnSchemeShard(false);
+            AppConfig = std::make_shared<NKikimrConfig::TAppConfig>();
+            AppConfig->MutableTableServiceConfig()->MutableResourceManager()->MutableShardsScanningPolicy()->SetParallelScanningAvailable(true);
+            AppConfig->MutableTableServiceConfig()->MutableResourceManager()->MutableShardsScanningPolicy()->SetShardSplitFactor(16);
+            AppConfig->MutableHiveConfig()->SetWarmUpBootWaitingPeriod(10);
+            AppConfig->MutableHiveConfig()->SetMaxNodeUsageToKick(100);
+            AppConfig->MutableHiveConfig()->SetMinCounterScatterToBalance(100);
+            AppConfig->MutableHiveConfig()->SetMinScatterToBalance(100);
+            AppConfig->MutableHiveConfig()->SetObjectImbalanceToBalance(100);
+            AppConfig->MutableColumnShardConfig()->SetDisabledOnSchemeShard(false);
             FeatureFlags.SetEnableSeparationComputeActorsFromRead(true);
         }
 
@@ -234,7 +260,6 @@ namespace Tests {
         TServerSettings& operator=(const TServerSettings& settings) = default;
     private:
         YDB_FLAG_ACCESSOR(EnableMetadataProvider, true);
-        YDB_FLAG_ACCESSOR(EnableBackgroundTasks, false);
         YDB_FLAG_ACCESSOR(EnableExternalIndex, false);
     };
 
@@ -242,7 +267,8 @@ namespace Tests {
     protected:
         void SetupStorage();
 
-        void SetupMessageBus(ui16 port, const TString &tracePath);
+        void SetupActorSystemConfig();
+        void SetupMessageBus(ui16 port);
         void SetupDomains(TAppPrepare&);
         void CreateBootstrapTablets();
         void SetupLocalConfig(TLocalConfig &localConfig, const NKikimr::TAppData &appData);
@@ -298,6 +324,7 @@ namespace Tests {
         }
         void SetupDynamicLocalService(ui32 nodeIdx, const TString &tenantName);
         void DestroyDynamicLocalService(ui32 nodeIdx);
+        void WaitFinalization();
 
     protected:
         const TServerSettings::TConstPtr Settings;
@@ -391,10 +418,6 @@ namespace Tests {
         TAutoPtr<NBus::TBusMessage> InitRootSchemeWithReply(const TString& root);
         void InitRootScheme();
         void InitRootScheme(const TString& root);
-
-        void ExecuteTraceCommand(NKikimrClient::TMessageBusTraceRequest::ECommand command, const TString &path = TString());
-        TString StartTrace(const TString &path);
-        void StopTrace();
 
         // Flat DB operations
         NMsgBusProxy::EResponseStatus WaitCreateTx(TTestActorRuntime* runtime, const TString& path, TDuration timeout);
@@ -576,6 +599,7 @@ namespace Tests {
         const TString DomainName;
         const bool SupportsRedirect;
         const TStoragePoolKinds StoragePoolTypes;
+        const bool Verbose;
         NScheme::TKikimrTypeRegistry TypeRegistry;
         TIntrusivePtr<NMiniKQL::IFunctionRegistry> FunctionRegistry;
         NMsgBusProxy::TMsgBusClientConfig ClientConfig;

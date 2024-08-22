@@ -2,11 +2,13 @@
 
 #include <ydb/library/yql/providers/yt/common/yql_names.h>
 #include <ydb/library/yql/providers/common/codec/yql_codec_type_flags.h>
+#include <ydb/library/yql/providers/common/schema/expr/yql_expr_schema.h>
 
 #include <ydb/library/yql/utils/log/log.h>
 #include <ydb/library/yql/utils/yql_panic.h>
 
 #include <library/cpp/yson/node/node_io.h>
+#include <library/cpp/yson/node/node_builder.h>
 
 #include <util/string/cast.h>
 #include <util/generic/yexception.h>
@@ -77,6 +79,22 @@ static TString ConvertYtDataType(const TString& ytType, ui64& nativeYtTypeFlags)
     else if (ytType == "interval") {
         nativeYtTypeFlags |= NTCF_DATE;
         yqlType = "Interval";
+    }
+    else if (ytType == "date32") {
+        nativeYtTypeFlags |= NTCF_BIGDATE;
+        yqlType = "Date32";
+    }
+    else if (ytType == "datetime64") {
+        nativeYtTypeFlags |= NTCF_BIGDATE;
+        yqlType = "Datetime64";
+    }
+    else if (ytType == "timestamp64") {
+        nativeYtTypeFlags |= NTCF_BIGDATE;
+        yqlType = "Timestamp64";
+    }
+    else if (ytType == "interval64") {
+        nativeYtTypeFlags |= NTCF_BIGDATE;
+        yqlType = "Interval64";
     }
     else if (ytType == "yson") { // V3
         yqlType = "Yson";
@@ -687,6 +705,14 @@ std::pair<NYT::EValueType, bool> RowSpecYqlTypeToYtType(const NYT::TNode& rowSpe
         ytType = NYT::VT_UINT16;
     } else if (yqlType == TStringBuf("Date")) {
         ytType = (nativeYtTypeFlags & NTCF_DATE) ? NYT::VT_DATE : NYT::VT_UINT16;
+    } else if (yqlType == TStringBuf("Date32")) {
+        ytType = (nativeYtTypeFlags & NTCF_BIGDATE) ? NYT::VT_DATE32 : NYT::VT_INT32;
+    } else if (yqlType == TStringBuf("Datetime64")) {
+        ytType = (nativeYtTypeFlags & NTCF_BIGDATE) ? NYT::VT_DATETIME64 : NYT::VT_INT64;
+    } else if (yqlType == TStringBuf("Timestamp64")) {
+        ytType = (nativeYtTypeFlags & NTCF_BIGDATE) ? NYT::VT_TIMESTAMP64 : NYT::VT_INT64;
+    } else if (yqlType == TStringBuf("Interval64")) {
+        ytType = (nativeYtTypeFlags & NTCF_BIGDATE) ? NYT::VT_INTERVAL64 : NYT::VT_INT64;
     } else if (yqlType == TStringBuf("Uint8")) {
         ytType = NYT::VT_UINT8;
     } else if (yqlType == TStringBuf("Float")) {
@@ -698,7 +724,8 @@ std::pair<NYT::EValueType, bool> RowSpecYqlTypeToYtType(const NYT::TNode& rowSpe
     } else if (yqlType == TStringBuf("Yson")) {
         ytType = NYT::VT_ANY;
         required = false;
-    } else if (yqlType == TStringBuf("TzDate") || yqlType == TStringBuf("TzDatetime") || yqlType == TStringBuf("TzTimestamp")) {
+    } else if (yqlType == TStringBuf("TzDate") || yqlType == TStringBuf("TzDatetime") || yqlType == TStringBuf("TzTimestamp") ||
+        yqlType == TStringBuf("TzDate32") || yqlType == TStringBuf("TzDatetime64") || yqlType == TStringBuf("TzTimestamp64")) {
         ytType = NYT::VT_STRING;
     } else {
         YQL_LOG_CTX_THROW yexception() << "Unknown type " << yqlType.Quote() << " in row spec";
@@ -743,7 +770,8 @@ NYT::TNode RowSpecYqlTypeToYtNativeType(const NYT::TNode& rowSpecType, ui64 nati
             ytType = "bool";
         } else if (yqlType == TStringBuf("Yson")) {
             ytType = "yson";
-        } else if (yqlType == TStringBuf("TzDate") || yqlType == TStringBuf("TzDatetime") || yqlType == TStringBuf("TzTimestamp")) {
+        } else if (yqlType == TStringBuf("TzDate") || yqlType == TStringBuf("TzDatetime") || yqlType == TStringBuf("TzTimestamp") ||
+            yqlType == TStringBuf("TzDate32") || yqlType == TStringBuf("TzDatetime64") || yqlType == TStringBuf("TzTimestamp64")) {
             ytType = "string";
         } else if (yqlType == TStringBuf("Date")) {
             ytType = (nativeYtTypeFlags & NTCF_DATE) ? "date" : "uint16";
@@ -753,6 +781,14 @@ NYT::TNode RowSpecYqlTypeToYtNativeType(const NYT::TNode& rowSpecType, ui64 nati
             ytType = (nativeYtTypeFlags & NTCF_DATE) ? "timestamp" : "uint64";
         } else if (yqlType == TStringBuf("Interval")) {
             ytType = (nativeYtTypeFlags & NTCF_DATE) ? "interval" : "int64";
+        } else if (yqlType == TStringBuf("Date32")) {
+            ytType = (nativeYtTypeFlags & NTCF_BIGDATE) ? "date32" : "int32";
+        } else if (yqlType == TStringBuf("Datetime64")) {
+            ytType = (nativeYtTypeFlags & NTCF_BIGDATE) ? "datetime64" : "int64";
+        } else if (yqlType == TStringBuf("Timestamp64")) {
+            ytType = (nativeYtTypeFlags & NTCF_BIGDATE) ? "timestamp64" : "int64";
+        } else if (yqlType == TStringBuf("Interval64")) {
+            ytType = (nativeYtTypeFlags & NTCF_BIGDATE) ? "interval64" : "int64";
         } else if (yqlType == TStringBuf("Decimal")) {
             if (nativeYtTypeFlags & NTCF_DECIMAL) {
                 try {
@@ -906,7 +942,22 @@ NYT::TNode RowSpecYqlTypeToYtNativeType(const NYT::TNode& rowSpecType, ui64 nati
     YQL_ENSURE(false, "Not supported type: " << (*type)[0].AsString());
 }
 
-NYT::TTableSchema RowSpecToYTSchema(const NYT::TNode& rowSpec, ui64 nativeTypeCompatibility) {
+NYT::TTableSchema RowSpecToYTSchema(const NYT::TNode& rowSpec, ui64 nativeTypeCompatibility, const NYT::TNode& columnGroupsSpec) {
+
+    TString defaultGroup;
+    THashMap<TString, TString> columnGroups;
+    if (!columnGroupsSpec.IsUndefined()) {
+        for (const auto& grp: columnGroupsSpec.AsMap()) {
+            if (grp.second.IsEntity()) {
+                defaultGroup = grp.first;
+            } else {
+                for (const auto& col: grp.second.AsList()) {
+                    columnGroups[col.AsString()] = grp.first;
+                }
+            }
+        }
+    }
+
     NYT::TTableSchema schema;
     const auto& rowSpecMap = rowSpec.AsMap();
 
@@ -958,6 +1009,10 @@ NYT::TTableSchema RowSpecToYTSchema(const NYT::TNode& rowSpec, ui64 nativeTypeCo
             auto columnNode = NYT::TColumnSchema()
                 .Name(columnString);
 
+            if (auto group = columnGroups.Value(columnString, defaultGroup)) {
+                columnNode.Group(std::move(group));
+            }
+
             bool auxField = false;
             if (useNativeTypes) {
                 auto ytType = RowSpecYqlTypeToYtNativeType(*sortedByType, nativeYtTypeFlags);
@@ -980,19 +1035,21 @@ NYT::TTableSchema RowSpecToYTSchema(const NYT::TNode& rowSpec, ui64 nativeTypeCo
         if (keyColumns.contains(column)) {
             continue;
         }
+        auto columnNode = NYT::TColumnSchema().Name(column);
+        if (auto group = columnGroups.Value(column, defaultGroup)) {
+            columnNode.Group(std::move(group));
+        }
         if (useNativeTypes) {
             auto field = fieldNativeTypes.find(column);
             YQL_ENSURE(field != fieldNativeTypes.end());
-            schema.AddColumn(NYT::TColumnSchema()
-                .Name(field->first)
-                .RawTypeV3(field->second));
+            columnNode.RawTypeV3(field->second);
+
         } else {
             auto field = fieldTypes.find(column);
             YQL_ENSURE(field != fieldTypes.end());
-            schema.AddColumn(NYT::TColumnSchema()
-                .Name(field->first)
-                .Type(field->second.first, /*required*/ field->second.second));
+            columnNode.Type(field->second.first, /*required*/ field->second.second);
         }
+        schema.AddColumn(std::move(columnNode));
     }
 
     // add fake column to avoid slow 0-columns YT schema
@@ -1015,6 +1072,13 @@ NYT::TSortColumns ToYTSortColumns(const TVector<std::pair<TString, bool>>& sortC
         res.Add(NYT::TSortColumn().Name(item.first).SortOrder(item.second ? NYT::ESortOrder::SO_ASCENDING : NYT::ESortOrder::SO_DESCENDING));
     }
     return res;
+}
+
+TString GetTypeV3String(const TTypeAnnotationNode& type, ui64 nativeTypeCompatibility) {
+    NYT::TNode typeNode;
+    NYT::TNodeBuilder nodeBuilder(&typeNode);
+    NCommon::WriteTypeToYson(nodeBuilder, &type);
+    return NYT::NodeToCanonicalYsonString(RowSpecYqlTypeToYtNativeType(typeNode, nativeTypeCompatibility));
 }
 
 } // NYql

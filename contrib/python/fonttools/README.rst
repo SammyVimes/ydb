@@ -44,7 +44,7 @@ Python 3 `venv <https://docs.python.org/3/library/venv.html>`__ module.
     # create new virtual environment called e.g. 'fonttools-venv', or anything you like
     python -m virtualenv fonttools-venv
 
-    # source the `activate` shell script to enter the environment (Un*x); to exit, just type `deactivate`
+    # source the `activate` shell script to enter the environment (Unix-like); to exit, just type `deactivate`
     . fonttools-venv/bin/activate
 
     # to activate the virtual environment in Windows `cmd.exe`, do
@@ -138,6 +138,13 @@ are required to unlock the extra features named "ufo", etc.
   * `munkres <https://pypi.python.org/pypi/munkres>`__: a pure-Python
     module that implements the Hungarian or Kuhn-Munkres algorithm.
 
+  To plot the results to a PDF or HTML format, you also need to install:
+
+  * `pycairo <https://pypi.org/project/pycairo/>`__: Python bindings for the
+    Cairo graphics library. Note that wheels are currently only available for
+    Windows, for other platforms see pycairo's `installation instructions
+    <https://pycairo.readthedocs.io/en/latest/getting_started.html>`__.
+
   *Extra:* ``interpolatable``
 
 - ``Lib/fontTools/varLib/plot.py``
@@ -225,7 +232,8 @@ How to make a new release
 2) Use semantic versioning to decide whether the new release will be a 'major',
    'minor' or 'patch' release. It's usually one of the latter two, depending on
    whether new backward compatible APIs were added, or simply some bugs were fixed.
-3) Run ``python setup.py release`` command from the tip of the ``main`` branch.
+3) From inside a venv, first do ``pip install -r dev-requirements.txt``, then run
+   the ``python setup.py release`` command from the tip of the ``main`` branch.
    By default this bumps the third or 'patch' digit only, unless you pass ``--major``
    or ``--minor`` to bump respectively the first or second digit.
    This bumps the package version string, extracts the changes since the latest

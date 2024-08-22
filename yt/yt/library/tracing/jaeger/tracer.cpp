@@ -11,10 +11,12 @@
 #include <yt/yt/core/concurrency/action_queue.h>
 #include <yt/yt/core/concurrency/periodic_executor.h>
 
-#include <yt/yt/core/ytree/yson_serializable.h>
 #include <yt/yt/core/misc/protobuf_helpers.h>
 #include <yt/yt/core/misc/serialize.h>
+
 #include <yt/yt/core/utilex/random.h>
+
+#include <yt/yt/core/ytree/yson_struct.h>
 
 #include <util/string/cast.h>
 #include <util/string/reverse.h>
@@ -22,6 +24,8 @@
 #include <util/system/getpid.h>
 #include <util/system/env.h>
 #include <util/system/byteorder.h>
+
+#include <stack>
 
 namespace NYT::NTracing {
 
@@ -33,8 +37,9 @@ using namespace NAuth;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const NLogging::TLogger Logger{"Jaeger"};
-static const NProfiling::TProfiler Profiler{"/tracing"};
+YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "Jaeger");
+YT_DEFINE_GLOBAL(const NProfiling::TProfiler, Profiler, "/tracing");
+
 static const TString ServiceTicketMetadataName = "x-ya-service-ticket";
 static const TString TracingServiceAlias = "tracing";
 
@@ -93,6 +98,9 @@ void TJaegerTracerConfig::Register(TRegistrar registrar)
 
     registrar.Parameter("tvm_service", &TThis::TvmService)
         .Optional();
+
+    registrar.Parameter("test_drop_spans", &TThis::TestDropSpans)
+        .Default(false);
 }
 
 TJaegerTracerConfigPtr TJaegerTracerConfig::ApplyDynamic(const TJaegerTracerDynamicConfigPtr& dynamicConfig) const
@@ -117,6 +125,7 @@ TJaegerTracerConfigPtr TJaegerTracerConfig::ApplyDynamic(const TJaegerTracerDyna
     config->ProcessTags = ProcessTags;
     config->EnablePidTag = EnablePidTag;
     config->TvmService = TvmService;
+    config->TestDropSpans = TestDropSpans;
 
     config->Postprocess();
     return config;
@@ -191,7 +200,7 @@ void ToProto(NProto::Span* proto, const TTraceContextPtr& traceContext)
     for (const auto& traceId : traceContext->GetAsyncChildren()) {
         auto* tag = proto->add_tags();
 
-        tag->set_key(Format("yt.async_trace_id.%d", i++));
+        tag->set_key(Format("yt.async_trace_id.%v", i++));
         tag->set_v_str(ToString(traceId));
     }
 
@@ -221,10 +230,10 @@ TBatchInfo::TBatchInfo()
 { }
 
 TBatchInfo::TBatchInfo(const TString& endpoint)
-    : TracesDequeued_(Profiler.WithTag("endpoint", endpoint).Counter("/traces_dequeued"))
-    , TracesDropped_(Profiler.WithTag("endpoint", endpoint).Counter("/traces_dropped"))
-    , MemoryUsage_(Profiler.WithTag("endpoint", endpoint).Gauge("/memory_usage"))
-    , TraceQueueSize_(Profiler.WithTag("endpoint", endpoint).Gauge("/queue_size"))
+    : TracesDequeued_(Profiler().WithTag("endpoint", endpoint).Counter("/traces_dequeued"))
+    , TracesDropped_(Profiler().WithTag("endpoint", endpoint).Counter("/traces_dropped"))
+    , MemoryUsage_(Profiler().WithTag("endpoint", endpoint).Gauge("/memory_usage"))
+    , TraceQueueSize_(Profiler().WithTag("endpoint", endpoint).Gauge("/queue_size"))
 { }
 
 void TBatchInfo::PopFront()
@@ -287,7 +296,7 @@ std::tuple<std::vector<TSharedRef>, int, int> TBatchInfo::PeekQueue(const TJaege
         batches.push_back(BatchQueue_[batchCount].second);
     }
 
-    return std::make_tuple(batches, batchCount, spanCount);
+    return std::tuple(batches, batchCount, spanCount);
 }
 
 TJaegerChannelManager::TJaegerChannelManager()
@@ -304,10 +313,10 @@ TJaegerChannelManager::TJaegerChannelManager(
     , Endpoint_(endpoint)
     , ReopenTime_(TInstant::Now() + config->ReconnectPeriod + RandomDuration(config->ReconnectPeriod))
     , RpcTimeout_(config->RpcTimeout)
-    , PushedBytes_(Profiler.WithTag("endpoint", endpoint).Counter("/pushed_bytes"))
-    , PushErrors_(Profiler.WithTag("endpoint", endpoint).Counter("/push_errors"))
-    , PayloadSize_(Profiler.WithTag("endpoint", endpoint).Summary("/payload_size"))
-    , PushDuration_(Profiler.WithTag("endpoint", endpoint).Timer("/push_duration"))
+    , PushedBytes_(Profiler().WithTag("endpoint", endpoint).Counter("/pushed_bytes"))
+    , PushErrors_(Profiler().WithTag("endpoint", endpoint).Counter("/push_errors"))
+    , PayloadSize_(Profiler().WithTag("endpoint", endpoint).Summary("/payload_size"))
+    , PushDuration_(Profiler().WithTag("endpoint", endpoint).Timer("/push_duration"))
 {
     auto channelEndpointConfig = CloneYsonStruct(config->CollectorChannelConfig);
     channelEndpointConfig->Address = endpoint;
@@ -380,7 +389,7 @@ TJaegerTracer::TJaegerTracer(
     , Config_(config)
     , TvmService_(config->TvmService ? CreateTvmService(config->TvmService) : nullptr)
 {
-    Profiler.AddFuncGauge("/enabled", MakeStrong(this), [this] {
+    Profiler().AddFuncGauge("/enabled", MakeStrong(this), [this] {
         return Config_.Acquire()->IsEnabled();
     });
 
@@ -436,7 +445,7 @@ void TJaegerTracer::DequeueAll(const TJaegerTracerConfigPtr& config)
     }
 
     THashMap<TString, NProto::Batch> batches;
-    auto flushBatch = [&](TString endpoint) {
+    auto flushBatch = [&] (TString endpoint) {
         auto itBatch = batches.find(endpoint);
         if (itBatch == batches.end()) {
             return;
@@ -550,6 +559,7 @@ void TJaegerTracer::Flush()
     DequeueAll(config);
 
     if (TInstant::Now() - LastSuccessfulFlushTime_ > config->QueueStallTimeout) {
+        YT_LOG_DEBUG("Queue stall timeout expired (QueueStallTimeout: %v)", config->QueueStallTimeout);
         DropFullQueue();
     }
 
@@ -571,6 +581,14 @@ void TJaegerTracer::Flush()
 
     std::stack<TString> toRemove;
     auto keys = ExtractKeys(BatchInfo_);
+
+    if (keys.empty()) {
+        YT_LOG_DEBUG("Span batch info is empty");
+        LastSuccessfulFlushTime_ = flushStartTime;
+        NotifyEmptyQueue();
+        return;
+    }
+
     for (const auto& endpoint : keys) {
         auto [batches, batchCount, spanCount] = PeekQueue(config, endpoint);
         if (batchCount <= 0) {
@@ -578,6 +596,16 @@ void TJaegerTracer::Flush()
                 toRemove.push(endpoint);
             }
             YT_LOG_DEBUG("Span queue is empty (Endpoint: %v)", endpoint);
+            LastSuccessfulFlushTime_ = flushStartTime;
+            continue;
+        }
+
+        if (config->TestDropSpans) {
+            DropQueue(batchCount, endpoint);
+            YT_LOG_DEBUG("Spans dropped in test (BatchCount: %v, SpanCount: %v, Endpoint: %v)",
+                batchCount,
+                spanCount,
+                endpoint);
             continue;
         }
 

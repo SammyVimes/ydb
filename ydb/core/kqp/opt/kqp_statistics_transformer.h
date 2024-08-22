@@ -5,6 +5,7 @@
 #include <ydb/library/yql/core/yql_statistics.h>
 
 #include <ydb/core/kqp/common/kqp_yql.h>
+#include <ydb/core/kqp/opt/logical/kqp_opt_cbo.h>
 #include <ydb/library/yql/core/yql_graph_transformer.h>
 #include <ydb/library/yql/core/yql_expr_optimize.h>
 #include <ydb/library/yql/core/yql_expr_type_annotation.h>
@@ -28,13 +29,13 @@ using namespace NOpt;
 class TKqpStatisticsTransformer : public NYql::NDq::TDqStatisticsTransformerBase {
 
     const TKikimrConfiguration::TPtr& Config;
-    const TKqpOptimizeContext& KqpCtx;
+    TKqpOptimizeContext& KqpCtx;
     TVector<TVector<std::shared_ptr<TOptimizerStatistics>>> TxStats;
 
     public:
         TKqpStatisticsTransformer(const TIntrusivePtr<TKqpOptimizeContext>& kqpCtx, TTypeAnnotationContext& typeCtx, 
-            const TKikimrConfiguration::TPtr& config) : 
-            TDqStatisticsTransformerBase(&typeCtx),
+            const TKikimrConfiguration::TPtr& config, const TKqpProviderContext& pctx) : 
+            TDqStatisticsTransformerBase(&typeCtx, pctx, kqpCtx->GetCardinalityHints()),
             Config(config),
             KqpCtx(*kqpCtx) {}
 
@@ -47,6 +48,6 @@ class TKqpStatisticsTransformer : public NYql::NDq::TDqStatisticsTransformerBase
 };
 
 TAutoPtr<IGraphTransformer> CreateKqpStatisticsTransformer(const TIntrusivePtr<TKqpOptimizeContext>& kqpCtx, 
-    TTypeAnnotationContext& typeCtx, const TKikimrConfiguration::TPtr& config);
+    TTypeAnnotationContext& typeCtx, const TKikimrConfiguration::TPtr& config, const TKqpProviderContext& pctx);
 }
 }

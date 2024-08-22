@@ -3,15 +3,16 @@ UNITTEST()
     SIZE(MEDIUM)
     TIMEOUT(600)
 
-    REQUIREMENTS(
-        ram:32
-    )
+    IF (SANITIZER_TYPE)
+        REQUIREMENTS(ram:32)
+    ENDIF()
 
     SRCS(
         main.cpp
     )
 
     PEERDIR(
+        ydb/apps/version
         ydb/core/base
         ydb/core/blob_depot
         ydb/core/blobstorage/backpressure

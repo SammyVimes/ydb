@@ -1,12 +1,13 @@
 #include "kqp_worker_common.h"
+#include "kqp_query_stats.h"
 
 #include <ydb/core/base/appdata.h>
 #include <ydb/core/base/counters.h>
 #include <ydb/core/base/cputime.h>
 #include <ydb/core/protos/kqp.pb.h>
 #include <ydb/core/engine/mkql_proto.h>
-#include <ydb/core/kqp/common/kqp_timeouts.h>
 #include <ydb/core/kqp/common/kqp_ru_calc.h>
+#include <ydb/core/kqp/common/kqp_timeouts.h>
 #include <ydb/core/kqp/gateway/kqp_metadata_loader.h>
 #include <ydb/core/kqp/host/kqp_host.h>
 #include <ydb/core/sys_view/service/sysview_service.h>
@@ -42,6 +43,12 @@ namespace {
 #define LOG_T(msg) LOG_TRACE_S(*TlsActivationContext, NKikimrServices::KQP_WORKER, LogPrefix() << msg)
 
 using TQueryResult = IKqpHost::TQueryResult;
+
+enum EReplyFlags : ui32 {
+    QUERY_REPLY_FLAG_RESULTS = 1,
+    QUERY_REPLY_FLAG_PLAN = 2,
+    QUERY_REPLY_FLAG_AST = 4,
+};
 
 struct TKqpQueryState {
     TActorId Sender;
@@ -98,7 +105,7 @@ public:
     TKqpWorkerActor(const TActorId& owner, const TString& sessionId, const TKqpSettings::TConstPtr& kqpSettings,
         const TKqpWorkerSettings& workerSettings, std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
         TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
-        const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig
+        const TQueryServiceConfig& queryServiceConfig, const TGUCSettings::TPtr& gUCSettings
         )
         : Owner(owner)
         , SessionId(sessionId)
@@ -107,10 +114,11 @@ public:
         , ModuleResolverState(moduleResolverState)
         , Counters(counters)
         , Config(MakeIntrusive<TKikimrConfiguration>())
-        , MetadataProviderConfig(metadataProviderConfig)
+        , QueryServiceConfig(queryServiceConfig)
         , CreationTime(TInstant::Now())
         , QueryId(0)
         , ShutdownState(std::nullopt)
+        , GUCSettings(gUCSettings)
     {
         Y_ABORT_UNLESS(ModuleResolverState);
         Y_ABORT_UNLESS(ModuleResolverState->ModuleResolver);
@@ -179,23 +187,23 @@ public:
         QueryState->RequestEv.reset(ev->Release().Release());
 
         std::shared_ptr<NYql::IKikimrGateway::IKqpTableMetadataLoader> loader = std::make_shared<TKqpTableMetadataLoader>(
-            TlsActivationContext->ActorSystem(), Config, false, nullptr, 2 * TDuration::Seconds(MetadataProviderConfig.GetRefreshPeriodSeconds()));
+            Settings.Cluster, TlsActivationContext->ActorSystem(), Config, false, nullptr);
         Gateway = CreateKikimrIcGateway(Settings.Cluster, QueryState->RequestEv->GetType(), Settings.Database, std::move(loader),
-            ctx.ExecutorThread.ActorSystem, ctx.SelfID.NodeId(), RequestCounters);
+            ctx.ExecutorThread.ActorSystem, ctx.SelfID.NodeId(), RequestCounters, QueryServiceConfig);
 
         Config->FeatureFlags = AppData(ctx)->FeatureFlags;
 
-        KqpHost = CreateKqpHost(Gateway, Settings.Cluster, Settings.Database, Config, ModuleResolverState->ModuleResolver,
-            FederatedQuerySetup, AppData(ctx)->FunctionRegistry, !Settings.LongSession, false);
+        KqpHost = CreateKqpHost(Gateway, Settings.Cluster, Settings.Database, Config, ModuleResolverState->ModuleResolver, FederatedQuerySetup,
+            QueryState->RequestEv->GetUserToken(), GUCSettings, QueryServiceConfig, Settings.ApplicationName, AppData(ctx)->FunctionRegistry, !Settings.LongSession, false, nullptr, nullptr, nullptr);
 
         auto& queryRequest = QueryState->RequestEv;
         QueryState->ProxyRequestId = proxyRequestId;
         QueryState->KeepSession = Settings.LongSession || queryRequest->GetKeepSession();
         QueryState->StartTime = now;
-        QueryState->ReplyFlags = queryRequest->Record.GetRequest().GetReplyFlags();
+        QueryState->ReplyFlags = EReplyFlags::QUERY_REPLY_FLAG_RESULTS;
 
         if (GetStatsMode(QueryState->RequestEv.get(), EKikimrStatsMode::None) > EKikimrStatsMode::Basic) {
-            QueryState->ReplyFlags |= NKikimrKqp::QUERY_REPLY_FLAG_AST;
+            QueryState->ReplyFlags |= EReplyFlags::QUERY_REPLY_FLAG_AST;
         }
 
         NCpuTime::TCpuTimer timer;
@@ -330,11 +338,7 @@ public:
         if (CleanupState->Final) {
             ReplyProcessError(ev->Sender, proxyRequestId, Ydb::StatusIds::BAD_SESSION, "Session is being closed");
         } else {
-            auto busyStatus = Settings.TableService.GetUseSessionBusyStatus()
-                ? Ydb::StatusIds::SESSION_BUSY
-                : Ydb::StatusIds::PRECONDITION_FAILED;
-
-            ReplyProcessError(ev->Sender, proxyRequestId, busyStatus, "Pending previous query completion");
+            ReplyProcessError(ev->Sender, proxyRequestId, Ydb::StatusIds::SESSION_BUSY, "Pending previous query completion");
         }
     }
 
@@ -479,7 +483,7 @@ private:
 
             case NKikimrKqp::QUERY_ACTION_EXPLAIN: {
                 // Force reply flags
-                QueryState->ReplyFlags |= NKikimrKqp::QUERY_REPLY_FLAG_PLAN | NKikimrKqp::QUERY_REPLY_FLAG_AST;
+                QueryState->ReplyFlags |= EReplyFlags::QUERY_REPLY_FLAG_PLAN | EReplyFlags::QUERY_REPLY_FLAG_AST;
                 if (!ExplainQuery(ctx, QueryState->RequestEv->GetQuery(), queryType)) {
                     onBadRequest(QueryState->Error);
                     return;
@@ -891,11 +895,7 @@ private:
             return;
         }
 
-        auto busyStatus = Settings.TableService.GetUseSessionBusyStatus()
-            ? Ydb::StatusIds::SESSION_BUSY
-            : Ydb::StatusIds::PRECONDITION_FAILED;
-
-        ReplyProcessError(ev->Sender, proxyRequestId, busyStatus,
+        ReplyProcessError(ev->Sender, proxyRequestId, Ydb::StatusIds::SESSION_BUSY,
             "Pending previous query completion");
     }
 
@@ -913,7 +913,7 @@ private:
                 TString text = ExtractQueryText();
                 if (IsQueryAllowedToLog(text)) {
                     auto userSID = QueryState->RequestEv->GetUserToken()->GetUserSID();
-                    NSysView::CollectQueryStats(ctx, stats, queryDuration, text,
+                    CollectQueryStats(ctx, stats, queryDuration, text,
                         userSID, QueryState->RequestEv->GetParametersSize(), database, type, requestUnits);
                 }
                 break;
@@ -942,9 +942,9 @@ private:
         bool replyAst = true;
 
         // TODO: Handle in KQP to avoid generation of redundant data
-        replyResults = replyResults && (QueryState->ReplyFlags & NKikimrKqp::QUERY_REPLY_FLAG_RESULTS);
-        replyPlan = replyPlan && (QueryState->ReplyFlags & NKikimrKqp::QUERY_REPLY_FLAG_PLAN);
-        replyAst = replyAst && (QueryState->ReplyFlags & NKikimrKqp::QUERY_REPLY_FLAG_AST);
+        replyResults = replyResults && (QueryState->ReplyFlags & EReplyFlags::QUERY_REPLY_FLAG_RESULTS);
+        replyPlan = replyPlan && (QueryState->ReplyFlags & EReplyFlags::QUERY_REPLY_FLAG_PLAN);
+        replyAst = replyAst && (QueryState->ReplyFlags & EReplyFlags::QUERY_REPLY_FLAG_AST);
 
         auto ydbStatus = GetYdbStatus(queryResult);
         auto issues = queryResult.Issues();
@@ -1080,7 +1080,7 @@ private:
     TIntrusivePtr<TKqpCounters> Counters;
     TIntrusivePtr<TKqpRequestCounters> RequestCounters;
     TKikimrConfiguration::TPtr Config;
-    NKikimrConfig::TMetadataProviderConfig MetadataProviderConfig;
+    TQueryServiceConfig QueryServiceConfig;
     TInstant CreationTime;
     TIntrusivePtr<IKqpGateway> Gateway;
     TIntrusivePtr<IKqpHost> KqpHost;
@@ -1088,6 +1088,7 @@ private:
     THolder<TKqpQueryState> QueryState;
     THolder<TKqpCleanupState> CleanupState;
     std::optional<TSessionShutdownState> ShutdownState;
+    TGUCSettings::TPtr GUCSettings;
 };
 
 } // namespace
@@ -1096,11 +1097,11 @@ IActor* CreateKqpWorkerActor(const TActorId& owner, const TString& sessionId,
     const TKqpSettings::TConstPtr& kqpSettings, const TKqpWorkerSettings& workerSettings,
     std::optional<TKqpFederatedQuerySetup> federatedQuerySetup,
     TIntrusivePtr<TModuleResolverState> moduleResolverState, TIntrusivePtr<TKqpCounters> counters,
-    const NKikimrConfig::TMetadataProviderConfig& metadataProviderConfig
+    const TQueryServiceConfig& queryServiceConfig, const TGUCSettings::TPtr& gUCSettings
     )
 {
     return new TKqpWorkerActor(owner, sessionId, kqpSettings, workerSettings, federatedQuerySetup,
-                               moduleResolverState, counters, metadataProviderConfig);
+                               moduleResolverState, counters, queryServiceConfig, gUCSettings);
 }
 
 } // namespace NKqp

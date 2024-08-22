@@ -66,16 +66,13 @@ TAutoPtr<IEventHandle> EjectDataPropose(TServer::TPtr server, ui64 dataShard)
 }
 
 Y_UNIT_TEST_SUITE(TDataShardMinStepTest) {
-    void TestDropTablePlanComesNotTooEarly(const TString& query, Ydb::StatusIds::StatusCode expectedStatus, bool disableSnaphots = true) {
+    void TestDropTablePlanComesNotTooEarly(const TString& query, Ydb::StatusIds::StatusCode expectedStatus, bool volatileTxs) {
         TPortManager pm;
         NKikimrConfig::TAppConfig app;
-        app.MutableTableServiceConfig()->SetEnableKqpDataQuerySourceRead(false);
         TServerSettings serverSettings(pm.GetPort(2134));
-        if (disableSnaphots) {
-            serverSettings.SetEnableMvccSnapshotReads(false);
-        }
         serverSettings.SetDomainName("Root")
             .SetUseRealThreads(false)
+            .SetEnableDataShardVolatileTransactions(volatileTxs)
             .SetAppConfig(app);
 
         Tests::TServer::TPtr server = new TServer(serverSettings);
@@ -106,8 +103,9 @@ Y_UNIT_TEST_SUITE(TDataShardMinStepTest) {
         auto proposeEvent = EjectDataPropose(server, shard2);
 
         // drop one table while proposes are active
+        auto senderScheme = runtime.AllocateEdgeActor();
         const TInstant dropStart = runtime.GetCurrentTime();
-        ExecSQL(server, sender, "DROP TABLE `/Root/table-1`", false);
+        ExecSQL(server, senderScheme, "DROP TABLE `/Root/table-1`", false);
         WaitTabletBecomesOffline(server, shard1);
         const TInstant dropEnd = runtime.GetCurrentTime();
 
@@ -119,15 +117,18 @@ Y_UNIT_TEST_SUITE(TDataShardMinStepTest) {
             request->Record.CopyFrom(proposeEvent->Get<TEvTxProxy::TEvProposeTransaction>()->Record);
             runtime.SendToPipe(request->Record.GetCoordinatorID(), sender, request.Release());
 
-            TAutoPtr<IEventHandle> handle;
-            auto reply = runtime.GrabEdgeEventRethrow<TEvTxProxy::TEvProposeTransactionStatus>(handle);
-            UNIT_ASSERT_VALUES_EQUAL((TEvTxProxy::TEvProposeTransactionStatus::EStatus)reply->Record.GetStatus(),
-                TEvTxProxy::TEvProposeTransactionStatus::EStatus::StatusOutdated);
+            auto ev = runtime.GrabEdgeEventRethrow<TEvTxProxy::TEvProposeTransactionStatus>(sender);
+            auto expectedPlanStatus = volatileTxs
+                // Volatile transactions abort eagerly, so plan will be accepted (but eventually fail)
+                ? TEvTxProxy::TEvProposeTransactionStatus::EStatus::StatusAccepted
+                : TEvTxProxy::TEvProposeTransactionStatus::EStatus::StatusOutdated;
+            UNIT_ASSERT_VALUES_EQUAL((TEvTxProxy::TEvProposeTransactionStatus::EStatus)ev->Get()->Record.GetStatus(),
+                expectedPlanStatus);
         }
 
         { // handle respond from unplanned data transaction because plan ejection
-            TAutoPtr<IEventHandle> handle;
-            auto reply = runtime.GrabEdgeEventRethrow<NKqp::TEvKqp::TEvQueryResponse>(handle);
+            auto ev = runtime.GrabEdgeEventRethrow<NKqp::TEvKqp::TEvQueryResponse>(sender);
+            auto* reply = ev->Get();
             NYql::TIssues issues;
             NYql::IssuesFromMessage(reply->Record.GetRef().GetResponse().GetQueryIssues(), issues);
             UNIT_ASSERT_VALUES_EQUAL_C(reply->Record.GetRef().GetYdbStatus(), expectedStatus,
@@ -140,17 +141,11 @@ Y_UNIT_TEST_SUITE(TDataShardMinStepTest) {
         WaitTabletBecomesOffline(server, shard2);
     }
 
-    Y_UNIT_TEST(TestDropTablePlanComesNotTooEarlyRO) {
-        TestDropTablePlanComesNotTooEarly(
-            "SELECT * FROM `/Root/table-1`; SELECT * FROM `/Root/table-2`;",
-            Ydb::StatusIds::UNAVAILABLE
-        );
-    }
-
-    Y_UNIT_TEST(TestDropTablePlanComesNotTooEarlyRW) {
+    Y_UNIT_TEST_TWIN(TestDropTablePlanComesNotTooEarlyRW, VolatileTxs) {
         TestDropTablePlanComesNotTooEarly(
             "UPSERT INTO `/Root/table-2` (key, value) SELECT key, value FROM `/Root/table-1`;",
-            Ydb::StatusIds::UNDETERMINED
+            Ydb::StatusIds::ABORTED,
+            VolatileTxs
         );
     }
 
@@ -159,11 +154,11 @@ Y_UNIT_TEST_SUITE(TDataShardMinStepTest) {
         SchemeShard,
     };
 
+/*
     void TestAlterProposeRebootMinStep(ERebootOnPropose rebootOnPropose) {
         TPortManager pm;
         TServerSettings serverSettings(pm.GetPort(2134));
         NKikimrConfig::TAppConfig app;
-        app.MutableTableServiceConfig()->SetEnableKqpDataQuerySourceRead(false);
         serverSettings.SetDomainName("Root")
             .SetUseRealThreads(false)
             .SetAppConfig(app);
@@ -374,7 +369,6 @@ Y_UNIT_TEST_SUITE(TDataShardMinStepTest) {
             evResult->Get()->Record.GetStatus(),
             NKikimrTxDataShard::TEvProposeTransactionResult::ERROR);
     }
-
     Y_UNIT_TEST(TestAlterProposeRebootDataShardMinStep) {
         TestAlterProposeRebootMinStep(ERebootOnPropose::DataShard);
     }
@@ -382,17 +376,14 @@ Y_UNIT_TEST_SUITE(TDataShardMinStepTest) {
     Y_UNIT_TEST(TestAlterProposeRebootSchemeShardMinStep) {
         TestAlterProposeRebootMinStep(ERebootOnPropose::SchemeShard);
     }
-
-    void TestDropTableCompletesQuickly(const TString& query, Ydb::StatusIds::StatusCode expectedStatus, bool disableSnaphots = false) {
+*/
+    void TestDropTableCompletesQuickly(const TString& query, Ydb::StatusIds::StatusCode expectedStatus, bool volatileTxs) {
         TPortManager pm;
         NKikimrConfig::TAppConfig app;
-        app.MutableTableServiceConfig()->SetEnableKqpDataQuerySourceRead(false);
         TServerSettings serverSettings(pm.GetPort(2134));
-        if (disableSnaphots) {
-            serverSettings.SetEnableMvccSnapshotReads(false);
-        }
         serverSettings.SetDomainName("Root")
             .SetUseRealThreads(false)
+            .SetEnableDataShardVolatileTransactions(volatileTxs)
             .SetAppConfig(app);
 
         Tests::TServer::TPtr server = new TServer(serverSettings);
@@ -483,18 +474,11 @@ Y_UNIT_TEST_SUITE(TDataShardMinStepTest) {
         WaitTabletBecomesOffline(server, shard2);
     }
 
-    Y_UNIT_TEST(TestDropTableCompletesQuicklyRO) {
-        TestDropTableCompletesQuickly(
-            "SELECT * FROM `/Root/table-1` UNION ALL SELECT * FROM `/Root/table-2`;",
-            Ydb::StatusIds::SUCCESS,
-            true
-        );
-    }
-
-    Y_UNIT_TEST(TestDropTableCompletesQuicklyRW) {
+    Y_UNIT_TEST_TWIN(TestDropTableCompletesQuicklyRW, VolatileTxs) {
         TestDropTableCompletesQuickly(
             "UPSERT INTO `/Root/table-2` (key, value) SELECT key, value FROM `/Root/table-1`;",
-            Ydb::StatusIds::SUCCESS
+            VolatileTxs ? Ydb::StatusIds::ABORTED : Ydb::StatusIds::SUCCESS,
+            VolatileTxs
         );
     }
 

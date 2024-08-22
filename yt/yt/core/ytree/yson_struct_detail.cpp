@@ -1,6 +1,10 @@
 #include "yson_struct_detail.h"
 
+#include "fluent.h"
+
 namespace NYT::NYTree {
+
+using namespace NYPath;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -25,7 +29,7 @@ bool ShouldThrow(EUnrecognizedStrategy strategy)
 
 void TYsonStructMeta::SetDefaultsOfInitializedStruct(TYsonStructBase* target) const
 {
-    for (const auto& [_, parameter] : Parameters_) {
+    for (const auto& [_, parameter] : SortedParameters_) {
         parameter->SetDefaultsInitialized(target);
     }
 
@@ -56,7 +60,7 @@ IYsonStructParameterPtr TYsonStructMeta::GetParameter(const TString& keyOrAlias)
         return it->second;
     }
 
-    for (const auto& [_, parameter] : Parameters_) {
+    for (const auto& [_, parameter] : SortedParameters_) {
         if (Count(parameter->GetAliases(), keyOrAlias) > 0) {
             return parameter;
         }
@@ -64,11 +68,11 @@ IYsonStructParameterPtr TYsonStructMeta::GetParameter(const TString& keyOrAlias)
     THROW_ERROR_EXCEPTION("Key or alias %Qv not found in yson struct", keyOrAlias);
 }
 
-void TYsonStructMeta::LoadParameter(TYsonStructBase* target, const TString& key, const NYTree::INodePtr& node, EMergeStrategy mergeStrategy) const
+void TYsonStructMeta::LoadParameter(TYsonStructBase* target, const TString& key, const NYTree::INodePtr& node) const
 {
     const auto& parameter = GetParameter(key);
-    auto validate = [&] () {
-        parameter->Postprocess(target, "/" + key);
+    auto validate = [&] {
+        parameter->PostprocessParameter(target, "/" + key);
         try {
             for (const auto& postprocessor : Postprocessors_) {
                 postprocessor(target);
@@ -83,16 +87,15 @@ void TYsonStructMeta::LoadParameter(TYsonStructBase* target, const TString& key,
     };
     auto loadOptions = TLoadParameterOptions{
         .Path = "",
-        .MergeStrategy = mergeStrategy
     };
 
     parameter->SafeLoad(target, node, loadOptions, validate);
 }
 
-void TYsonStructMeta::Postprocess(TYsonStructBase* target, const TYPath& path) const
+void TYsonStructMeta::PostprocessStruct(TYsonStructBase* target, const TYPath& path) const
 {
-    for (const auto& [name, parameter] : Parameters_) {
-        parameter->Postprocess(target, path + "/" + name);
+    for (const auto& [name, parameter] : SortedParameters_) {
+        parameter->PostprocessParameter(target, path + "/" + ToYPathLiteral(name));
     }
 
     try {
@@ -122,7 +125,7 @@ void TYsonStructMeta::LoadStruct(
 
     auto mapNode = node->AsMap();
     auto unrecognizedStrategy = target->InstanceUnrecognizedStrategy_.template value_or(MetaUnrecognizedStrategy_);
-    for (const auto& [name, parameter] : Parameters_) {
+    for (const auto& [name, parameter] : SortedParameters_) {
         TString key = name;
         auto child = mapNode->FindChild(name); // can be NULL
         for (const auto& alias : parameter->GetAliases()) {
@@ -138,7 +141,7 @@ void TYsonStructMeta::LoadStruct(
             }
         }
         auto loadOptions = TLoadParameterOptions{
-            .Path = path + "/" + key,
+            .Path = path + "/" + ToYPathLiteral(key),
             .RecursiveUnrecognizedRecursively = GetRecursiveUnrecognizedStrategy(unrecognizedStrategy),
         };
         parameter->Load(target, child, loadOptions);
@@ -152,7 +155,7 @@ void TYsonStructMeta::LoadStruct(
         for (const auto& [key, child] : mapNode->GetChildren()) {
             if (!registeredKeys.contains(key)) {
                 if (ShouldThrow(unrecognizedStrategy)) {
-                    THROW_ERROR_EXCEPTION("Unrecognized field %Qv has been encountered", path + "/" + key)
+                    THROW_ERROR_EXCEPTION("Unrecognized field %Qv has been encountered", path + "/" + ToYPathLiteral(key))
                         << TErrorAttribute("key", key)
                         << TErrorAttribute("path", path);
                 }
@@ -163,7 +166,7 @@ void TYsonStructMeta::LoadStruct(
     }
 
     if (postprocess) {
-        Postprocess(target, path);
+        PostprocessStruct(target, path);
     }
 }
 
@@ -185,14 +188,14 @@ void TYsonStructMeta::LoadStruct(
 
     auto createLoadOptions = [&] (TStringBuf key) {
         return TLoadParameterOptions{
-            .Path = path + "/" + key,
+            .Path = path + "/" + ToYPathLiteral(key),
             .RecursiveUnrecognizedRecursively = GetRecursiveUnrecognizedStrategy(unrecognizedStrategy),
         };
     };
 
     THashMap<TStringBuf, IYsonStructParameter*> keyToParameter;
     THashSet<IYsonStructParameter*> pendingParameters;
-    for (const auto& [key, parameter] : Parameters_) {
+    for (const auto& [key, parameter] : SortedParameters_) {
         EmplaceOrCrash(keyToParameter, key, parameter.Get());
         for (const auto& alias : parameter->GetAliases()) {
             EmplaceOrCrash(keyToParameter, alias, parameter.Get());
@@ -240,7 +243,7 @@ void TYsonStructMeta::LoadStruct(
             return;
         }
         if (ShouldThrow(unrecognizedStrategy)) {
-            THROW_ERROR_EXCEPTION("Unrecognized field %Qv has been encountered", path + "/" + key)
+            THROW_ERROR_EXCEPTION("Unrecognized field %Qv has been encountered", path + "/" + ToYPathLiteral(key))
                 << TErrorAttribute("key", key)
                 << TErrorAttribute("path", path);
         }
@@ -271,11 +274,11 @@ void TYsonStructMeta::LoadStruct(
     });
 
     for (const auto parameter : pendingParameters) {
-        parameter->Load(target, /* cursor */ nullptr, createLoadOptions(parameter->GetKey()));
+        parameter->Load(target, /*cursor*/ nullptr, createLoadOptions(parameter->GetKey()));
     }
 
     if (postprocess) {
-        Postprocess(target, path);
+        PostprocessStruct(target, path);
     }
 }
 
@@ -284,7 +287,7 @@ IMapNodePtr TYsonStructMeta::GetRecursiveUnrecognized(const TYsonStructBase* tar
     // Take a copy of `LocalUnrecognized` and add parameter->GetRecursiveUnrecognized()
     // for all parameters that are TYsonStruct's themselves.
     auto result = target->LocalUnrecognized_ ? ConvertTo<IMapNodePtr>(target->LocalUnrecognized_) : GetEphemeralNodeFactory()->CreateMap();
-    for (const auto& [name, parameter] : Parameters_) {
+    for (const auto& [name, parameter] : SortedParameters_) {
         auto unrecognized = parameter->GetRecursiveUnrecognized(target);
         if (unrecognized && unrecognized->AsMap()->GetChildCount() > 0) {
             result->AddChild(name, unrecognized);
@@ -311,6 +314,26 @@ void TYsonStructMeta::RegisterPostprocessor(std::function<void(TYsonStructBase*)
 void TYsonStructMeta::SetUnrecognizedStrategy(EUnrecognizedStrategy strategy)
 {
     MetaUnrecognizedStrategy_ = strategy;
+}
+
+void TYsonStructMeta::WriteSchema(const TYsonStructBase* target, NYson::IYsonConsumer* consumer) const
+{
+    BuildYsonFluently(consumer)
+        .BeginMap()
+            .Item("type_name").Value("struct")
+            .Item("members").DoListFor(Parameters_, [&] (auto fluent, const auto& pair) {
+                fluent.Item()
+                    .BeginMap()
+                        .Item("name").Value(pair.first)
+                        .Item("type").Do([&] (auto fluent) {
+                            pair.second->WriteSchema(target, fluent.GetConsumer());
+                        })
+                        .DoIf(pair.second->IsRequired(), [] (auto fluent) {
+                            fluent.Item("required").Value(true);
+                        })
+                    .EndMap();
+            })
+        .EndMap();
 }
 
 void TYsonStructMeta::FinishInitialization(const std::type_info& structType)

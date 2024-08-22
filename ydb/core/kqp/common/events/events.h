@@ -1,7 +1,7 @@
 #pragma once
 
-#include "process_response.h"
 #include "query.h"
+
 #include <ydb/core/kqp/common/simple/kqp_event_ids.h>
 #include <ydb/core/protos/kqp.pb.h>
 #include <ydb/core/kqp/common/compilation/events.h>
@@ -19,8 +19,6 @@ namespace NKikimr::NKqp {
 
 struct TEvKqp {
     using TEvQueryRequestRemote = NPrivateEvents::TEvQueryRequestRemote;
-
-    using TEvProcessResponse = NPrivateEvents::TEvProcessResponse;
 
     using TEvQueryRequest = NPrivateEvents::TEvQueryRequest;
 
@@ -41,6 +39,7 @@ struct TEvKqp {
     using TEvRecompileRequest = NPrivateEvents::TEvRecompileRequest;
     using TEvCompileResponse = NPrivateEvents::TEvCompileResponse;
     using TEvParseResponse = NPrivateEvents::TEvParseResponse;
+    using TEvSplitResponse = NPrivateEvents::TEvSplitResponse;
     using TEvCompileInvalidateRequest = NPrivateEvents::TEvCompileInvalidateRequest;
 
     using TEvInitiateSessionShutdown = NKikimr::NKqp::NPrivateEvents::TEvInitiateSessionShutdown;
@@ -54,6 +53,22 @@ struct TEvKqp {
     using TProtoArenaHolder = NPrivateEvents::TProtoArenaHolder<TProto>;
 
     using TEvQueryResponse = NPrivateEvents::TEvQueryResponse;
+
+    struct TEvListSessionsRequest: public TEventPB<TEvListSessionsRequest, NKikimrKqp::TEvListSessionsRequest,
+        TKqpEvents::EvListSessionsRequest>
+    {};
+
+    struct TEvListSessionsResponse: public TEventPB<TEvListSessionsResponse, NKikimrKqp::TEvListSessionsResponse,
+        TKqpEvents::EvListSessionsResponse>
+    {};
+
+    struct TEvListProxyNodesRequest : public TEventLocal<TEvListProxyNodesRequest, TKqpEvents::EvListProxyNodesRequest>
+    {};
+
+    struct TEvListProxyNodesResponse : public TEventLocal<TEvListProxyNodesResponse, TKqpEvents::EvListProxyNodesResponse>
+    {
+        std::vector<ui32> ProxyNodes;
+    };
 
     struct TEvCreateSessionResponse : public TEventPB<TEvCreateSessionResponse,
         NKikimrKqp::TEvCreateSessionResponse, TKqpEvents::EvCreateSessionResponse> {};
@@ -123,9 +138,6 @@ struct TEvKqp {
     };
 
     using TEvAbortExecution = NYql::NDq::TEvDq::TEvAbortExecution;
-
-    struct TEvFetchScriptResultsResponse : public TEventPB<TEvFetchScriptResultsResponse, NKikimrKqp::TEvFetchScriptResultsResponse, TKqpEvents::EvFetchScriptResultsResponse> {
-    };
 
     struct TEvCancelScriptExecutionRequest : public TEventPB<TEvCancelScriptExecutionRequest, NKikimrKqp::TEvCancelScriptExecutionRequest, TKqpEvents::EvCancelScriptExecutionRequest> {
     };

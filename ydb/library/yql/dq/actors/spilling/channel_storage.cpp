@@ -1,6 +1,6 @@
 #include "channel_storage.h"
-#include "spilling.h"
-#include "spilling_file.h"
+
+#include "channel_storage_actor.h"
 
 #include <ydb/library/yql/utils/yql_panic.h>
 #include <ydb/library/services/services.pb.h>
@@ -12,230 +12,122 @@
 #include <util/generic/buffer.h>
 #include <util/generic/map.h>
 #include <util/generic/set.h>
-#include <util/generic/size_literals.h>
 
 
 namespace NYql::NDq {
 
 using namespace NActors;
 
-#define LOG_D(s) \
-    LOG_DEBUG_S(*TlsActivationContext, NKikimrServices::KQP_COMPUTE, "TxId: " << TxId_ << ", channelId: " << ChannelId_ << ". " << s)
-#define LOG_I(s) \
-    LOG_INFO_S(*TlsActivationContext,  NKikimrServices::KQP_COMPUTE, "TxId: " << TxId << ", channelId: " << ChannelId << ". " << s)
-#define LOG_E(s) \
-    LOG_ERROR_S(*TlsActivationContext, NKikimrServices::KQP_COMPUTE, "TxId: " << TxId_ << ", channelId: " << ChannelId_ << ". " << s)
-#define LOG_C(s) \
-    LOG_CRIT_S(*TlsActivationContext,  NKikimrServices::KQP_COMPUTE, "TxId: " << TxId << ", channelId: " << ChannelId << ". " << s)
-#define LOG_W(s) \
-    LOG_WARN_S(*TlsActivationContext,  NKikimrServices::KQP_COMPUTE, "TxId: " << TxId << ", channelId: " << ChannelId << ". " << s)
-#define LOG_T(s) \
-    LOG_TRACE_S(*TlsActivationContext,  NKikimrServices::KQP_COMPUTE, "TxId: " << TxId_ << ", channelId: " << ChannelId_ << ". " << s)
-
 namespace {
+
 
 constexpr ui32 MAX_INFLIGHT_BLOBS_COUNT = 10;
 constexpr ui64 MAX_INFLIGHT_BLOBS_SIZE = 50_MB;
 
-class TDqChannelStorageActor : public TActorBootstrapped<TDqChannelStorageActor> {
-    using TBase = TActorBootstrapped<TDqChannelStorageActor>;
-
-public:
-    TDqChannelStorageActor(TTxId txId, ui64 channelId, IDqChannelStorage::TWakeUpCallback&& wakeUp)
-        : TxId_(txId)
-        , ChannelId_(channelId)
-        , WakeUp_(std::move(wakeUp)) {}
-
-    void Bootstrap() {
-        auto spillingActor = CreateDqLocalFileSpillingActor(TxId_, TStringBuilder() << "ChannelId: " << ChannelId_,
-            SelfId(), true);
-        SpillingActorId_ = Register(spillingActor);
-
-        Become(&TDqChannelStorageActor::WorkState);
-    }
-
-    static constexpr char ActorName[] = "DQ_CHANNEL_STORAGE";
-
-protected:
-    void PassAway() override {
-        Send(SpillingActorId_, new TEvents::TEvPoison);
-        TBase::PassAway();
-    }
-
-private:
-    STATEFN(WorkState) {
-        switch (ev->GetTypeRewrite()) {
-            hFunc(TEvDqSpilling::TEvWriteResult, HandleWork);
-            hFunc(TEvDqSpilling::TEvReadResult, HandleWork);
-            hFunc(TEvDqSpilling::TEvError, HandleWork);
-            default:
-                Y_ABORT("TDqChannelStorageActor::WorkState unexpected event type: %" PRIx32 " event: %s",
-                    ev->GetTypeRewrite(),
-                    ev->ToString().data());
-        }
-    }
-
-    void HandleWork(TEvDqSpilling::TEvWriteResult::TPtr& ev) {
-        auto& msg = *ev->Get();
-        LOG_T("[TEvWriteResult] blobId: " << msg.BlobId);
-
-        auto it = WritingBlobs_.find(msg.BlobId);
-        if (it == WritingBlobs_.end()) {
-            LOG_E("Got unexpected TEvWriteResult, blobId: " << msg.BlobId);
-
-            Error_ = "Internal error";
-
-            Send(SpillingActorId_, new TEvents::TEvPoison);
-            return;
-        }
-
-        ui64 size = it->second;
-        WritingBlobsSize_ -= size;
-        WritingBlobs_.erase(it);
-
-        StoredBlobsCount_++;
-        StoredBlobsSize_ += size;
-    }
-
-    void HandleWork(TEvDqSpilling::TEvReadResult::TPtr& ev) {
-        auto& msg = *ev->Get();
-        LOG_T("[TEvReadResult] blobId: " << msg.BlobId << ", size: " << msg.Blob.size());
-
-        if (LoadingBlobs_.erase(msg.BlobId) != 1) {
-            LOG_E("[TEvReadResult] unexpected, blobId: " << msg.BlobId << ", size: " << msg.Blob.size());
-            return;
-        }
-
-        LoadedBlobs_[msg.BlobId].Swap(msg.Blob);
-        YQL_ENSURE(LoadedBlobs_[msg.BlobId].size() != 0);
-
-        if (LoadedBlobs_.size() == 1) {
-            WakeUp_();
-        }
-    }
-
-    void HandleWork(TEvDqSpilling::TEvError::TPtr& ev) {
-        auto& msg = *ev->Get();
-        LOG_D("[TEvError] " << msg.Message);
-
-        Error_.ConstructInPlace(msg.Message);
-    }
-
-public:
-    [[nodiscard]]
-    const TMaybe<TString>& GetError() const {
-        return Error_;
-    }
-
-    bool IsEmpty() const {
-        return WritingBlobs_.empty() && StoredBlobsCount_ == 0 && LoadedBlobs_.empty();
-    }
-
-    bool IsFull() const {
-        return WritingBlobs_.size() > MAX_INFLIGHT_BLOBS_COUNT || WritingBlobsSize_ > MAX_INFLIGHT_BLOBS_SIZE;
-    }
-
-    void Put(ui64 blobId, TRope&& blob) {
-        FailOnError();
-
-        // TODO: timeout
-        // TODO: limit inflight events
-
-        ui64 size = blob.size();
-
-        Send(SpillingActorId_, new TEvDqSpilling::TEvWrite(blobId, std::move(blob)));
-
-        WritingBlobs_.emplace(blobId, size);
-        WritingBlobsSize_ += size;
-    }
-
-    bool Get(ui64 blobId, TBuffer& blob) {
-        FailOnError();
-
-        auto loadedIt = LoadedBlobs_.find(blobId);
-        if (loadedIt != LoadedBlobs_.end()) {
-            YQL_ENSURE(loadedIt->second.size() != 0);
-            blob.Swap(loadedIt->second);
-            LoadedBlobs_.erase(loadedIt);
-            return true;
-        }
-
-        auto result = LoadingBlobs_.emplace(blobId);
-        if (result.second) {
-            Send(SpillingActorId_, new TEvDqSpilling::TEvRead(blobId, true));
-        }
-
-        return false;
-    }
-
-    void Terminate() {
-        PassAway();
-    }
-
-private:
-    void FailOnError() {
-        if (Error_) {
-            LOG_E("Error: " << *Error_);
-            ythrow TDqChannelStorageException() << "TxId: " << TxId_ << ", channelId: " << ChannelId_
-                << ", error: " << *Error_;
-        }
-    }
-
-private:
-    const TTxId TxId_;
-    const ui64 ChannelId_;
-    IDqChannelStorage::TWakeUpCallback WakeUp_;
-    TActorId SpillingActorId_;
-
-    TMap<ui64, ui64> WritingBlobs_; // blobId -> blobSize
-    ui64 WritingBlobsSize_ = 0;
-
-    ui32 StoredBlobsCount_ = 0;
-    ui64 StoredBlobsSize_ = 0;
-
-    TSet<ui64> LoadingBlobs_;
-    TMap<ui64, TBuffer> LoadedBlobs_;
-
-    TMaybe<TString> Error_;
-};
-
-
 class TDqChannelStorage : public IDqChannelStorage {
+    struct TWritingBlobInfo {
+        ui64 BlobSize_;
+        NThreading::TFuture<void> IsBlobWrittenFuture_;
+    };
 public:
-    TDqChannelStorage(TTxId txId, ui64 channelId, TWakeUpCallback&& wakeUp) {
-        SelfActor_ = new TDqChannelStorageActor(txId, channelId, std::move(wakeUp));
-        TlsActivationContext->AsActorContext().RegisterWithSameMailbox(SelfActor_);
+    TDqChannelStorage(TTxId txId, ui64 channelId, TWakeUpCallback&& wakeUpCallback, TErrorCallback&& errorCallback, 
+        TIntrusivePtr<TSpillingTaskCounters> spillingTaskCounters, TActorSystem* actorSystem)
+    : ActorSystem_(actorSystem)
+    {
+        ChannelStorageActor_ = CreateDqChannelStorageActor(txId, channelId, std::move(wakeUpCallback), std::move(errorCallback), spillingTaskCounters, actorSystem);
+        ChannelStorageActorId_ = ActorSystem_->Register(ChannelStorageActor_->GetActor());
     }
 
     ~TDqChannelStorage() {
-        SelfActor_->Terminate();
+        ActorSystem_->Send(ChannelStorageActorId_, new TEvents::TEvPoison);
     }
 
-    bool IsEmpty() const override {
-        return SelfActor_->IsEmpty();
+    bool IsEmpty() override {
+        UpdateWriteStatus();
+
+        return WritingBlobs_.empty() && StoredBlobsCount_ == 0 && LoadingBlobs_.empty();
     }
 
-    bool IsFull() const override {
-        return SelfActor_->IsFull();
+    bool IsFull() override {
+        UpdateWriteStatus();
+
+        return WritingBlobs_.size() > MAX_INFLIGHT_BLOBS_COUNT || WritingBlobsTotalSize_ > MAX_INFLIGHT_BLOBS_SIZE;
     }
 
-    void Put(ui64 blobId, TRope&& blob) override {
-        SelfActor_->Put(blobId, std::move(blob));
+    void Put(ui64 blobId, TRope&& blob, ui64 cookie = 0) override {
+        UpdateWriteStatus();
+
+        auto promise = NThreading::NewPromise<void>();
+        auto future = promise.GetFuture();
+
+        ui64 blobSize = blob.size();
+
+        ActorSystem_->Send(ChannelStorageActorId_, new TEvDqChannelSpilling::TEvPut(blobId, std::move(blob), std::move(promise)), /*flags*/0, cookie);
+
+        WritingBlobs_.emplace(blobId, TWritingBlobInfo{blobSize, std::move(future)});
+        WritingBlobsTotalSize_ += blobSize;
     }
 
-    bool Get(ui64 blobId, TBuffer& blob) override {
-        return SelfActor_->Get(blobId, blob);
+    bool Get(ui64 blobId, TBuffer& blob, ui64 cookie = 0) override {
+        UpdateWriteStatus();
+
+        const auto it = LoadingBlobs_.find(blobId);
+        // If we didn't request loading blob from spilling -> request it
+        if (it == LoadingBlobs_.end()) {
+            auto promise = NThreading::NewPromise<TBuffer>();
+            auto future = promise.GetFuture();
+            ActorSystem_->Send(ChannelStorageActorId_, new TEvDqChannelSpilling::TEvGet(blobId, std::move(promise)), /*flags*/0, cookie);
+
+            LoadingBlobs_.emplace(blobId, std::move(future));
+            return false;
+        }
+        // If we requested loading blob, but it's not loaded -> wait
+        if (!it->second.HasValue()) return false;
+
+        blob = std::move(it->second.ExtractValue());
+        LoadingBlobs_.erase(it);
+        --StoredBlobsCount_;
+
+        return true;
     }
 
 private:
-    TDqChannelStorageActor* SelfActor_;
+    void UpdateWriteStatus() {
+        for (auto it = WritingBlobs_.begin(); it != WritingBlobs_.end();) {
+            if (it->second.IsBlobWrittenFuture_.HasValue()) {
+                WritingBlobsTotalSize_ -= it->second.BlobSize_;
+                ++StoredBlobsCount_;
+                it = WritingBlobs_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+
+private:
+    IDqChannelStorageActor* ChannelStorageActor_;
+    TActorId ChannelStorageActorId_;
+    TActorSystem *ActorSystem_;
+
+    // BlobId -> future with requested blob
+    std::unordered_map<ui64, NThreading::TFuture<TBuffer>> LoadingBlobs_;
+    // BlobId -> future with some additional info
+    std::unordered_map<ui64, TWritingBlobInfo> WritingBlobs_;
+    ui64 WritingBlobsTotalSize_ = 0;
+
+    ui64 StoredBlobsCount_ = 0;
 };
 
 } // anonymous namespace
 
-IDqChannelStorage::TPtr CreateDqChannelStorage(TTxId txId, ui64 channelId, IDqChannelStorage::TWakeUpCallback wakeUp)
+
+IDqChannelStorage::TPtr CreateDqChannelStorage(TTxId txId, ui64 channelId,
+    TWakeUpCallback wakeUpCallback,
+    TErrorCallback errorCallback,
+    TIntrusivePtr<TSpillingTaskCounters> spillingTaskCounters,
+    TActorSystem* actorSystem)
 {
-    return new TDqChannelStorage(txId, channelId, std::move(wakeUp));
+    return new TDqChannelStorage(txId, channelId, std::move(wakeUpCallback), std::move(errorCallback), spillingTaskCounters, actorSystem);
 }
 
 } // namespace NYql::NDq

@@ -104,7 +104,7 @@ EExecutionStatus TExecuteDataTxUnit::Execute(TOperation::TPtr op,
     IEngineFlat* engine = tx->GetDataTx()->GetEngine();
     Y_VERIFY_S(engine, "missing engine for " << *op << " at " << DataShard.TabletID());
 
-    if (op->IsImmediate() && !tx->ReValidateKeys()) {
+    if (op->IsImmediate() && !tx->ReValidateKeys(txc.DB.GetScheme())) {
         // Immediate transactions may be reordered with schema changes and become invalid
         const auto& dataTx = tx->GetDataTx();
         Y_ABORT_UNLESS(!dataTx->Ready());
@@ -115,7 +115,7 @@ EExecutionStatus TExecuteDataTxUnit::Execute(TOperation::TPtr op,
     }
 
     // TODO: cancel tx in special execution unit.
-    if (tx->GetDataTx()->CheckCancelled())
+    if (tx->GetDataTx()->CheckCancelled(DataShard.TabletID()))
         engine->Cancel();
     else {
         ui64 consumed = tx->GetDataTx()->GetTxSize() + engine->GetMemoryAllocated();
@@ -313,7 +313,7 @@ void TExecuteDataTxUnit::ExecuteDataTx(TOperation::TPtr op,
 
     KqpUpdateDataShardStatCounters(DataShard, counters);
     if (tx->GetDataTx()->CollectStats()) {
-        KqpFillTxStats(DataShard, counters, *result);
+        KqpFillTxStats(DataShard, counters, *result->Record.MutableTxStats());
     }
 
     if (counters.InvisibleRowSkips && op->LockTxId()) {
@@ -332,7 +332,12 @@ void TExecuteDataTxUnit::ExecuteDataTx(TOperation::TPtr op,
             participants,
             tx->GetDataTx()->GetVolatileChangeGroup(),
             tx->GetDataTx()->GetVolatileCommitOrdered(),
+            /* arbiter */ false,
             txc);
+    }
+
+    if (tx->GetDataTx()->GetPerformedUserReads()) {
+        tx->SetPerformedUserReads(true);
     }
 
     AddLocksToResult(op, ctx);

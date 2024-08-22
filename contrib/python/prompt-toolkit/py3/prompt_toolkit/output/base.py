@@ -1,6 +1,7 @@
 """
 Interface for an output.
 """
+
 from __future__ import annotations
 
 from abc import ABCMeta, abstractmethod
@@ -66,7 +67,7 @@ class Output(metaclass=ABCMeta):
     @abstractmethod
     def erase_screen(self) -> None:
         """
-        Erases the screen with the background colour and moves the cursor to
+        Erases the screen with the background color and moves the cursor to
         home.
         """
 

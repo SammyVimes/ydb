@@ -84,7 +84,8 @@ class TReadRowsRPC : public TActorBootstrapped<TReadRowsRPC> {
 public:
     explicit TReadRowsRPC(std::unique_ptr<IRequestNoOpCtx> request)
         : Request(std::move(request))
-        , PipeCache(MakePipePeNodeCacheID(true))
+        , PipeCache(MakePipePerNodeCacheID(true))
+        , Span(TWilsonGrpc::RequestActor, Request->GetWilsonTraceId(), "ReadRowsRpc")
     {}
 
     bool BuildSchema(NSchemeCache::TSchemeCacheNavigate* resolveNamesResult, TString& errorMessage) {
@@ -355,7 +356,7 @@ public:
         entry.ShowPrivatePath = false;
         auto request = std::make_unique<NSchemeCache::TSchemeCacheNavigate>();
         request->ResultSet.emplace_back(entry);
-        Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvNavigateKeySet(request.release()));
+        Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvNavigateKeySet(request.release()), 0, 0, Span.GetTraceId());
         return true;
     }
 
@@ -439,11 +440,10 @@ public:
 
         auto request = std::make_unique<NSchemeCache::TSchemeCacheRequest>();
         request->ResultSet.emplace_back(std::move(keyRange));
-        Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvResolveKeySet(request.release()));
+        Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvResolveKeySet(request.release()), 0, 0, Span.GetTraceId());
     }
 
-    std::map<ui64, std::vector<TOwnedCellVec>> CreateShardToKeyMapping(TKeyDesc* keyRange) {
-        std::map<ui64, std::vector<TOwnedCellVec>> shardToKey;
+    void CreateShardToKeysMapping(TKeyDesc* keyRange) {
         auto &partitions = keyRange->GetPartitions();
         for (auto& key : KeysToRead) {
             auto it = std::lower_bound(partitions.begin(), partitions.end(), key,
@@ -454,10 +454,8 @@ public:
                         return (cmp < 0);
                 });
             Y_ABORT_UNLESS(it != partitions.end());
-            shardToKey[it->ShardId].emplace_back(std::move(key));
+            ShardIdToKeys[it->ShardId].emplace_back(std::move(key));
         }
-
-        return shardToKey;
     }
 
     void Handle(TEvTxProxySchemeCache::TEvResolveKeySetResult::TPtr &ev) {
@@ -472,7 +470,8 @@ public:
         }
         auto keyRange = resolvePartitionsResult->ResultSet[0].KeyDescription.Get();
 
-        for (const auto& [shardId, keys] : CreateShardToKeyMapping(keyRange)) {
+        CreateShardToKeysMapping(keyRange);
+        for (const auto& [shardId, keys] : ShardIdToKeys) {
             SendRead(shardId, keys);
         }
     }
@@ -481,7 +480,8 @@ public:
         auto request = std::make_unique<TEvDataShard::TEvRead>();
         auto& record = request->Record;
 
-        record.SetReadId(0);
+        // the ReadId field is used as a cookie to distinguish responses from different datashards
+        record.SetReadId(shardId);
         record.MutableTableId()->SetOwnerId(OwnerId);
         record.MutableTableId()->SetTableId(TableId);
 
@@ -496,24 +496,65 @@ public:
         }
 
         LOG_DEBUG_S(TlsActivationContext->AsActorContext(), NKikimrServices::RPC_REQUEST, "TReadRowsRPC send TEvRead shardId : " << shardId << " keys.size(): " << keys.size());
-        Send(PipeCache, new TEvPipeCache::TEvForward(request.release(), shardId, true), IEventHandle::FlagTrackDelivery);
+        Send(PipeCache, new TEvPipeCache::TEvForward(request.release(), shardId, true), IEventHandle::FlagTrackDelivery, 0, Span.GetTraceId());
         ++ReadsInFlight;
     }
 
     void Handle(const TEvDataShard::TEvReadResult::TPtr& ev) {
         const auto* msg = ev->Get();
 
-        if (msg->Record.HasStatus() && msg->Record.GetStatus().GetCode() != Ydb::StatusIds::SUCCESS) {
-            TStringStream ss;
-            ss << "Failed to read from ds# " << ShardId << ", code# " << msg->Record.GetStatus().GetCode();
-            return ReplyWithError(Ydb::StatusIds::SCHEME_ERROR, ss.Str());
+        --ReadsInFlight;
+
+        if (msg->Record.HasStatus()) {
+            // ReadRows can reply with the following statuses:
+            // * SUCCESS
+            // * INTERNAL_ERROR -- only if MaxRetries is reached
+            // * OVERLOADED -- client will retrie it with backoff
+            // * ABORTED -- code is used for all other DataShard errors
+
+            const auto& status = msg->Record.GetStatus();
+            auto statusCode = status.GetCode();
+            const auto issues = status.GetIssues();
+
+            ui64 shardId = msg->Record.GetReadId();
+
+            switch (statusCode) {
+            case Ydb::StatusIds::SUCCESS:
+                break;
+            case Ydb::StatusIds::INTERNAL_ERROR: {
+                auto it = ShardIdToKeys.find(shardId);
+                ++Retries;
+                if (it == ShardIdToKeys.end()) {
+                    TStringStream ss;
+                    ss << "Got unknown shardId from TEvReadResult# " << shardId << ", status# " << statusCode;
+                    ReplyWithError(statusCode, ss.Str(), &issues);
+                } else if (Retries < MaxTotalRetries) {
+                    TStringStream ss;
+                    ss << "Reached MaxRetries count for DataShard# " << shardId << ", status# " << statusCode;
+                    ReplyWithError(statusCode, ss.Str(), &issues);
+                } else {
+                    SendRead(shardId, it->second);
+                }
+                return;
+            }
+            case Ydb::StatusIds::OVERLOADED:
+                [[fallthrough]];
+            default: {
+                TStringStream ss;
+                ss << "Failed to read from ds# " << shardId << ", status# " << statusCode;
+                if (statusCode != Ydb::StatusIds::OVERLOADED) {
+                    statusCode = Ydb::StatusIds::ABORTED;
+                }
+                ReplyWithError(statusCode, ss.Str(), &issues);
+                return;
+            }
+            }
         }
         Y_ABORT_UNLESS(msg->Record.HasFinished() && msg->Record.GetFinished());
         LOG_DEBUG_S(TlsActivationContext->AsActorContext(), NKikimrServices::RPC_REQUEST, "TReadRowsRPC TEvReadResult RowsCount: " << msg->GetRowsCount());
 
         EvReadResults.emplace_back(ev->Release().Release());
 
-        --ReadsInFlight;
         if (ReadsInFlight == 0) {
             SendResult(Ydb::StatusIds::SUCCESS, "");
         }
@@ -588,13 +629,20 @@ public:
         LOG_DEBUG_S(TlsActivationContext->AsActorContext(), NKikimrServices::RPC_REQUEST, "TReadRowsRPC created ReadRowsResponse " << response->DebugString());
     }
 
-    void SendResult(const Ydb::StatusIds::StatusCode& status, const TString& errorMsg) {
+    void SendResult(const Ydb::StatusIds::StatusCode& status, const TString& errorMsg,
+        const ::google::protobuf::RepeatedPtrField<Ydb::Issue::IssueMessage>* issues = nullptr)
+    {
         auto* resp = CreateResponse();
         resp->set_status(status);
-        if (!errorMsg.Empty()) {
+        if (!errorMsg.Empty() || issues) {
             const NYql::TIssue& issue = MakeIssue(NKikimrIssues::TIssuesIds::DEFAULT_ERROR, errorMsg);
             auto* protoIssue = resp->add_issues();
             NYql::IssueToMessage(issue, protoIssue);
+            if (issues) {
+                for (auto& i : *issues) {
+                    *resp->add_issues() = i;
+                }
+            }
         }
 
         if (status == Ydb::StatusIds::SUCCESS) {
@@ -613,9 +661,11 @@ public:
             << " timed out, duration: " << (TAppData::TimeProvider->Now() - StartTime).Seconds() << " sec");
     }
 
-    void ReplyWithError(const Ydb::StatusIds::StatusCode& status, const TString& errorMsg) {
+    void ReplyWithError(const Ydb::StatusIds::StatusCode& status, const TString& errorMsg,
+        const ::google::protobuf::RepeatedPtrField<Ydb::Issue::IssueMessage>* issues = nullptr)
+    {
         LOG_ERROR_S(TlsActivationContext->AsActorContext(), NKikimrServices::RPC_REQUEST, "TReadRowsRPC ReplyWithError: " << errorMsg);
-        SendResult(status, errorMsg);
+        SendResult(status, errorMsg, issues);
     }
 
     void PassAway() override {
@@ -623,6 +673,7 @@ public:
         if (TimeoutTimerActorId) {
             Send(TimeoutTimerActorId, new TEvents::TEvPoisonPill());
         }
+        Span.EndOk();
         TBase::PassAway();
     }
 
@@ -666,12 +717,17 @@ private:
     };
     TVector<TColumnMeta> RequestedColumnsMeta;
 
+    std::map<ui64, std::vector<TOwnedCellVec>> ShardIdToKeys;
     std::vector<std::unique_ptr<TEvDataShard::TEvReadResult>> EvReadResults;
     // TEvRead interface
     ui64 ReadsInFlight = 0;
     ui64 OwnerId = 0;
     ui64 TableId = 0;
-    ui64 ShardId = 0;
+
+    ui64 Retries = 0;
+    const ui64 MaxTotalRetries = 5;
+
+    NWilson::TSpan Span;
 };
 
 void DoReadRowsRequest(std::unique_ptr<IRequestNoOpCtx> p, const IFacilityProvider& f) {

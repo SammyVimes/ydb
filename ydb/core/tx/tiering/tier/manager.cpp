@@ -10,6 +10,9 @@ NMetadata::NModifications::TOperationParsingResult TTiersManager::DoBuildPatchFr
 {
     NMetadata::NInternal::TTableRecord result;
     result.SetColumn(TTierConfig::TDecoder::TierName, NMetadata::NInternal::TYDBValue::Utf8(settings.GetObjectId()));
+    if (settings.GetObjectId().StartsWith("$") || settings.GetObjectId().StartsWith("_")) {
+        return TConclusionStatus::Fail("tier name cannot start with '$', '_' characters");
+    }
     {
         auto fConfig = settings.GetFeaturesExtractor().Extract(TTierConfig::TDecoder::TierConfig);
         if (fConfig) {
@@ -62,7 +65,7 @@ NMetadata::NModifications::TOperationParsingResult TTiersManager::DoBuildPatchFr
 
 void TTiersManager::DoPrepareObjectsBeforeModification(std::vector<TTierConfig>&& patchedObjects,
     NMetadata::NModifications::IAlterPreparationController<TTierConfig>::TPtr controller,
-    const TInternalModificationContext& context) const
+    const TInternalModificationContext& context, const NMetadata::NModifications::TAlterOperationContext& /*alterContext*/) const
 {
     TActivationContext::Register(new TTierPreparationActor(std::move(patchedObjects), controller, context));
 }

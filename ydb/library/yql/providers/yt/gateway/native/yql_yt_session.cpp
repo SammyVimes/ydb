@@ -26,20 +26,32 @@ TSession::TSession(IYtGateway::TOpenSessionOptions&& options, size_t numThreads)
     InitYtApiOnce(OperationOptions_.AttrsYson);
 
     Queue_ = TAsyncQueue::Make(numThreads, "YtGateway");
-    OpTracker_ = MakeIntrusive<TOperationTracker>();
+    if (options.CreateOperationTracker()) {
+        OpTracker_ = MakeIntrusive<TOperationTracker>();
+    }
+}
+
+void TSession::StopQueueAndTracker() {
+    if (OpTracker_) {
+        OpTracker_->Stop();
+    }
+    Queue_->Stop();
 }
 
 void TSession::Close() {
     if (OperationSemaphore) {
         OperationSemaphore->Cancel();
     }
+
     try {
         TxCache_.AbortAll();
     } catch (...) {
         YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
+        StopQueueAndTracker();
+        throw;
     }
-    OpTracker_->Stop();
-    Queue_->Stop();
+
+    StopQueueAndTracker();
 }
 
 NYT::TNode TSession::CreateSpecWithDesc(const TVector<std::pair<TString, TString>>& code) const {

@@ -13,7 +13,12 @@ enum class EDatabaseType {
     ClickHouse,
     DataStreams,
     ObjectStorage,
-    PostgreSQL
+    PostgreSQL,
+    YT,
+    MySQL,
+    Greenplum,
+    MsSQLServer,
+    Oracle
 };
 
 inline EDatabaseType DatabaseTypeFromDataSourceKind(NConnector::NApi::EDataSourceKind dataSourceKind) {
@@ -22,6 +27,16 @@ inline EDatabaseType DatabaseTypeFromDataSourceKind(NConnector::NApi::EDataSourc
             return EDatabaseType::PostgreSQL;
         case NConnector::NApi::EDataSourceKind::CLICKHOUSE:
             return EDatabaseType::ClickHouse;
+        case NConnector::NApi::EDataSourceKind::YDB:
+            return EDatabaseType::Ydb;
+        case NConnector::NApi::EDataSourceKind::MYSQL:
+            return EDatabaseType::MySQL;
+        case NConnector::NApi::EDataSourceKind::GREENPLUM:
+            return EDatabaseType::Greenplum;
+        case NConnector::NApi::EDataSourceKind::MS_SQL_SERVER:
+          return EDatabaseType::MsSQLServer;
+        case NConnector::NApi::EDataSourceKind::ORACLE:
+          return EDatabaseType::Oracle;
         default:
             ythrow yexception() << "Unknown data source kind: " << NConnector::NApi::EDataSourceKind_Name(dataSourceKind);
     }
@@ -33,22 +48,30 @@ inline NConnector::NApi::EDataSourceKind DatabaseTypeToDataSourceKind(EDatabaseT
             return  NConnector::NApi::EDataSourceKind::POSTGRESQL;
         case EDatabaseType::ClickHouse:
             return  NConnector::NApi::EDataSourceKind::CLICKHOUSE;
+        case EDatabaseType::Ydb:
+            return  NConnector::NApi::EDataSourceKind::YDB;
+        case EDatabaseType::MySQL:
+            return NConnector::NApi::EDataSourceKind::MYSQL;
+        case EDatabaseType::Greenplum:
+            return  NConnector::NApi::EDataSourceKind::GREENPLUM;
+        case EDatabaseType::MsSQLServer:
+            return NConnector::NApi::EDataSourceKind::MS_SQL_SERVER;
+        case EDatabaseType::Oracle:
+            return NConnector::NApi::EDataSourceKind::ORACLE;
         default:
             ythrow yexception() << "Unknown database type: " << ToString(databaseType);
     }
 }
 
-inline TString DatabaseTypeToMdbUrlPath(EDatabaseType databaseType) {
+inline TString DatabaseTypeLowercase(EDatabaseType databaseType) {
     auto dump = ToString(databaseType);
     dump.to_lower();
+    return dump;
+}
 
-    switch (databaseType) {
-        case EDatabaseType::ClickHouse:
-        case EDatabaseType::PostgreSQL:
-            return dump;
-        default:
-            ythrow yexception() << "Unsupported database type: " << ToString(databaseType);
-    }
+// TODO: remove this function after /kikimr/yq/tests/control_plane_storage is moved to /ydb.
+inline TString DatabaseTypeToMdbUrlPath(EDatabaseType databaseType) {
+    return DatabaseTypeLowercase(databaseType);
 }
 
 struct TDatabaseAuth {
@@ -68,7 +91,7 @@ struct TDatabaseAuth {
     NConnector::NApi::EProtocol Protocol = NConnector::NApi::EProtocol::PROTOCOL_UNSPECIFIED;
 
     bool operator==(const TDatabaseAuth& other) const {
-        return std::tie(StructuredToken, AddBearerToToken, UseTls) == std::tie(other.StructuredToken, other.AddBearerToToken, other.UseTls);
+        return std::tie(StructuredToken, AddBearerToToken, UseTls, Protocol) == std::tie(other.StructuredToken, other.AddBearerToToken, other.UseTls, Protocol);
     }
 
     bool operator!=(const TDatabaseAuth& other) const {

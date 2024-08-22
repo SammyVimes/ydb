@@ -20,7 +20,7 @@
                     "scan_by": [
                         "Name (-\u221e, +\u221e)"
                     ],
-                    "type": "Lookup"
+                    "type": "Scan"
                 }
             ]
         },
@@ -30,6 +30,10 @@
                 {
                     "columns": [
                         "Value2"
+                    ],
+                    "limit": "1",
+                    "lookup_by": [
+                        "Key (101)"
                     ],
                     "type": "Lookup"
                 }

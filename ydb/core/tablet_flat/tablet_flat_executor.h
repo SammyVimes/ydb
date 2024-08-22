@@ -5,6 +5,8 @@
 
 #include <ydb/core/base/tablet.h>
 #include <ydb/core/base/blobstorage.h>
+#include <ydb/library/actors/wilson/wilson_span.h>
+#include <ydb/library/wilson_ids/wilson.h>
 #include <library/cpp/lwtrace/shuttle.h>
 #include <util/generic/maybe.h>
 #include <util/system/type_name.h>
@@ -24,6 +26,7 @@ namespace NTabletFlatExecutor {
 class TTransactionContext;
 class TExecutor;
 struct TPageCollectionTxEnv;
+struct TSeat;
 
 class TTableSnapshotContext : public TThrRefBase, TNonCopyable {
     friend class TExecutor;
@@ -100,6 +103,9 @@ struct IExecuting {
     virtual void LoanTable(ui32 tableId, const TString &partsInfo) = 0; // attach table parts to table (called on part destination)
     virtual void CleanupLoan(const TLogoBlobID &bundleId, ui64 from) = 0; // mark loan completion (called on part source)
     virtual void ConfirmLoan(const TLogoBlobID &bundleId, const TLogoBlobID &borrowId) = 0; // confirm loan update delivery (called on part destination)
+    virtual void EnableReadMissingReferences() noexcept = 0;
+    virtual void DisableReadMissingReferences() noexcept = 0;
+    virtual ui64 MissingReferencesSize() const noexcept = 0;
 };
 
 class TTxMemoryProviderBase : TNonCopyable {
@@ -200,13 +206,14 @@ class TTransactionContext : public TTxMemoryProviderBase {
 
 public:
     TTransactionContext(ui64 tablet, ui32 gen, ui32 step, NTable::TDatabase &db, IExecuting &env,
-                        ui64 memoryLimit, ui64 taskId)
+                        ui64 memoryLimit, ui64 taskId, NWilson::TSpan &transactionSpan)
         : TTxMemoryProviderBase(memoryLimit, taskId)
         , Tablet(tablet)
         , Generation(gen)
         , Step(step)
         , Env(env)
         , DB(db)
+        , TransactionSpan(transactionSpan)
     {}
 
     ~TTransactionContext() {}
@@ -224,12 +231,22 @@ public:
         return Rescheduled_;
     }
 
+    void StartExecutionSpan() noexcept {
+        TransactionExecutionSpan = NWilson::TSpan(TWilsonTablet::TabletDetailed, TransactionSpan.GetTraceId(), "Tablet.Transaction.Execute");
+    }
+
+    void FinishExecutionSpan() noexcept {
+        TransactionExecutionSpan.EndOk();
+    }
+
 public:
     const ui64 Tablet = Max<ui32>();
     const ui32 Generation = Max<ui32>();
     const ui32 Step = Max<ui32>();
     IExecuting &Env;
     NTable::TDatabase &DB;
+    NWilson::TSpan &TransactionSpan;
+    NWilson::TSpan TransactionExecutionSpan;
 
 private:
     bool Rescheduled_ = false;
@@ -274,6 +291,10 @@ public:
         : Orbit(std::move(orbit))
     { }
 
+    ITransaction(NWilson::TTraceId &&traceId)
+        : TxSpan(NWilson::TSpan(TWilsonTablet::TabletBasic, std::move(traceId), "Tablet.Transaction"))
+    { }
+
     virtual ~ITransaction() = default;
     /// @return true if execution complete and transaction is ready for commit
     virtual bool Execute(TTransactionContext &txc, const TActorContext &ctx) = 0;
@@ -289,8 +310,23 @@ public:
         out << TypeName(*this);
     }
 
+    void SetupTxSpanName() noexcept {
+        if (TxSpan) {
+            TxSpan.Attribute("Type", TypeName(*this));
+        }
+    }
+
+    void SetupTxSpan(NWilson::TTraceId traceId) noexcept {
+        TxSpan = NWilson::TSpan(TWilsonTablet::TabletBasic, std::move(traceId), "Tablet.Transaction");
+        if (TxSpan) {
+            TxSpan.Attribute("Type", TypeName(*this));
+        }
+    }
+
 public:
     NLWTrace::TOrbit Orbit;
+
+    NWilson::TSpan TxSpan;
 };
 
 template<typename T>
@@ -307,6 +343,11 @@ public:
 
     TTransactionBase(T *self, NLWTrace::TOrbit &&orbit)
         : ITransaction(std::move(orbit))
+        , Self(self)
+    { }
+
+    TTransactionBase(T *self, NWilson::TTraceId &&traceId)
+        : ITransaction(std::move(traceId))
         , Self(self)
     { }
 };
@@ -471,6 +512,9 @@ namespace NFlatExecutorSetup {
 
         virtual void OnFollowersCountChanged();
 
+        virtual void OnFollowerSchemaUpdated();
+        virtual void OnFollowerDataUpdated();
+
         // create transaction?
     protected:
         ITablet(TTabletStorageInfo *info, const TActorId &tablet)
@@ -580,9 +624,10 @@ namespace NFlatExecutorSetup {
         // Returns current database scheme (executor must be active)
         virtual const NTable::TScheme& Scheme() const noexcept = 0;
 
+        virtual void SetPreloadTablesData(THashSet<ui32> tables) = 0;
+
         ui32 Generation() const { return Generation0; }
         ui32 Step() const { return Step0; }
-
     protected:
         //
         IExecutor()

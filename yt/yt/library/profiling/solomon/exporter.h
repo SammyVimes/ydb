@@ -4,20 +4,20 @@
 #include "registry.h"
 #include "remote.h"
 
-#include <yt/yt/core/concurrency/thread_pool.h>
-#include <yt/yt/core/concurrency/async_rw_lock.h>
-
 #include <yt/yt/core/actions/public.h>
+
+#include <yt/yt/core/concurrency/async_rw_lock.h>
+#include <yt/yt/core/concurrency/thread_pool.h>
 
 #include <yt/yt/core/http/public.h>
 
-#include <yt/yt/core/ytree/yson_serializable.h>
 #include <yt/yt/core/ytree/ypath_detail.h>
+#include <yt/yt/core/ytree/yson_struct.h>
+
+#include <yt/yt/library/profiling/producer.h>
+#include <yt/yt/library/profiling/sensor.h>
 
 #include <library/cpp/monlib/encode/format.h>
-
-#include <yt/yt/library/profiling/sensor.h>
-#include <yt/yt/library/profiling/producer.h>
 
 namespace NYT::NProfiling {
 
@@ -50,6 +50,8 @@ struct TSolomonExporterConfig
 
     int ThreadPoolSize;
     int EncodingThreadPoolSize;
+    TDuration ThreadPoolPollingPeriod;
+    TDuration EncodingThreadPoolPollingPeriod;
 
     bool ConvertCountersToRateForSolomon;
     bool RenameConvertedCounters;
@@ -83,6 +85,8 @@ struct TSolomonExporterConfig
     THashMap<TString, TShardConfigPtr> Shards;
 
     TDuration UpdateSensorServiceTreePeriod;
+
+    int ProducerCollectionBatchSize;
 
     TShardConfigPtr MatchShard(const TString& sensorName);
 

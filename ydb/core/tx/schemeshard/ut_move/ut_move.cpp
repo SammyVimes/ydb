@@ -1,7 +1,6 @@
 #include <ydb/core/tx/schemeshard/ut_helpers/helpers.h>
 #include <ydb/core/tx/schemeshard/schemeshard_utils.h>
 
-#include <ydb/core/base/compile_time_flags.h>
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
 #include <ydb/core/tx/datashard/change_exchange.h>
 
@@ -654,7 +653,7 @@ Y_UNIT_TEST_SUITE(TSchemeShardMoveTest) {
         TestDropTable(runtime, ++txId, "/MyRoot", "TableMoveTwice");
         env.TestWaitNotification(runtime, txId);
 
-        env.TestWaitTabletDeletion(runtime, {9437194, 9437195});
+        env.TestWaitTabletDeletion(runtime, {72075186233409546, 72075186233409547});
 
         TestDescribeResult(DescribePath(runtime, "/MyRoot"),
                            {NLs::ChildrenCount(0),

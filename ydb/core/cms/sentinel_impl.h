@@ -28,6 +28,9 @@ public:
 
     void Reset();
 
+    void SetForcedStatus(EPDiskStatus status);
+    void ResetForcedStatus();
+
 private:
     const ui32& DefaultStateLimit;
     const TLimitsMap& StateLimits;
@@ -35,6 +38,7 @@ private:
     EPDiskState State = NKikimrBlobStorage::TPDiskState::Unknown;
     mutable EPDiskState PrevState = State;
     ui64 StateCounter;
+    TMaybe<EPDiskStatus> ForcedStatus;
 
 }; // TPDiskStatusComputer
 
@@ -43,7 +47,6 @@ public:
     explicit TPDiskStatus(EPDiskStatus initialStatus, const ui32& defaultStateLimit, const TLimitsMap& stateLimits);
 
     void AddState(EPDiskState state);
-    bool IsChanged(TString& reason) const;
     bool IsChanged() const;
     void ApplyChanges(TString& reason);
     void ApplyChanges();
@@ -84,6 +87,8 @@ struct TPDiskInfo
     EPDiskStatus PrevStatus = EPDiskStatus::ACTIVE;
     TInstant LastStatusChange;
     bool StatusChangeFailed = false;
+    // means that this pdisk status change last time was the reason of whole request failure
+    bool LastStatusChangeFailed = false;
     ui32 StatusChangeAttempt = 0;
     ui32 PrevStatusChangeAttempt = 0;
     EIgnoreReason IgnoreReason = NKikimrCms::TPDiskInfo::NOT_IGNORED;
@@ -104,6 +109,9 @@ private:
 struct TNodeInfo {
     TString Host;
     NActors::TNodeLocation Location;
+    THashSet<NKikimrCms::EMarker> Markers;
+
+    bool HasFaultyMarker() const;
 };
 
 struct TConfigUpdaterState {

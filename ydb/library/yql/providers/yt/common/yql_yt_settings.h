@@ -64,6 +64,11 @@ enum class EInferSchemaMode {
     RPC        = 2ULL  /* "rpc" */,
 };
 
+enum class EColumnGroupMode {
+    Disable     /* "disable" */,
+    Single      /* "single" */,
+    PerUsage    /* "perusage", "per-usage" */,
+};
 
 struct TYtSettings {
     using TConstPtr = std::shared_ptr<const TYtSettings>;
@@ -101,6 +106,8 @@ struct TYtSettings {
     NCommon::TConfSetting<TDuration, false> FileCacheTtl;
     NCommon::TConfSetting<TString, false> _ImpersonationUser;
     NCommon::TConfSetting<EInferSchemaMode, false> InferSchemaMode;
+    NCommon::TConfSetting<ui32, false> BatchListFolderConcurrency;
+    NCommon::TConfSetting<bool, false> ForceTmpSecurity;
 
     // Job runtime
     NCommon::TConfSetting<TString, true> Pool;
@@ -158,9 +165,12 @@ struct TYtSettings {
     NCommon::TConfSetting<TString, true> PublishedAutoMerge;
     NCommon::TConfSetting<TString, true> TemporaryAutoMerge;
     NCommon::TConfSetting<TVector<TString>, true> LayerPaths;
+    NCommon::TConfSetting<TString, true> DockerImage;
     NCommon::TConfSetting<NYT::TNode, true> JobEnv;
     NCommon::TConfSetting<NYT::TNode, true> OperationSpec;
     NCommon::TConfSetting<NYT::TNode, true> Annotations;
+    NCommon::TConfSetting<NYT::TNode, true> StartedBy;
+    NCommon::TConfSetting<NYT::TNode, true> Description;
     NCommon::TConfSetting<bool, true> UseSkiff;
     NCommon::TConfSetting<ui32, true> TableContentCompressLevel;
     NCommon::TConfSetting<bool, true> DisableJobSplitting;
@@ -173,6 +183,7 @@ struct TYtSettings {
     NCommon::TConfSetting<ui32, true> MaxSpeculativeJobCountPerTask;
     NCommon::TConfSetting<NSize::TSize, true> LLVMMemSize;
     NCommon::TConfSetting<NSize::TSize, true> LLVMPerNodeMemSize;
+    NCommon::TConfSetting<ui64, true> LLVMNodeCountLimit;
     NCommon::TConfSetting<NSize::TSize, true> SamplingIoBlockSize;
     NCommon::TConfSetting<NYT::TNode, true> PublishedMedia;
     NCommon::TConfSetting<NYT::TNode, true> TemporaryMedia;
@@ -190,6 +201,8 @@ struct TYtSettings {
     NCommon::TConfSetting<bool, true> UseRPCReaderInDQ;
     NCommon::TConfSetting<size_t, true> DQRPCReaderInflight;
     NCommon::TConfSetting<TDuration, true> DQRPCReaderTimeout;
+    NCommon::TConfSetting<TSet<TString>, true> BlockReaderSupportedTypes;
+    NCommon::TConfSetting<TSet<NUdf::EDataSlot>, true> BlockReaderSupportedDataTypes;
 
     // Optimizers
     NCommon::TConfSetting<bool, true> _EnableDq;
@@ -213,6 +226,7 @@ struct TYtSettings {
     NCommon::TConfSetting<ui32, false> MaxInputTables;
     NCommon::TConfSetting<ui32, false> MaxInputTablesForSortedMerge;
     NCommon::TConfSetting<ui32, false> MaxOutputTables;
+    NCommon::TConfSetting<bool, false> DisableFuseOperations;
     NCommon::TConfSetting<NSize::TSize, false> MaxExtraJobMemoryToFuseOperations;
     NCommon::TConfSetting<double, false> MaxReplicationFactorToFuseOperations;
     NCommon::TConfSetting<ui32, false> MaxOperationFiles;
@@ -262,6 +276,10 @@ struct TYtSettings {
     NCommon::TConfSetting<double, false> MaxReplicationFactorToFuseMultiOuts;
     NCommon::TConfSetting<ui64, false> ApplyStoredConstraints;
     NCommon::TConfSetting<bool, false> ViewIsolation;
+    NCommon::TConfSetting<bool, false> PartitionByConstantKeysViaMap;
+    NCommon::TConfSetting<EColumnGroupMode, false> ColumnGroupMode;
+    NCommon::TConfSetting<ui16, false> MinColumnGroupSize;
+    NCommon::TConfSetting<ui16, false> MaxColumnGroups;
 };
 
 EReleaseTempDataMode GetReleaseTempDataMode(const TYtSettings& settings);

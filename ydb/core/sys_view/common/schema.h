@@ -3,13 +3,16 @@
 #include "path.h"
 
 #include <ydb/core/tablet_flat/flat_cxx_database.h>
-#include <ydb/core/tx/datashard/sys_tables.h>
+#include <ydb/core/tx/locks/sys_tables.h>
+#include <ydb/library/yql/parser/pg_catalog/catalog.h>
+#include <ydb/library/yql/parser/pg_wrapper/interface/type_desc.h>
 
 namespace NKikimr {
 namespace NSysView {
 
 constexpr TStringBuf PartitionStatsName = "partition_stats";
 constexpr TStringBuf NodesName = "nodes";
+constexpr TStringBuf QuerySessions = "query_sessions";
 
 constexpr TStringBuf TopQueriesByDuration1MinuteName = "top_queries_by_duration_one_minute";
 constexpr TStringBuf TopQueriesByDuration1HourName = "top_queries_by_duration_one_hour";
@@ -31,10 +34,21 @@ constexpr TStringBuf TabletsName = "hive_tablets";
 constexpr TStringBuf QueryMetricsName = "query_metrics_one_minute";
 
 constexpr TStringBuf StorePrimaryIndexStatsName = "store_primary_index_stats";
+constexpr TStringBuf StorePrimaryIndexPortionStatsName = "store_primary_index_portion_stats";
+constexpr TStringBuf StorePrimaryIndexGranuleStatsName = "store_primary_index_granule_stats";
+constexpr TStringBuf StorePrimaryIndexOptimizerStatsName = "store_primary_index_optimizer_stats";
 constexpr TStringBuf TablePrimaryIndexStatsName = "primary_index_stats";
+constexpr TStringBuf TablePrimaryIndexPortionStatsName = "primary_index_portion_stats";
+constexpr TStringBuf TablePrimaryIndexGranuleStatsName = "primary_index_granule_stats";
+constexpr TStringBuf TablePrimaryIndexOptimizerStatsName = "primary_index_optimizer_stats";
 
 constexpr TStringBuf TopPartitions1MinuteName = "top_partitions_one_minute";
 constexpr TStringBuf TopPartitions1HourName = "top_partitions_one_hour";
+
+constexpr TStringBuf PgTablesName = "pg_tables";
+constexpr TStringBuf InformationSchemaTablesName = "tables";
+constexpr TStringBuf PgClassName = "pg_class";
+
 
 struct Schema : NIceDb::Schema {
     struct PartitionStats : Table<1> {
@@ -102,6 +116,9 @@ struct Schema : NIceDb::Schema {
         struct Port      : Column<4, NScheme::NTypeIds::Uint32> {};
         struct StartTime : Column<5, NScheme::NTypeIds::Timestamp> {};
         struct UpTime    : Column<6, NScheme::NTypeIds::Interval> {};
+        struct CpuThreads: Column<7, NScheme::NTypeIds::Uint32> {};
+        struct CpuUsage  : Column<8, NScheme::NTypeIds::Double> {};
+        struct CpuIdle   : Column<9, NScheme::NTypeIds::Double> {};
 
         using TKey = TableKey<NodeId>;
         using TColumns = TableColumns<
@@ -110,7 +127,10 @@ struct Schema : NIceDb::Schema {
             Address,
             Port,
             StartTime,
-            UpTime>;
+            UpTime,
+            CpuThreads,
+            CpuUsage,
+            CpuIdle>;
     };
 
     struct QueryStats : Table<3> {
@@ -387,27 +407,39 @@ struct Schema : NIceDb::Schema {
 
     struct PrimaryIndexStats : Table<10> {
         struct PathId   : Column<1, NScheme::NTypeIds::Uint64> {};
-        struct Kind     : Column<2, NScheme::NTypeIds::Uint32> {};
+        struct Kind     : Column<2, NScheme::NTypeIds::Utf8> {};
         struct TabletId : Column<3, NScheme::NTypeIds::Uint64> {};
         struct Rows     : Column<4, NScheme::NTypeIds::Uint64> {};
-        struct Bytes    : Column<5, NScheme::NTypeIds::Uint64> {};
-        struct RawBytes : Column<6, NScheme::NTypeIds::Uint64> {};
-        struct Portions : Column<7, NScheme::NTypeIds::Uint64> {};
-        struct Blobs    : Column<8, NScheme::NTypeIds::Uint64> {};
+        struct RawBytes : Column<5, NScheme::NTypeIds::Uint64> {};
+        struct PortionId: Column<6, NScheme::NTypeIds::Uint64> {};
+        struct ChunkIdx : Column<7, NScheme::NTypeIds::Uint64> {};
+        struct EntityName: Column<8, NScheme::NTypeIds::Utf8> {};
+        struct InternalEntityId : Column<9, NScheme::NTypeIds::Uint32> {};
+        struct BlobId : Column<10, NScheme::NTypeIds::Utf8> {};
+        struct BlobRangeOffset : Column<11, NScheme::NTypeIds::Uint64> {};
+        struct BlobRangeSize : Column<12, NScheme::NTypeIds::Uint64> {};
+        struct Activity : Column<13, NScheme::NTypeIds::Uint8> {};
+        struct TierName: Column<14, NScheme::NTypeIds::Utf8> {};
+        struct EntityType: Column<15, NScheme::NTypeIds::Utf8> {};
 
-        using TKey = TableKey<
-            PathId,
-            Kind,
-            TabletId>;
+        using TKey = TableKey<PathId, TabletId, PortionId, InternalEntityId, ChunkIdx>;
         using TColumns = TableColumns<
             PathId,
             Kind,
             TabletId,
             Rows,
-            Bytes,
             RawBytes,
-            Portions,
-            Blobs>;
+            PortionId,
+            ChunkIdx,
+            EntityName,
+            InternalEntityId,
+            BlobId,
+            BlobRangeOffset,
+            BlobRangeSize,
+            Activity,
+            TierName,
+            EntityType
+            >;
     };
 
     struct StorageStats : Table<11> {
@@ -451,6 +483,133 @@ struct Schema : NIceDb::Schema {
             IndexSize,
             InFlightTxCount>;
     };
+
+    struct QuerySessions : Table<13> {
+        struct SessionId : Column<1, NScheme::NTypeIds::Utf8> {};
+        struct NodeId : Column<2, NScheme::NTypeIds::Uint32> {};
+        struct State : Column<3, NScheme::NTypeIds::Utf8> {};
+        struct Query : Column<4, NScheme::NTypeIds::Utf8> {};
+        struct QueryCount : Column<5, NScheme::NTypeIds::Uint32> {};
+        struct ClientAddress : Column<6, NScheme::NTypeIds::Utf8> {};
+        struct ClientPID : Column<7, NScheme::NTypeIds::Utf8> {};
+        struct ClientUserAgent : Column<8, NScheme::NTypeIds::Utf8> {};
+        struct ClientSdkBuildInfo : Column<9, NScheme::NTypeIds::Utf8> {};
+        struct ApplicationName : Column<10, NScheme::NTypeIds::Utf8> {};
+        struct SessionStartAt : Column<11, NScheme::NTypeIds::Timestamp> {};
+        struct QueryStartAt : Column<12, NScheme::NTypeIds::Timestamp> {};
+        struct StateChangeAt : Column<13, NScheme::NTypeIds::Timestamp> {};
+        struct UserSID : Column<14, NScheme::NTypeIds::Utf8> {};
+
+        using TKey = TableKey<SessionId>;
+        using TColumns = TableColumns<
+            SessionId,
+            NodeId,
+            State,
+            Query,
+            QueryCount,
+            ClientAddress,
+            ClientPID,
+            ClientUserAgent,
+            ClientSdkBuildInfo,
+            ApplicationName,
+            SessionStartAt,
+            QueryStartAt,
+            StateChangeAt,
+            UserSID>;
+    };
+
+    struct PrimaryIndexPortionStats: Table<14> {
+        struct PathId: Column<1, NScheme::NTypeIds::Uint64> {};
+        struct Kind: Column<2, NScheme::NTypeIds::Utf8> {};
+        struct TabletId: Column<3, NScheme::NTypeIds::Uint64> {};
+        struct Rows: Column<4, NScheme::NTypeIds::Uint64> {};
+        struct ColumnRawBytes: Column<5, NScheme::NTypeIds::Uint64> {};
+        struct IndexRawBytes: Column<6, NScheme::NTypeIds::Uint64> {};
+        struct ColumnBlobBytes: Column<7, NScheme::NTypeIds::Uint64> {};
+        struct IndexBlobBytes: Column<8, NScheme::NTypeIds::Uint64> {};
+        struct PortionId: Column<9, NScheme::NTypeIds::Uint64> {};
+        struct Activity: Column<10, NScheme::NTypeIds::Uint8> {};
+        struct TierName: Column<11, NScheme::NTypeIds::Utf8> {};
+        struct Stats: Column<12, NScheme::NTypeIds::Utf8> {};
+        struct Optimized: Column<13, NScheme::NTypeIds::Uint8> {};
+
+        using TKey = TableKey<PathId, TabletId, PortionId>;
+        using TColumns = TableColumns<
+            PathId,
+            Kind,
+            TabletId,
+            Rows,
+            ColumnRawBytes,
+            IndexRawBytes,
+            ColumnBlobBytes,
+            IndexBlobBytes,
+            PortionId,
+            Activity,
+            TierName,
+            Stats,
+            Optimized
+        >;
+    };
+
+    struct PrimaryIndexGranuleStats: Table<14> {
+        struct PathId: Column<1, NScheme::NTypeIds::Uint64> {};
+        struct TabletId: Column<2, NScheme::NTypeIds::Uint64> {};
+        struct PortionsCount: Column<3, NScheme::NTypeIds::Uint64> {};
+        struct HostName: Column<4, NScheme::NTypeIds::Utf8> {};
+        struct NodeId: Column<5, NScheme::NTypeIds::Uint64> {};
+
+        using TKey = TableKey<PathId, TabletId>;
+        using TColumns = TableColumns<
+            PathId,
+            TabletId,
+            PortionsCount,
+            HostName,
+            NodeId
+        >;
+    };
+
+    struct PrimaryIndexOptimizerStats: Table<14> {
+        struct PathId: Column<1, NScheme::NTypeIds::Uint64> {};
+        struct TabletId: Column<2, NScheme::NTypeIds::Uint64> {};
+        struct TaskId: Column<3, NScheme::NTypeIds::Uint64> {};
+        struct HostName: Column<4, NScheme::NTypeIds::Utf8> {};
+        struct NodeId: Column<5, NScheme::NTypeIds::Uint64> {};
+        struct Start: Column<6, NScheme::NTypeIds::Utf8> {};
+        struct Finish: Column<7, NScheme::NTypeIds::Utf8> {};
+        struct Details: Column<8, NScheme::NTypeIds::Utf8> {};
+        struct Category: Column<9, NScheme::NTypeIds::Uint64> {};
+        struct Weight: Column<10, NScheme::NTypeIds::Int64> {};
+
+        using TKey = TableKey<PathId, TabletId, TaskId>;
+        using TColumns = TableColumns<
+            PathId,
+            TabletId,
+            TaskId,
+            HostName,
+            NodeId,
+            Start,
+            Finish,
+            Details,
+            Category,
+            Weight
+        >;
+    };
+
+
+    struct PgColumn {
+        NIceDb::TColumnId _ColumnId;
+        NScheme::TTypeInfo _ColumnTypeInfo;
+        TString _ColumnName;
+        PgColumn(NIceDb::TColumnId columnId, TStringBuf columnTypeName, TStringBuf columnName);
+    };
+
+    class PgTablesSchemaProvider {
+    public:
+        PgTablesSchemaProvider();
+        const TVector<PgColumn>& GetColumns(TStringBuf tableName) const;
+    private:
+        std::unordered_map<TString, TVector<PgColumn>> columnsStorage;
+    };
 };
 
 bool MaybeSystemViewPath(const TVector<TString>& path);
@@ -470,7 +629,7 @@ public:
     struct TSystemViewPath {
         TVector<TString> Parent;
         TString ViewName;
-    };
+        };
 
     struct TSchema {
         THashMap<NTable::TTag, TSysTables::TTableColumnInfo> Columns;

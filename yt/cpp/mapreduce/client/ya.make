@@ -42,21 +42,13 @@ PEERDIR(
     yt/cpp/mapreduce/http
     yt/cpp/mapreduce/interface
     yt/cpp/mapreduce/io
-    yt/cpp/mapreduce/library/table_schema
     yt/cpp/mapreduce/raw_client
 )
 
-IF (ARCH_X86_64 OR OS_DARWIN)
-    PEERDIR(
-        yt/yt/core
-        yt/yt/core/http
-    )
-ELSE()
-    # Suppress yamaker's WBadIncl error on exotic platforms
-    PEERDIR(
-        yt/yt_proto/yt/core
-    )
-ENDIF()
+PEERDIR(
+    yt/yt/core
+    yt/yt/core/http
+)
 
 IF (BUILD_TYPE == "PROFILE")
     PEERDIR(

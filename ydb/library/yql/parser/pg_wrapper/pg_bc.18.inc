@@ -8,6 +8,7 @@ LLVM_BC(
     postgresql/src/backend/utils/adt/orderedsetaggs.c
     postgresql/src/backend/utils/adt/pg_lsn.c
     postgresql/src/backend/utils/adt/ruleutils.c
+    postgresql/src/backend/utils/init/miscinit.c
     pg_kernels.18.cpp
 
     NAME PgFuncs18
@@ -18,16 +19,22 @@ LLVM_BC(
     arrow_elem_contained_by_multirange
     arrow_hash_multirange
     arrow_hash_multirange_extended
+    arrow_hypothetical_cume_dist_final
+    arrow_hypothetical_dense_rank_final
+    arrow_hypothetical_percent_rank_final
+    arrow_hypothetical_rank_final
     arrow_mode_final
     arrow_multirange_adjacent_multirange
     arrow_multirange_adjacent_range
     arrow_multirange_after_multirange
     arrow_multirange_after_range
+    arrow_multirange_agg_transfn
     arrow_multirange_before_multirange
     arrow_multirange_before_range
     arrow_multirange_cmp
     arrow_multirange_constructor0
     arrow_multirange_constructor1
+    arrow_multirange_constructor2
     arrow_multirange_contained_by_multirange
     arrow_multirange_contained_by_range
     arrow_multirange_contains_elem
@@ -62,6 +69,7 @@ LLVM_BC(
     arrow_multirange_upper_inf
     arrow_multirangesel
     arrow_ordered_set_transition
+    arrow_ordered_set_transition_multi
     arrow_percentile_cont_float8_final
     arrow_percentile_cont_float8_multi_final
     arrow_percentile_cont_interval_final
@@ -132,4 +140,5 @@ LLVM_BC(
     arrow_spg_quad_leaf_consistent
     arrow_spg_quad_picksplit
     arrow_spghandler
+    arrow_system_user
 )

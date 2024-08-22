@@ -1,13 +1,19 @@
 #include "shutdown.h"
 
+#include <yt/yt/core/concurrency/system_invokers.h>
+
 #include <yt/yt/core/misc/collection_helpers.h>
 #include <yt/yt/core/misc/proc.h>
 #include <yt/yt/core/misc/singleton.h>
+
+#include <library/cpp/yt/cpu_clock/clock.h>
 
 #include <library/cpp/yt/threading/fork_aware_spin_lock.h>
 #include <library/cpp/yt/threading/event_count.h>
 
 #include <library/cpp/yt/misc/tls.h>
+
+#include <library/cpp/yt/system/exit.h>
 
 #include <util/generic/algorithm.h>
 
@@ -37,7 +43,8 @@ public:
 
         if (ShutdownStarted_.load()) {
             if (auto* logFile = TryGetShutdownLogFile()) {
-                ::fprintf(logFile, "*** Attempt to register shutdown callback when shutdown is already in progress (Name: %s)\n",
+                ::fprintf(logFile, "%s\t*** Attempt to register shutdown callback when shutdown is already in progress (Name: %s)\n",
+                    GetInstant().ToString().c_str(),
                     name.c_str());
             }
             return nullptr;
@@ -50,7 +57,8 @@ public:
         InsertOrCrash(RegisteredCallbacks_, registeredCallback.Get());
 
         if (auto* logFile = TryGetShutdownLogFile()) {
-            ::fprintf(logFile, "*** Shutdown callback registered (Name: %s, Priority: %d)\n",
+            ::fprintf(logFile, "%s\t*** Shutdown callback registered (Name: %s, Priority: %d)\n",
+                GetInstant().ToString().c_str(),
                 registeredCallback->Name.c_str(),
                 registeredCallback->Priority);
         }
@@ -73,7 +81,8 @@ public:
             ShutdownThreadId_.store(GetCurrentThreadId());
 
             if (auto* logFile = TryGetShutdownLogFile()) {
-                ::fprintf(logFile, "*** Shutdown started (ThreadId: %" PRISZT ")\n",
+                ::fprintf(logFile, "%s\t*** Shutdown started (ThreadId: %" PRISZT ")\n",
+                    GetInstant().ToString().c_str(),
                     GetCurrentThreadId());
             }
 
@@ -99,7 +108,7 @@ public:
                     YT_ABORT();
                 } else {
                     ::fprintf(stderr, "*** Shutdown hung, exiting\n");
-                    ::_exit(options.HungExitCode);
+                    AbortProcess(options.HungExitCode);
                 }
             }
         });
@@ -108,7 +117,8 @@ public:
         for (auto it = registeredCallbacks.rbegin(); it != registeredCallbacks.rend(); it++) {
             const auto& registeredCallback = *it;
             if (auto* logFile = TryGetShutdownLogFile()) {
-                ::fprintf(logFile, "*** Running callback (Name: %s, Priority: %d)\n",
+                ::fprintf(logFile, "%s\t*** Running callback (Name: %s, Priority: %d)\n",
+                    GetInstant().ToString().c_str(),
                     registeredCallback.Name.c_str(),
                     registeredCallback.Priority);
             }
@@ -121,7 +131,8 @@ public:
     #endif
 
         if (auto* logFile = TryGetShutdownLogFile()) {
-            ::fprintf(logFile, "*** Shutdown completed\n");
+            ::fprintf(logFile, "%s\t*** Shutdown completed\n",
+                GetInstant().ToString().c_str());
         }
     }
 
@@ -170,6 +181,12 @@ public:
         return ShutdownThreadId_.load();
     }
 
+    void EnsureSafeShutdown() const
+    {
+        NConcurrency::GetFinalizerInvoker();
+        NConcurrency::GetShutdownInvoker();
+    }
+
 private:
     std::atomic<FILE*> ShutdownLogFile_ = IsShutdownLoggingEnabledImpl() ? stderr : nullptr;
 
@@ -209,7 +226,8 @@ private:
     {
         auto guard = Guard(Lock_);
         if (auto* logFile = TryGetShutdownLogFile()) {
-            ::fprintf(logFile, "*** Shutdown callback unregistered (Name: %s, Priority: %d)\n",
+            ::fprintf(logFile, "%s\t*** Shutdown callback unregistered (Name: %s, Priority: %d)\n",
+                GetInstant().ToString().c_str(),
                 registeredCallback->Name.c_str(),
                 registeredCallback->Priority);
         }
@@ -267,6 +285,11 @@ size_t GetShutdownThreadId()
     return TShutdownManager::Get()->GetShutdownThreadId();
 }
 
+void EnsureSafeShutdown()
+{
+    TShutdownManager::Get()->EnsureSafeShutdown();
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 static const void* ShutdownGuardInitializer = [] {
@@ -282,7 +305,7 @@ static const void* ShutdownGuardInitializer = [] {
         }
     };
 
-    static YT_THREAD_LOCAL(TShutdownGuard) Guard;
+    static thread_local TShutdownGuard Guard;
     return nullptr;
 }();
 

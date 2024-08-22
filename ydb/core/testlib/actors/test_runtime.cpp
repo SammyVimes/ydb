@@ -3,24 +3,33 @@
 #include <ydb/core/base/appdata.h>
 #include <ydb/core/base/blobstorage.h>
 #include <ydb/core/base/counters.h>
+#include <ydb/core/base/pool_stats_collector.h>
 #include <ydb/core/mon/sync_http_mon.h>
+#include <ydb/core/mon/async_http_mon.h>
 #include <ydb/core/mon_alloc/profiler.h>
 #include <ydb/core/tablet/tablet_impl.h>
 
 #include <ydb/library/actors/core/executor_pool_basic.h>
 #include <ydb/library/actors/core/executor_pool_io.h>
+#include <ydb/library/actors/core/scheduler_basic.h>
 #include <ydb/library/actors/interconnect/interconnect_impl.h>
 
+#include <ydb/core/protos/datashard_config.pb.h>
+#include <ydb/core/protos/key.pb.h>
+#include <ydb/core/protos/netclassifier.pb.h>
+#include <ydb/core/protos/pqconfig.pb.h>
+#include <ydb/core/protos/stream.pb.h>
 
 /**** ACHTUNG: Do not make here any new dependecies on kikimr ****/
 
 namespace NActors {
 
     void TTestActorRuntime::TNodeData::Stop() {
-        TNodeDataBase::Stop();
         if (Mon) {
             Mon->Stop();
+            GetAppData<NKikimr::TAppData>()->Mon = nullptr;
         }
+        TNodeDataBase::Stop();
     }
 
     TTestActorRuntime::TNodeData::~TNodeData() {
@@ -35,6 +44,15 @@ namespace NActors {
         SetScheduledEventFilter(&TTestActorRuntime::DefaultScheduledFilterFunc);
         NodeFactory = MakeHolder<TNodeFactory>();
         InitNodes();
+    }
+
+    void TTestActorRuntime::SetupStatsCollectors() {
+        NeedStatsCollectors = true;
+    }
+
+    void TTestActorRuntime::SetupActorSystemConfig(const TActorSystemSetupConfig& config, const TActorSystemPools& pools) {
+        ActorSystemSetupConfig = config;
+        ActorSystemPools = pools;
     }
 
     TTestActorRuntime::TTestActorRuntime(THeSingleSystemEnv d)
@@ -119,7 +137,7 @@ namespace NActors {
                 node->ActorSystem = MakeActorSystem(nodeIndex, node);
                 node->ExecutorThread.Reset(new TExecutorThread(0, 0, node->ActorSystem.Get(), node->SchedulerPool.Get(), node->MailboxTable.Get(), "TestExecutor"));
             } else {
-                node->AppData0.reset(new NKikimr::TAppData(0, 1, 2, 3, { }, app0->TypeRegistry, app0->FunctionRegistry, app0->FormatFactory, nullptr));
+                node->AppData0.reset(new NKikimr::TAppData(ActorSystemPools.SystemPoolId, ActorSystemPools.UserPoolId, ActorSystemPools.IOPoolId, ActorSystemPools.BatchPoolId, ActorSystemPools.ServicePools, app0->TypeRegistry, app0->FunctionRegistry, app0->FormatFactory, nullptr));
                 node->ActorSystem = MakeActorSystem(nodeIndex, node);
             }
             node->LogSettings->MessagePrefix = " node " + ToString(nodeId);
@@ -150,8 +168,14 @@ namespace NActors {
             nodeAppData->ColumnShardConfig = app0->ColumnShardConfig;
             nodeAppData->MeteringConfig = app0->MeteringConfig;
             nodeAppData->AwsCompatibilityConfig = app0->AwsCompatibilityConfig;
+            nodeAppData->S3ProxyResolverConfig = app0->S3ProxyResolverConfig;
+            nodeAppData->GraphConfig = app0->GraphConfig;
             nodeAppData->EnableMvccSnapshotWithLegacyDomainRoot = app0->EnableMvccSnapshotWithLegacyDomainRoot;
             nodeAppData->IoContextFactory = app0->IoContextFactory;
+            if (nodeIndex < egg.Icb.size()) {
+                nodeAppData->Icb = std::move(egg.Icb[nodeIndex]);
+                nodeAppData->InFlightLimiterRegistry.Reset(new NKikimr::NGRpcService::TInFlightLimiterRegistry(nodeAppData->Icb));
+            }
             if (KeyConfigGenerator) {
                 nodeAppData->KeyConfig = KeyConfigGenerator(nodeIndex);
             } else {
@@ -163,12 +187,20 @@ namespace NActors {
             }
 
             if (NeedMonitoring && !SingleSysEnv) {
-                ui16 port = GetPortManager().GetPort();
-                node->Mon.Reset(new NActors::TSyncHttpMon({
-                    .Port = port,
-                    .Threads = 10,
-                    .Title = "KIKIMR monitoring"
-                }));
+                ui16 port = MonitoringPortOffset ? MonitoringPortOffset + nodeIndex : GetPortManager().GetPort();
+                if (MonitoringTypeAsync) {
+                    node->Mon.Reset(new NActors::TAsyncHttpMon({
+                        .Port = port,
+                        .Threads = 10,
+                        .Title = "KIKIMR monitoring"
+                    }));
+                } else {
+                    node->Mon.Reset(new NActors::TSyncHttpMon({
+                        .Port = port,
+                        .Threads = 10,
+                        .Title = "KIKIMR monitoring"
+                    }));
+                }
                 nodeAppData->Mon = node->Mon.Get();
                 node->Mon->RegisterCountersPage("counters", "Counters", node->DynamicCounters);
                 auto actorsMonPage = node->Mon->RegisterIndexPage("actors", "Actors");
@@ -180,7 +212,7 @@ namespace NActors {
 
             node->ActorSystem->Start();
             if (nodeAppData->Mon) {
-                nodeAppData->Mon->Start();
+                nodeAppData->Mon->Start(node->ActorSystem.Get());
             }
         }
 
@@ -192,7 +224,26 @@ namespace NActors {
         return MonPorts[nodeIndex];
     }
 
-    void TTestActorRuntime::InitActorSystemSetup(TActorSystemSetup& /*setup*/) {
+    void TTestActorRuntime::InitActorSystemSetup(TActorSystemSetup& setup, TNodeDataBase* node) {
+        if (ActorSystemSetupConfig) {
+            setup.Executors.Reset();
+            setup.ExecutorsCount = 0;
+
+            setup.CpuManager = ActorSystemSetupConfig->CpuManagerConfig;
+            setup.MonitorStuckActors = ActorSystemSetupConfig->MonitorStuckActors;
+
+            auto schedulerConfig = ActorSystemSetupConfig->SchedulerConfig;
+            schedulerConfig.MonCounters = NKikimr::GetServiceCounters(node->DynamicCounters, "utils");
+            setup.Scheduler.Reset(CreateSchedulerThread(schedulerConfig));
+        }
+
+        if (NeedMonitoring && NeedStatsCollectors) {
+            NActors::IActor* statsCollector = NKikimr::CreateStatsCollector(1, setup, node->DynamicCounters);
+            setup.LocalServices.push_back({
+                TActorId(),
+                NActors::TActorSetupCmd(statsCollector, NActors::TMailboxType::HTSwap, node->GetAppData<NKikimr::TAppData>()->SystemPoolId)
+            });
+        }
     }
 
     NKikimr::TAppData& TTestActorRuntime::GetAppData(ui32 nodeIndex) {
@@ -201,6 +252,10 @@ namespace NActors {
         ui32 nodeId = FirstNodeId + nodeIndex;
         auto* node = GetNodeById(nodeId);
         return *node->GetAppData<NKikimr::TAppData>();
+    }
+
+    ui32 TTestActorRuntime::GetFirstNodeId() {
+        return FirstNodeId;
     }
 
     bool TTestActorRuntime::DefaultScheduledFilterFunc(TTestActorRuntimeBase& runtime, TAutoPtr<IEventHandle>& event, TDuration delay, TInstant& deadline) {
@@ -213,6 +268,7 @@ namespace NActors {
             return true;
         case NKikimr::TEvBlobStorage::EvNotReadyRetryTimeout:
         case NKikimr::TEvTabletPipe::EvClientRetry:
+        case NKikimr::TEvTabletPipe::EvClientCheckDelay:
         case NKikimr::TEvTabletBase::EvFollowerRetry:
         case NKikimr::TEvTabletBase::EvTryBuildFollowerGraph:
         case NKikimr::TEvTabletBase::EvTrySyncFollower:
@@ -238,13 +294,13 @@ namespace NActors {
         GrabEdgeEventRethrow<TEvents::TEvWakeup>(SleepEdgeActor);
     }
 
-    void TTestActorRuntime::SendToPipe(ui64 tabletId, const TActorId& sender, IEventBase* payload, ui32 nodeIndex, const NKikimr::NTabletPipe::TClientConfig& pipeConfig, TActorId clientId, ui64 cookie) {
+    void TTestActorRuntime::SendToPipe(ui64 tabletId, const TActorId& sender, IEventBase* payload, ui32 nodeIndex, const NKikimr::NTabletPipe::TClientConfig& pipeConfig, TActorId clientId, ui64 cookie, NWilson::TTraceId traceId) {
         bool newPipe = (clientId == TActorId());
         if (newPipe) {
             clientId = ConnectToPipe(tabletId, sender, nodeIndex, pipeConfig);
         }
 
-        SendToPipe(clientId, sender, payload, nodeIndex, cookie);
+        SendToPipe(clientId, sender, payload, nodeIndex, cookie, std::move(traceId));
 
         if (newPipe) {
             ClosePipe(clientId, sender, nodeIndex);
@@ -252,8 +308,8 @@ namespace NActors {
     }
 
     void TTestActorRuntime::SendToPipe(TActorId clientId, const TActorId& sender, IEventBase* payload,
-                                       ui32 nodeIndex, ui64 cookie) {
-        auto pipeEv = new IEventHandle(clientId, sender, payload, 0, cookie);
+                                       ui32 nodeIndex, ui64 cookie, NWilson::TTraceId traceId) {
+        auto pipeEv = new IEventHandle(clientId, sender, payload, 0, cookie, nullptr, std::move(traceId));
         pipeEv->Rewrite(NKikimr::TEvTabletPipe::EvSend, clientId);
         Send(pipeEv, nodeIndex, true);
     }

@@ -2,6 +2,7 @@
 
 #if !defined(INCLUDE_FUTURE_INL_H)
 #error "you should never include future-inl.h directly"
+#include "future.h" // Fix LSP
 #endif // INCLUDE_FUTURE_INL_H
 
 namespace NThreading {
@@ -115,6 +116,9 @@ namespace NThreading {
 
             bool HasException() const {
                 return AtomicGet(State) == ExceptionSet;
+            }
+            bool IsReady() const {
+                return AtomicGet(State) != NotReady;
             }
 
             const T& GetValue(TDuration timeout = TDuration::Zero()) const {
@@ -296,6 +300,9 @@ namespace NThreading {
 
             bool HasException() const {
                 return AtomicGet(State) == ExceptionSet;
+            }
+            bool IsReady() const {
+                return AtomicGet(State) != NotReady;
             }
 
             void GetValue(TDuration timeout = TDuration::Zero()) const {
@@ -583,6 +590,10 @@ namespace NThreading {
     inline bool TFuture<T>::HasException() const {
         return State && State->HasException();
     }
+    template <typename T>
+    inline bool TFuture<T>::IsReady() const {
+        return State && State->IsReady();
+    }
 
     template <typename T>
     inline void TFuture<T>::Wait() const {
@@ -624,7 +635,7 @@ namespace NThreading {
     inline TFuture<TFutureType<TFutureCallResult<F, T>>> TFuture<T>::Apply(F&& func) const {
         auto promise = NewPromise<TFutureType<TFutureCallResult<F, T>>>();
         Subscribe([promise, func = std::forward<F>(func)](const TFuture<T>& future) mutable {
-            NImpl::SetValue(promise, [&]() { return func(future); });
+            NImpl::SetValue(promise, [&]() { return std::move(func)(future); });
         });
         return promise;
     }
@@ -688,6 +699,9 @@ namespace NThreading {
     inline bool TFuture<void>::HasException() const {
         return State && State->HasException();
     }
+    inline bool TFuture<void>::IsReady() const {
+        return State && State->IsReady();
+    }
 
     inline void TFuture<void>::Wait() const {
         EnsureInitialized();
@@ -723,22 +737,22 @@ namespace NThreading {
     inline TFuture<TFutureType<TFutureCallResult<F, void>>> TFuture<void>::Apply(F&& func) const {
         auto promise = NewPromise<TFutureType<TFutureCallResult<F, void>>>();
         Subscribe([promise, func = std::forward<F>(func)](const TFuture<void>& future) mutable {
-            NImpl::SetValue(promise, [&]() { return func(future); });
+            NImpl::SetValue(promise, [&]() { return std::move(func)(future); });
         });
         return promise;
     }
 
     template <typename R>
-    inline TFuture<R> TFuture<void>::Return(const R& value) const {
-        auto promise = NewPromise<R>();
-        Subscribe([=](const TFuture<void>& future) mutable {
+    inline TFuture<std::remove_cvref_t<R>> TFuture<void>::Return(R&& value) const {
+        auto promise = NewPromise<std::remove_cvref_t<R>>();
+        Subscribe([promise, value = std::forward<R>(value)](const TFuture<void>& future) mutable {
             try {
                 future.TryRethrow();
             } catch (...) {
                 promise.SetException(std::current_exception());
                 return;
             }
-            promise.SetValue(value);
+            promise.SetValue(std::move(value));
         });
         return promise;
     }
@@ -824,6 +838,11 @@ namespace NThreading {
     }
 
     template <typename T>
+    inline bool TPromise<T>::IsReady() const {
+        return State && State->IsReady();
+    }
+
+    template <typename T>
     inline void TPromise<T>::SetException(const TString& e) {
         EnsureInitialized();
         State->SetException(std::make_exception_ptr(yexception() << e));
@@ -902,6 +921,10 @@ namespace NThreading {
 
     inline bool TPromise<void>::HasException() const {
         return State && State->HasException();
+    }
+
+    inline bool TPromise<void>::IsReady() const {
+        return State && State->IsReady();
     }
 
     inline void TPromise<void>::SetException(const TString& e) {

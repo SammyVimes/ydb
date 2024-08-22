@@ -1,8 +1,6 @@
 #include "execution_stack.h"
 #include "private.h"
 
-#include <yt/yt/core/misc/ref_tracked.h>
-
 #if defined(_unix_)
 #   include <sys/mman.h>
 #   include <limits.h>
@@ -16,14 +14,17 @@
 #include <yt/yt/core/misc/object_pool.h>
 
 #include <library/cpp/yt/memory/ref.h>
+#include <library/cpp/yt/memory/ref_tracked.h>
 
 #include <library/cpp/yt/misc/tls.h>
+
+#include <library/cpp/yt/system/exit.h>
 
 #include <util/system/sanitizers.h>
 
 namespace NYT::NConcurrency {
 
-static const auto& Logger = ConcurrencyLogger;
+static constexpr auto& Logger = ConcurrencyLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -89,7 +90,7 @@ TExecutionStack::TExecutionStack(size_t size)
     auto checkOom = [] {
         if (LastSystemError() == ENOMEM) {
             fprintf(stderr, "Out-of-memory condition detected while allocating execution stack; terminating\n");
-            _exit(9);
+            AbortProcess(ToUnderlying(EProcessExitCode::OutOfMemory));
         }
     };
 
@@ -131,16 +132,16 @@ TExecutionStack::~TExecutionStack()
     ::DeleteFiber(Handle_);
 }
 
-static YT_THREAD_LOCAL(void*) FiberTrampolineOpaque;
+YT_DEFINE_THREAD_LOCAL(void*, FiberTrampolineOpaque);
 
 void TExecutionStack::SetOpaque(void* opaque)
 {
-    FiberTrampolineOpaque = opaque;
+    FiberTrampolineOpaque() = opaque;
 }
 
 void* TExecutionStack::GetOpaque()
 {
-    return FiberTrampolineOpaque;
+    return FiberTrampolineOpaque();
 }
 
 void TExecutionStack::SetTrampoline(void (*trampoline)(void*))
@@ -152,7 +153,7 @@ void TExecutionStack::SetTrampoline(void (*trampoline)(void*))
 VOID CALLBACK TExecutionStack::FiberTrampoline(PVOID opaque)
 {
     auto* stack = reinterpret_cast<TExecutionStack*>(opaque);
-    stack->Trampoline_(FiberTrampolineOpaque);
+    stack->Trampoline_(FiberTrampolineOpaque());
 }
 
 #else

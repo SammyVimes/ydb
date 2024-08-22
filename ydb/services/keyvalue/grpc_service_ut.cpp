@@ -16,8 +16,8 @@
 #include <library/cpp/testing/unittest/tests_data.h>
 #include <library/cpp/logger/backend.h>
 
-#include <grpc++/client_context.h>
-#include <grpc++/create_channel.h>
+#include <grpcpp/client_context.h>
+#include <grpcpp/create_channel.h>
 
 #include <util/string/builder.h>
 
@@ -109,7 +109,7 @@ public:
         Server_->EnableGRpc(grpcOption);
 
         Tests::TClient annoyingClient(*ServerSettings);
-        if (ServerSettings->AppConfig.GetDomainsConfig().GetSecurityConfig().GetEnforceUserTokenRequirement()) {
+        if (ServerSettings->AppConfig->GetDomainsConfig().GetSecurityConfig().GetEnforceUserTokenRequirement()) {
             annoyingClient.SetSecurityToken("root@builtin");
         }
         annoyingClient.InitRootScheme("Root");

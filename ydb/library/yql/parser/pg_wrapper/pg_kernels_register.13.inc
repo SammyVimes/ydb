@@ -145,6 +145,7 @@ RegisterExec(5018, arrow_pg_mcv_list_in());
 RegisterExec(5019, arrow_pg_mcv_list_out());
 RegisterExec(5020, arrow_pg_mcv_list_recv());
 RegisterExec(5021, arrow_pg_mcv_list_send());
+RegisterExec(5028, arrow_satisfies_hash_partition());
 RegisterExec(5044, arrow_int4gcd());
 RegisterExec(5046, arrow_int4lcm());
 RegisterExec(5051, arrow_btequalimage());

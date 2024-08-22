@@ -1,5 +1,4 @@
 #include "partition_chooser_impl.h"
-#include "ydb/public/sdk/cpp/client/ydb_proto/accessor.h"
 
 #include <library/cpp/digest/md5/md5.h>
 #include <ydb/core/persqueue/partition_key_range/partition_key_range.h>
@@ -14,10 +13,7 @@ NYql::NDecimal::TUint128 Hash(const TString& sourceId) {
 }
 
 ui32 TAsIsSharder::operator()(const TString& sourceId, ui32 totalShards) const {
-    if (!sourceId) {
-        return 0;
-    }
-    return (sourceId.at(0) - 'A') % totalShards;
+    return NKikimr::NDataStreams::V1::ShardFromDecimal(AsInt<NYql::NDecimal::TUint128>(sourceId), totalShards);
 }
 
 ui32 TMd5Sharder::operator()(const TString& sourceId, ui32 totalShards) const {
@@ -34,30 +30,37 @@ TString TMd5Converter::operator()(const TString& sourceId) const {
 
 } // namespace NPartitionChooser
 
+
+std::shared_ptr<IPartitionChooser> CreatePartitionChooser(const NKikimrSchemeOp::TPersQueueGroupDescription& config, bool withoutHash) {
+    if (SplitMergeEnabled(config.GetPQTabletConfig())) {
+        if (withoutHash) {
+            return std::make_shared<NPartitionChooser::TBoundaryChooser<NPartitionChooser::TAsIsConverter>>(config);
+        } else {
+            return std::make_shared<NPartitionChooser::TBoundaryChooser<NPartitionChooser::TMd5Converter>>(config);
+        }
+    } else {
+        if (withoutHash) {
+            return std::make_shared<NPartitionChooser::THashChooser<NPartitionChooser::TAsIsSharder>>(config);
+        } else {
+            return std::make_shared<NPartitionChooser::THashChooser<NPartitionChooser::TMd5Sharder>>(config);
+        }
+    }
+}
+
 IActor* CreatePartitionChooserActor(TActorId parentId,
                                     const NKikimrSchemeOp::TPersQueueGroupDescription& config,
                                     NPersQueue::TTopicConverterPtr& fullConverter,
                                     const TString& sourceId,
                                     std::optional<ui32> preferedPartition,
                                     bool withoutHash) {
+    auto chooser = CreatePartitionChooser(config, withoutHash);
     if (SplitMergeEnabled(config.GetPQTabletConfig())) {
-        if (withoutHash) {
-            return new NPartitionChooser::TPartitionChooserActor<NPartitionChooser::TBoundaryChooser<NPartitionChooser::TAsIsConverter>>
-                (parentId, config, fullConverter, sourceId, preferedPartition);
-        } else {
-            return new NPartitionChooser::TPartitionChooserActor<NPartitionChooser::TBoundaryChooser<NPartitionChooser::TMd5Converter>>
-                (parentId, config, fullConverter, sourceId, preferedPartition);
-        }
+        return new NPartitionChooser::TSMPartitionChooserActor<NTabletPipe::TPipeHelper>(parentId, config, chooser, fullConverter, sourceId, preferedPartition);
     } else {
-        if (withoutHash) {
-            return new NPartitionChooser::TPartitionChooserActor<NPartitionChooser::THashChooser<NPartitionChooser::TAsIsSharder>>
-                (parentId, config, fullConverter, sourceId, preferedPartition);
-        } else {
-            return new NPartitionChooser::TPartitionChooserActor<NPartitionChooser::THashChooser<NPartitionChooser::TMd5Sharder>>
-                (parentId, config, fullConverter, sourceId, preferedPartition);
-        }
+        return new NPartitionChooser::TPartitionChooserActor<NTabletPipe::TPipeHelper>(parentId, config, chooser, fullConverter, sourceId, preferedPartition);
     }
 }
 
-
 } // namespace NKikimr::NPQ
+
+std::unordered_map<ui64, NActors::TActorId> NKikimr::NTabletPipe::NTest::TPipeMock::Tablets;

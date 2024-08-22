@@ -5,68 +5,103 @@
         "Plans": [
             {
                 "Node Type": "ResultSet",
-                "PlanNodeId": 4,
+                "PlanNodeId": 5,
                 "PlanNodeType": "ResultSet",
                 "Plans": [
                     {
                         "Node Type": "Limit",
                         "Operators": [
                             {
+                                "Inputs": [
+                                    {
+                                        "ExternalPlanNodeId": 3
+                                    }
+                                ],
                                 "Limit": "1001",
                                 "Name": "Limit"
                             }
                         ],
-                        "PlanNodeId": 3,
+                        "PlanNodeId": 4,
                         "Plans": [
                             {
                                 "Node Type": "UnionAll",
-                                "PlanNodeId": 2,
+                                "PlanNodeId": 3,
                                 "PlanNodeType": "Connection",
                                 "Plans": [
                                     {
-                                        "Node Type": "Limit-InnerJoin (MapJoin)-Filter-TableFullScan",
+                                        "Node Type": "Limit-InnerJoin (MapJoin)-Filter",
                                         "Operators": [
                                             {
+                                                "Inputs": [
+                                                    {
+                                                        "InternalOperatorId": 1
+                                                    }
+                                                ],
                                                 "Limit": "1001",
                                                 "Name": "Limit"
                                             },
                                             {
+                                                "Condition": "onek.unique1,onek.stringu1 = v.i,v.j",
+                                                "Inputs": [
+                                                    {
+                                                        "InternalOperatorId": 2
+                                                    },
+                                                    {
+                                                        "Other": "ConstantExpression"
+                                                    }
+                                                ],
                                                 "Name": "InnerJoin (MapJoin)"
                                             },
                                             {
+                                                "Inputs": [
+                                                    {
+                                                        "ExternalPlanNodeId": 1
+                                                    }
+                                                ],
                                                 "Name": "Filter",
                                                 "Predicate": "Exist(item.stringu1) And Exist(item.unique1)"
-                                            },
-                                            {
-                                                "Name": "TableFullScan",
-                                                "ReadColumns": [
-                                                    "even",
-                                                    "fivethous",
-                                                    "four",
-                                                    "hundred",
-                                                    "odd",
-                                                    "string4",
-                                                    "stringu1",
-                                                    "stringu2",
-                                                    "ten",
-                                                    "tenthous",
-                                                    "thousand",
-                                                    "twenty",
-                                                    "two",
-                                                    "twothousand",
-                                                    "unique1",
-                                                    "unique2"
-                                                ],
-                                                "ReadRanges": [
-                                                    "unique1 (-\u221e, +\u221e)",
-                                                    "unique2 (-\u221e, +\u221e)"
-                                                ],
-                                                "Table": "postgres_select.test_plan/onek"
                                             }
                                         ],
-                                        "PlanNodeId": 1,
-                                        "Tables": [
-                                            "postgres_select.test_plan/onek"
+                                        "PlanNodeId": 2,
+                                        "Plans": [
+                                            {
+                                                "Node Type": "TableFullScan",
+                                                "Operators": [
+                                                    {
+                                                        "Inputs": [],
+                                                        "Name": "TableFullScan",
+                                                        "ReadColumns": [
+                                                            "even",
+                                                            "fivethous",
+                                                            "four",
+                                                            "hundred",
+                                                            "odd",
+                                                            "string4",
+                                                            "stringu1",
+                                                            "stringu2",
+                                                            "ten",
+                                                            "tenthous",
+                                                            "thousand",
+                                                            "twenty",
+                                                            "two",
+                                                            "twothousand",
+                                                            "unique1",
+                                                            "unique2"
+                                                        ],
+                                                        "ReadRanges": [
+                                                            "unique1 (-\u221e, +\u221e)",
+                                                            "unique2 (-\u221e, +\u221e)"
+                                                        ],
+                                                        "ReadRangesPointPrefixLen": "0",
+                                                        "Scan": "Parallel",
+                                                        "Table": "postgres_select.test_plan/onek"
+                                                    }
+                                                ],
+                                                "PlanNodeId": 1,
+                                                "Tables": [
+                                                    "postgres_select.test_plan/onek"
+                                                ]
+                                            }
                                         ]
                                     }
                                 ]
@@ -75,7 +110,10 @@
                     }
                 ]
             }
-        ]
+        ],
+        "Stats": {
+            "ResourcePoolId": "default"
+        }
     },
     "meta": {
         "type": "query",

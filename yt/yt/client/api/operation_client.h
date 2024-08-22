@@ -219,6 +219,10 @@ struct TAbortJobOptions
     std::optional<TDuration> InterruptTimeout;
 };
 
+struct TDumpJobProxyLogOptions
+    : public TTimeoutOptions
+{ };
+
 struct TGetOperationOptions
     : public TTimeoutOptions
     , public TMasterReadOptions
@@ -267,6 +271,7 @@ struct TOperation
     NYson::TYsonString Result;
 
     NYson::TYsonString SlotIndexPerPoolTree;
+    NYson::TYsonString SchedulingAttributesPerPoolTree;
     NYson::TYsonString Alerts;
     NYson::TYsonString AlertEvents;
 
@@ -292,8 +297,8 @@ struct TListOperationsResult
     std::optional<THashMap<TString, i64>> PoolTreeCounts;
     std::optional<THashMap<TString, i64>> PoolCounts;
     std::optional<THashMap<TString, i64>> UserCounts;
-    std::optional<TEnumIndexedVector<NScheduler::EOperationState, i64>> StateCounts;
-    std::optional<TEnumIndexedVector<NScheduler::EOperationType, i64>> TypeCounts;
+    std::optional<TEnumIndexedArray<NScheduler::EOperationState, i64>> StateCounts;
+    std::optional<TEnumIndexedArray<NScheduler::EOperationType, i64>> TypeCounts;
     std::optional<i64> FailedJobsCount;
     bool Incomplete = false;
 };
@@ -317,6 +322,7 @@ struct TJob
     NJobTrackerClient::TJobId JobCompetitionId;
     NJobTrackerClient::TJobId ProbingJobCompetitionId;
     NYson::TYsonString Error;
+    NYson::TYsonString InterruptionInfo;
     NYson::TYsonString BriefStatistics;
     NYson::TYsonString Statistics;
     NYson::TYsonString InputPaths;
@@ -328,6 +334,7 @@ struct TJob
     std::optional<TString> Pool;
     std::optional<TString> MonitoringDescriptor;
     std::optional<ui64> JobCookie;
+    NYson::TYsonString ArchiveFeatures;
 
     std::optional<bool> IsStale;
 
@@ -338,8 +345,8 @@ void Serialize(const TJob& job, NYson::IYsonConsumer* consumer, TStringBuf idKey
 
 struct TListJobsStatistics
 {
-    TEnumIndexedVector<NJobTrackerClient::EJobState, i64> StateCounts;
-    TEnumIndexedVector<NJobTrackerClient::EJobType, i64> TypeCounts;
+    TEnumIndexedArray<NJobTrackerClient::EJobState, i64> StateCounts;
+    TEnumIndexedArray<NJobTrackerClient::EJobType, i64> TypeCounts;
 };
 
 struct TListJobsResult
@@ -358,6 +365,8 @@ struct TListJobsResult
 
 struct IOperationClient
 {
+    virtual ~IOperationClient() = default;
+
     virtual TFuture<NScheduler::TOperationId> StartOperation(
         NScheduler::EOperationType type,
         const NYson::TYsonString& spec,
@@ -440,6 +449,12 @@ struct IOperationClient
     virtual TFuture<void> AbortJob(
         NJobTrackerClient::TJobId jobId,
         const TAbortJobOptions& options = {}) = 0;
+
+    virtual TFuture<void> DumpJobProxyLog(
+        NJobTrackerClient::TJobId jobId,
+        NJobTrackerClient::TOperationId operationId,
+        const NYPath::TYPath& path,
+        const TDumpJobProxyLogOptions& options = {}) = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

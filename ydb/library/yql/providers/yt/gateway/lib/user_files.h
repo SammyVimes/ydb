@@ -23,9 +23,12 @@ public:
     struct TFileInfo {
         TFileLinkPtr Path; // Real path in storage
         bool IsUdf = false;
+        bool IsPgExt = false;
+        bool IsPgCatalog = false;
         ui64 InMemorySize = 0;
         TString RemotePath;
         double RemoteMemoryFactor = 0.;
+        bool BypassArtifactCache = false;
     };
 
 public:

@@ -62,6 +62,20 @@ void TStartQueryCommand::Register(TRegistrar registrar)
             return command->Options.Annotations;
         })
         .Optional(/*init*/ false);
+
+    registrar.ParameterWithUniversalAccessor<std::optional<TString>>(
+        "access_control_object",
+        [] (TThis* command) -> auto& {
+            return command->Options.AccessControlObject;
+        })
+        .Optional(/*init*/ false);
+
+    registrar.ParameterWithUniversalAccessor<std::optional<std::vector<TString>>>(
+        "access_control_objects",
+        [] (TThis* command) -> auto& {
+            return command->Options.AccessControlObjects;
+        })
+        .Optional(/*init*/ false);
 }
 
 void TStartQueryCommand::DoExecute(ICommandContextPtr context)
@@ -175,7 +189,7 @@ void TReadQueryResultCommand::DoExecute(ICommandContextPtr context)
         New<TControlAttributesConfig>(),
         /*keyColumnCount*/ 0);
 
-    writer->Write(rowset->GetRows());
+    Y_UNUSED(writer->Write(rowset->GetRows()));
     WaitFor(writer->Close())
         .ThrowOnError();
 }
@@ -316,6 +330,27 @@ void TAlterQueryCommand::Register(TRegistrar registrar)
             return command->Options.Annotations;
         })
         .Optional(/*init*/ false);
+
+    registrar.ParameterWithUniversalAccessor<std::optional<TString>>(
+        "access_control_object",
+        [] (TThis* command) -> auto& {
+            return command->Options.AccessControlObject;
+        })
+        .Optional(/*init*/ false);
+
+    registrar.ParameterWithUniversalAccessor<std::optional<std::vector<TString>>>(
+        "access_control_objects",
+        [] (TThis* command) -> auto& {
+            return command->Options.AccessControlObjects;
+        })
+        .Optional(/*init*/ false);
+
+    registrar.ParameterWithUniversalAccessor<TString>(
+        "stage",
+        [] (TThis* command) -> auto& {
+            return command->Options.QueryTrackerStage;
+        })
+        .Default("production");
 }
 
 void TAlterQueryCommand::DoExecute(ICommandContextPtr context)
@@ -323,6 +358,38 @@ void TAlterQueryCommand::DoExecute(ICommandContextPtr context)
     WaitFor(context->GetClient()->AlterQuery(QueryId, Options))
         .ThrowOnError();
     ProduceEmptyOutput(context);
+}
+
+//////////////////////////////////////////////////////////////////////////////
+
+void TGetQueryTrackerInfoCommand::Register(TRegistrar registrar)
+{
+    registrar.ParameterWithUniversalAccessor<TString>(
+        "stage",
+        [] (TThis* command) -> auto& {
+            return command->Options.QueryTrackerStage;
+        })
+        .Default("production");
+
+    registrar.ParameterWithUniversalAccessor<TAttributeFilter>(
+        "attributes",
+        [] (TThis* command) -> auto& {
+            return command->Options.Attributes;
+        })
+        .Optional(/*init*/ false);
+}
+
+void TGetQueryTrackerInfoCommand::DoExecute(ICommandContextPtr context)
+{
+    auto result = WaitFor(context->GetClient()->GetQueryTrackerInfo(Options))
+        .ValueOrThrow();
+
+    context->ProduceOutputValue(BuildYsonStringFluently()
+        .BeginMap()
+            .Item("cluster_name").Value(result.ClusterName)
+            .Item("supported_features").Value(result.SupportedFeatures)
+            .Item("access_control_objects").Value(result.AccessControlObjects)
+        .EndMap());
 }
 
 //////////////////////////////////////////////////////////////////////////////

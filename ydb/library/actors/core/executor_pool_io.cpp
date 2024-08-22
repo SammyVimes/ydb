@@ -1,24 +1,28 @@
 #include "executor_pool_io.h"
 #include "actor.h"
+#include "config.h"
 #include "mailbox.h"
 #include <ydb/library/actors/util/affinity.h>
 #include <ydb/library/actors/util/datetime.h>
 
 namespace NActors {
-    TIOExecutorPool::TIOExecutorPool(ui32 poolId, ui32 threads, const TString& poolName, TAffinity* affinity)
-        : TExecutorPoolBase(poolId, threads, affinity)
-        , Threads(new TThreadCtx[threads])
+    TIOExecutorPool::TIOExecutorPool(ui32 poolId, ui32 threads, const TString& poolName, TAffinity* affinity, bool useRingQueue)
+        : TExecutorPoolBase(poolId, threads, affinity, useRingQueue)
+        , Threads(new TExecutorThreadCtx[threads])
         , PoolName(poolName)
     {}
 
-    TIOExecutorPool::TIOExecutorPool(const TIOExecutorPoolConfig& cfg)
+    TIOExecutorPool::TIOExecutorPool(const TIOExecutorPoolConfig& cfg, IHarmonizer *harmonizer)
         : TIOExecutorPool(
             cfg.PoolId,
             cfg.Threads,
             cfg.PoolName,
-            new TAffinity(cfg.Affinity)
+            new TAffinity(cfg.Affinity),
+            cfg.UseRingQueue
         )
-    {}
+    {
+        Harmonizer = harmonizer;
+    }
 
     TIOExecutorPool::~TIOExecutorPool() {
         Threads.Destroy();
@@ -30,31 +34,27 @@ namespace NActors {
         i16 workerId = wctx.WorkerId;
         Y_DEBUG_ABORT_UNLESS(workerId < PoolThreads);
 
-        NHPTimer::STime elapsed = 0;
-        NHPTimer::STime parked = 0;
-        NHPTimer::STime hpstart = GetCycleCountFast();
-        NHPTimer::STime hpnow;
-
         const TAtomic x = AtomicDecrement(Semaphore);
         if (x < 0) {
-            TThreadCtx& threadCtx = Threads[workerId];
+            TExecutorThreadCtx& threadCtx = Threads[workerId];
             ThreadQueue.Push(workerId + 1, revolvingCounter);
-            hpnow = GetCycleCountFast();
-            elapsed += hpnow - hpstart;
-            if (threadCtx.Pad.Park())
+
+            NHPTimer::STime hpnow = GetCycleCountFast();
+            NHPTimer::STime hpprev = TlsThreadContext->UpdateStartOfProcessingEventTS(hpnow);
+            TlsThreadContext->ElapsingActorActivity.store(Max<ui64>(), std::memory_order_release);
+            wctx.AddElapsedCycles(ActorSystemIndex, hpnow - hpprev);
+
+            if (threadCtx.WaitingPad.Park())
                 return 0;
-            hpstart = GetCycleCountFast();
-            parked += hpstart - hpnow;
+
+            hpnow = GetCycleCountFast();
+            hpprev = TlsThreadContext->UpdateStartOfProcessingEventTS(hpnow);
+            TlsThreadContext->ElapsingActorActivity.store(ActorSystemIndex, std::memory_order_release);
+            wctx.AddParkedCycles(hpnow - hpprev);
         }
 
-        while (!RelaxedLoad(&StopFlag)) {
-            if (const ui32 activation = Activations.Pop(++revolvingCounter)) {
-                hpnow = GetCycleCountFast();
-                elapsed += hpnow - hpstart;
-                wctx.AddElapsedCycles(ActorSystemIndex, elapsed);
-                if (parked > 0) {
-                    wctx.AddParkedCycles(parked);
-                }
+        while (!StopFlag.load(std::memory_order_acquire)) {
+            if (const ui32 activation = std::visit([&revolvingCounter](auto &x){return x.Pop(++revolvingCounter);}, Activations)) {
                 return activation;
             }
             SpinLockPause();
@@ -87,13 +87,15 @@ namespace NActors {
     }
 
     void TIOExecutorPool::ScheduleActivationEx(ui32 activation, ui64 revolvingWriteCounter) {
-        Activations.Push(activation, revolvingWriteCounter);
+        std::visit([activation, revolvingWriteCounter](auto &x) {
+            x.Push(activation, revolvingWriteCounter);
+        }, Activations);
         const TAtomic x = AtomicIncrement(Semaphore);
         if (x <= 0) {
             for (;; ++revolvingWriteCounter) {
                 if (const ui32 x = ThreadQueue.Pop(revolvingWriteCounter)) {
                     const ui32 threadIdx = x - 1;
-                    Threads[threadIdx].Pad.Unpark();
+                    Threads[threadIdx].WaitingPad.Unpark();
                     return;
                 }
                 SpinLockPause();
@@ -109,7 +111,7 @@ namespace NActors {
         ScheduleQueue.Reset(new NSchedulerQueue::TQueueType());
 
         for (i16 i = 0; i != PoolThreads; ++i) {
-            Threads[i].Thread.Reset(new TExecutorThread(i, 0, actorSystem, this, MailboxTable.Get(), PoolName));
+            Threads[i].Thread.reset(new TExecutorThread(i, 0, actorSystem, this, MailboxTable.Get(), PoolName));
         }
 
         *scheduleReaders = &ScheduleQueue->Reader;
@@ -124,10 +126,10 @@ namespace NActors {
     }
 
     void TIOExecutorPool::PrepareStop() {
-        AtomicStore(&StopFlag, true);
+        StopFlag.store(true, std::memory_order_release);
         for (i16 i = 0; i != PoolThreads; ++i) {
             Threads[i].Thread->StopFlag = true;
-            Threads[i].Pad.Interrupt();
+            Threads[i].WaitingPad.Interrupt();
         }
     }
 
@@ -149,6 +151,17 @@ namespace NActors {
         for (i16 i = 0; i < PoolThreads; ++i) {
             Threads[i].Thread->GetCurrentStats(statsCopy[i + 1]);
         }
+    }
+
+    void TIOExecutorPool::GetExecutorPoolState(TExecutorPoolState &poolState) const {
+        if (Harmonizer) {
+            TPoolHarmonizerStats stats = Harmonizer->GetPoolStats(PoolId);
+            poolState.UsedCpu = stats.AvgConsumedCpu;
+        }
+        poolState.CurrentLimit = PoolThreads;
+        poolState.MaxLimit = PoolThreads;
+        poolState.MinLimit = PoolThreads;
+        poolState.PossibleMaxLimit = PoolThreads;
     }
 
     TString TIOExecutorPool::GetName() const {

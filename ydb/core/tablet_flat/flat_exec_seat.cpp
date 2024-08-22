@@ -4,19 +4,21 @@ namespace NKikimr {
 namespace NTabletFlatExecutor {
 
     void TSeat::Complete(const TActorContext& ctx, bool isRW) noexcept {
+        NWilson::TSpan span(TWilsonTablet::TabletDetailed, Self->TxSpan.GetTraceId(), "Tablet.Transaction.Complete");
         for (auto& callback : OnPersistent) {
             callback();
         }
         Self->Complete(ctx);
+        span.End();
 
-        TxSpan.Attribute("rw", isRW);
-        TxSpan.EndOk();
+        Self->TxSpan.Attribute("rw", isRW);
+        Self->TxSpan.EndOk();
     }
 
     void TSeat::Terminate(ETerminationReason reason, const TActorContext& ctx) noexcept {
         Self->Terminate(reason, ctx);
 
-        TxSpan.EndError("Terminated");
+        Self->TxSpan.EndError("Terminated");
     }
 
 } // namespace NTabletFlatExecutor

@@ -15,6 +15,7 @@ struct TTaskInfo {
     TString RequestId;
     TString Owner;
     TSet<TString> Permissions;
+    bool HasSingleCompositeActionGroup = false;
 
     TString ToString() const {
         return TStringBuilder() << "{"
@@ -22,6 +23,7 @@ struct TTaskInfo {
             << " RequestId: " << RequestId
             << " Owner: " << Owner
             << " Permissions: [" << JoinSeq(", ", Permissions) << "]"
+            << " HasSingleCompositeActionGroup: " << HasSingleCompositeActionGroup
             << " }";
     }
 };
@@ -31,6 +33,7 @@ struct TCmsState : public TAtomicRefCount<TCmsState> {
     THashMap<TString, TPermissionInfo> Permissions;
     THashMap<TString, TRequestInfo> ScheduledRequests;
     THashMap<TString, TNotificationInfo> Notifications;
+    THashMap<TString, THashSet<NKikimrCms::EMarker>> HostMarkers;
     TDowntimes Downtimes;
     ui64 NextPermissionId = 0;
     ui64 NextRequestId = 0;
@@ -62,6 +65,9 @@ struct TCmsState : public TAtomicRefCount<TCmsState> {
     TActorId CmsActorId;
     TActorId BSControllerPipe;
     TActorId Sentinel;
+
+    bool EnableCMSRequestPriorities = false;
+    bool EnableSingleCompositeActionGroup = false;
 };
 
 using TCmsStatePtr = TIntrusivePtr<TCmsState>;

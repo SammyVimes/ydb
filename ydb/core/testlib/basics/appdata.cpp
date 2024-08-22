@@ -3,6 +3,9 @@
 #include <ydb/library/yql/minikql/invoke_builtins/mkql_builtins.h>
 #include <ydb/library/yql/minikql/mkql_function_registry.h>
 
+#include <ydb/core/protos/netclassifier.pb.h>
+#include <ydb/core/protos/stream.pb.h>
+
 namespace NKikimr {
 
     TAppPrepare::TMine::~TMine()
@@ -57,6 +60,8 @@ namespace NKikimr {
         app->SchemeShardConfig = SchemeShardConfig;
         app->MeteringConfig = MeteringConfig;
         app->AwsCompatibilityConfig = AwsCompatibilityConfig;
+        app->S3ProxyResolverConfig = S3ProxyResolverConfig;
+        app->GraphConfig = GraphConfig;
         app->FeatureFlags = FeatureFlags;
 
         // This is a special setting active in test runtime only
@@ -69,7 +74,7 @@ namespace NKikimr {
                         NKikimrProto::TKeyConfig();
         };
 
-        return { app, Mine.Release(), keyGenerator};
+        return { app, Mine.Release(), keyGenerator, std::move(Icb) };
     }
 
     void TAppPrepare::AddDomain(TDomainsInfo::TDomain* domain)
@@ -77,9 +82,9 @@ namespace NKikimr {
         Domains->AddDomain(domain);
     }
 
-    void TAppPrepare::AddHive(ui32 hiveUid, ui64 hive)
+    void TAppPrepare::AddHive(ui64 hive)
     {
-        Domains->AddHive(hiveUid, hive);
+        Domains->AddHive(hive);
     }
 
     void TAppPrepare::ClearDomainsAndHive()
@@ -197,5 +202,12 @@ namespace NKikimr {
     void TAppPrepare::SetAwsRegion(const TString& value)
     {
         AwsCompatibilityConfig.SetAwsRegion(value);
+    }
+
+    void TAppPrepare::InitIcb(ui32 numNodes)
+    {
+        for (ui32 i = 0; i < numNodes; ++i) {
+            Icb.emplace_back(new TControlBoard);
+        }
     }
 }

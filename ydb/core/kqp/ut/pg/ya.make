@@ -6,6 +6,7 @@ SIZE(MEDIUM)
 
 SRCS(
     kqp_pg_ut.cpp
+    pg_catalog_ut.cpp
 )
 
 PEERDIR(
@@ -32,6 +33,8 @@ NO_COMPILER_WARNINGS()
 
 YQL_LAST_ABI_VERSION()
 
-REQUIREMENTS(ram:32)
+IF (SANITIZER_TYPE)
+    REQUIREMENTS(ram:32)
+ENDIF()
 
 END()

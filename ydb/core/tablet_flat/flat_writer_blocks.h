@@ -5,6 +5,7 @@
 #include "flat_sausage_writer.h"
 #include "flat_sausage_solid.h"
 #include "flat_part_loader.h"
+#include "flat_writer_banks.h"
 
 namespace NKikimr {
 namespace NTabletFlatExecutor {
@@ -61,10 +62,11 @@ namespace NWriter {
             for (auto &glob : Writer.Grab())
                 Cone->Put(std::move(glob));
 
-            // Note: we mark flat index pages sticky after we load them
-            if (NTable::TLoader::NeedIn(type) || StickyFlatIndex && type == EPage::Index) {
+            if (NTable::TLoader::NeedIn(type) || StickyFlatIndex && type == EPage::FlatIndex) {
+                // Note: we mark flat index pages sticky after we load them
                 Sticky.emplace_back(pageId, std::move(raw));
-            } else if (bool(Cache) && (type == EPage::DataPage || type == EPage::BTreeIndex)) {
+            } else if (bool(Cache) && type == EPage::DataPage || type == EPage::BTreeIndex) {
+                // Note: we save b-tree index pages to shared cache regardless of a cache mode  
                 Regular.emplace_back(pageId, std::move(raw));
             }
 

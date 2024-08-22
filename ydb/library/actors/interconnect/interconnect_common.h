@@ -43,6 +43,7 @@ namespace NActors {
         TString PrivateKey; // private key for the certificate in PEM format
         TString CaFilePath; // path to certificate authority file
         TString CipherList; // encryption algorithms
+        THashSet<TString> ForbiddenSignatureAlgorithms;
         TDuration MessagePendingTimeout = TDuration::Seconds(1); // timeout for which messages are queued while in PendingConnection state
         ui64 MessagePendingSize = Max<ui64>(); // size of the queue
         ui32 MaxSerializedEventSize = NActors::EventMaxByteSize;
@@ -51,6 +52,10 @@ namespace NActors {
         bool EnableExternalDataChannel = false;
         bool ValidateIncomingPeerViaDirectLookup = false;
         ui32 SocketBacklogSize = 0; // SOMAXCONN if zero
+        TDuration FirstErrorSleep = TDuration::MilliSeconds(10);
+        TDuration MaxErrorSleep = TDuration::Seconds(1);
+        double ErrorSleepRetryMultiplier = 4.0;
+        TDuration EventDelay = TDuration::Zero();
 
         ui32 GetSendBufferSize() const {
             ui32 res = 512 * 1024; // 512 kb is the default value for send buffer
@@ -71,8 +76,10 @@ namespace NActors {
         bool Orange;
         bool Red;
         i64 ClockSkew;
+        bool ReportClockSkew;
 
-        TWhiteboardSessionStatus(TActorSystem* actorSystem, ui32 peerId, const TString& peer, bool connected, bool green, bool yellow, bool orange, bool red, i64 clockSkew)
+        TWhiteboardSessionStatus(TActorSystem* actorSystem, ui32 peerId, const TString& peer, bool connected,
+                                        bool green, bool yellow, bool orange, bool red, i64 clockSkew, bool reportClockSkew)
             : ActorSystem(actorSystem)
             , PeerId(peerId)
             , Peer(peer)
@@ -82,6 +89,7 @@ namespace NActors {
             , Orange(orange)
             , Red(red)
             , ClockSkew(clockSkew)
+            , ReportClockSkew(reportClockSkew)
             {}
     };
 

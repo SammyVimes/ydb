@@ -4,8 +4,9 @@
 #include <ydb/library/yql/minikql/mkql_node.h>
 #include <ydb/library/yql/minikql/computation/mkql_computation_node_holders.h>
 #include <ydb/core/scheme/scheme_tabledefs.h>
-#include <ydb/core/tx/datashard/sys_tables.h>
+#include <ydb/core/tx/locks/sys_tables.h>
 #include <ydb/core/tx/datashard/datashard.h>
+#include <ydb/library/yql/dq/proto/dq_tasks.pb.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -53,6 +54,8 @@ public:
     virtual std::vector<NScheme::TTypeInfo> GetKeyColumnTypes() const;
 
     virtual void AddInputRow(NUdf::TUnboxedValue inputRow) = 0;
+    virtual std::vector<THolder<TEvDataShard::TEvRead>> RebuildRequest(const ui64& prevReadId, ui32 firstUnprocessedQuery, 
+        TMaybe<TOwnedCellVec> lastProcessedKey, ui64& newReadId) = 0;
     virtual TReadList BuildRequests(const TPartitionInfo& partitioning, ui64& readId) = 0;
     virtual void AddResult(TShardReadResult result) = 0;
     virtual TReadResultStats ReplyResult(NKikimr::NMiniKQL::TUnboxedValueBatch& batch, i64 freeSpace) = 0;
@@ -68,6 +71,7 @@ protected:
     std::unordered_map<TString, TSysTables::TTableColumnInfo> KeyColumns;
     std::vector<TSysTables::TTableColumnInfo*> LookupKeyColumns;
     std::vector<TSysTables::TTableColumnInfo> Columns;
+    const NKqpProto::EStreamLookupStrategy Strategy;
 };
 
 std::unique_ptr<TKqpStreamLookupWorker> CreateStreamLookupWorker(NKikimrKqp::TKqpStreamLookupSettings&& settings,

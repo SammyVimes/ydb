@@ -27,8 +27,6 @@ SRCS(
     ask.cpp
     ask.h
     av_bootstrapped.cpp
-    balancer.h
-    balancer.cpp
     buffer.cpp
     buffer.h
     callstack.cpp
@@ -44,6 +42,7 @@ SRCS(
     event_local.h
     event_pb.cpp
     event_pb.h
+    events.cpp
     events.h
     events_undelivered.cpp
     executelater.h
@@ -53,8 +52,8 @@ SRCS(
     executor_pool_basic.h
     executor_pool_io.cpp
     executor_pool_io.h
-    executor_pool_united.cpp
-    executor_pool_united.h
+    executor_pool_shared.cpp
+    executor_pool_shared.h
     executor_thread.cpp
     executor_thread.h
     harmonizer.cpp
@@ -77,7 +76,9 @@ SRCS(
     mailbox.h
     mailbox_queue_revolving.h
     mailbox_queue_simple.h
+    mon.cpp
     mon.h
+    mon_stats.cpp
     mon_stats.h
     monotonic.cpp
     monotonic.h
@@ -109,6 +110,7 @@ PEERDIR(
     ydb/library/actors/prof
     ydb/library/actors/protos
     ydb/library/actors/util
+    ydb/library/services
     library/cpp/execprofile
     library/cpp/json/writer
     library/cpp/logger

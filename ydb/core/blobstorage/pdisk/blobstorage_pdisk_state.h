@@ -27,6 +27,7 @@ enum EOwner {
     OwnerUnallocated = 1, // Unallocated chunks, Trim scheduling, Slay commands
     OwnerBeginUser = 2,
     OwnerEndUser = 241,
+    OwnerMetadata = 250, // Metadata chunks, the real owner
     OwnerSystemLog = 251, // Not used to actually mark chunks, just for space tracking
     OwnerSystemReserve = 252, // Not used to actually mark chunks, just for space tracking, means "for static" in requests
     OwnerCommonStaticLog = 253, // Not used to actually mark chunks, just for space tracking
@@ -60,7 +61,7 @@ struct TOwnerData {
     struct TLogEndPosition {
         ui32 ChunkIdx;
         ui32 SectorIdx;
-        
+
         explicit TLogEndPosition(ui32 chunkIdx, ui32 sectorIdx) : ChunkIdx(chunkIdx), SectorIdx(sectorIdx) {}
     };
     TMap<TLogSignature, NPDisk::TLogRecord> StartingPoints;
@@ -196,6 +197,7 @@ struct TOwnerData {
         CurrentFirstLsnToKeep = 0;
         LastWrittenCommitLsn = 0;
         CutLogId = TActorId();
+        LogEndPosition = TLogEndPosition(0, 0);
         WhiteboardProxyId = TActorId();
         LogRecordsInitiallyRead = 0;
         LogRecordsConsequentlyRead = 0;

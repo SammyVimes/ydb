@@ -34,14 +34,16 @@ been assigned, through the `key_binding` decorator.::
     # Later, add it to the key bindings.
     kb.add(Keys.A, my_key_binding)
 """
+
 from __future__ import annotations
 
 from abc import ABCMeta, abstractmethod, abstractproperty
 from inspect import isawaitable
 from typing import (
     TYPE_CHECKING,
-    Awaitable,
+    Any,
     Callable,
+    Coroutine,
     Hashable,
     Sequence,
     Tuple,
@@ -89,7 +91,8 @@ __all__ = [
 # This is mainly used in case of mouse move events, to prevent excessive
 # repainting during mouse move events.
 KeyHandlerCallable = Callable[
-    ["KeyPressEvent"], Union["NotImplementedOrNone", Awaitable["NotImplementedOrNone"]]
+    ["KeyPressEvent"],
+    Union["NotImplementedOrNone", Coroutine[Any, Any, "NotImplementedOrNone"]],
 ]
 
 
@@ -125,7 +128,7 @@ class Binding:
 
         # If the handler is a coroutine, create an asyncio task.
         if isawaitable(result):
-            awaitable = cast(Awaitable["NotImplementedOrNone"], result)
+            awaitable = cast(Coroutine[Any, Any, "NotImplementedOrNone"], result)
 
             async def bg_task() -> None:
                 result = await awaitable
@@ -138,10 +141,8 @@ class Binding:
             event.app.invalidate()
 
     def __repr__(self) -> str:
-        return "{}(keys={!r}, handler={!r})".format(
-            self.__class__.__name__,
-            self.keys,
-            self.handler,
+        return (
+            f"{self.__class__.__name__}(keys={self.keys!r}, handler={self.handler!r})"
         )
 
 
@@ -224,9 +225,9 @@ class KeyBindings(KeyBindingsBase):
 
     def __init__(self) -> None:
         self._bindings: list[Binding] = []
-        self._get_bindings_for_keys_cache: SimpleCache[
-            KeysTuple, list[Binding]
-        ] = SimpleCache(maxsize=10000)
+        self._get_bindings_for_keys_cache: SimpleCache[KeysTuple, list[Binding]] = (
+            SimpleCache(maxsize=10000)
+        )
         self._get_bindings_starting_with_keys_cache: SimpleCache[
             KeysTuple, list[Binding]
         ] = SimpleCache(maxsize=1000)

@@ -16,6 +16,8 @@
 
 #include <yt/yt/library/profiling/sensor.h>
 
+#include <library/cpp/yt/containers/intrusive_linked_list.h>
+
 #include <library/cpp/yt/memory/public.h>
 
 #include <library/cpp/yt/misc/tls.h>
@@ -28,19 +30,20 @@ namespace NYT::NConcurrency {
 
 using namespace NProfiling;
 
-inline const NLogging::TLogger Logger("FairShareThreadPool");
+YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "FairShareThreadPool");
 
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace {
 
+DECLARE_REFCOUNTED_CLASS(TBucketMapping)
 DECLARE_REFCOUNTED_CLASS(TTwoLevelFairShareQueue)
 DECLARE_REFCOUNTED_CLASS(TBucket)
 
 struct TExecutionPool;
 
 // High 16 bits is thread index and 48 bits for thread pool ptr.
-YT_THREAD_LOCAL(TPackedPtr) ThreadCookie = 0;
+YT_DEFINE_THREAD_LOCAL(TPackedPtr, ThreadCookie, 0);
 
 static constexpr auto LogDurationThreshold = TDuration::Seconds(1);
 
@@ -243,7 +246,7 @@ bool operator < (const TEnqueuedTime& lhs, const TEnqueuedTime& rhs)
 ////////////////////////////////////////////////////////////////////////////////
 
 // Data for scheduling on the first level.
-struct TExecutionPool
+struct TExecutionPool final
     : public THeapItemBase<TExecutionPool>
 {
     const TString PoolName;
@@ -256,8 +259,6 @@ struct TExecutionPool
     const TEventTimer ExecTimeCounter;
     const TEventTimer TotalTimeCounter;
     const NProfiling::TTimeCounter CumulativeTimeCounter;
-    // Execution pool is retained for some after last usage to flush profiling counters.
-    std::atomic<TCpuInstant> LastUsageTime = 0;
 
     // Action count is used to decide whether to reset excess time or not.
     size_t ActionCountInQueue = 0;
@@ -265,10 +266,13 @@ struct TExecutionPool
     TCpuDuration NextUpdateWeightInstant = 0;
     double InverseWeight = 1.0;
     TCpuDuration ExcessTime = 0;
-    int BucketRefs = 0;
 
     TPriorityQueue<TBucket> ActiveBucketsHeap;
     TCpuDuration LastBucketExcessTime = 0;
+
+    TIntrusiveLinkedListNode<TExecutionPool> LinkedListNode;
+    // Execution pool is retained for some after last usage to flush profiling counters.
+    TCpuInstant LastUsageTime = 0;
 
     TExecutionPool(TString poolName, const TProfiler& profiler)
         : PoolName(std::move(poolName))
@@ -287,6 +291,8 @@ bool operator < (const TExecutionPool& lhs, const TExecutionPool& rhs)
     return lhs.ExcessTime < rhs.ExcessTime;
 }
 
+using TExecutionPoolPtr = ::NYT::TIntrusivePtr<TExecutionPool>;
+
 ////////////////////////////////////////////////////////////////////////////////
 
 // Data for scheduling on the second level.
@@ -296,7 +302,7 @@ struct TBucketBase
     const TString PoolName;
 
     TRingQueue<TAction> ActionQueue;
-    TExecutionPool* Pool = nullptr;
+    TExecutionPoolPtr Pool = nullptr;
 
     TCpuDuration ExcessTime = 0;
 
@@ -321,7 +327,7 @@ class TBucket
     , public TBucketBase
 {
 public:
-    TBucket(TString bucketName, TString poolName, TTwoLevelFairShareQueuePtr parent)
+    TBucket(TString bucketName, TString poolName, TBucketMappingPtr parent)
         : TBucketBase(std::move(bucketName), std::move(poolName))
         , Parent_(std::move(parent))
     { }
@@ -363,10 +369,213 @@ public:
     { }
 
 private:
-    const TTwoLevelFairShareQueuePtr Parent_;
+    const TBucketMappingPtr Parent_;
 };
 
 DEFINE_REFCOUNTED_TYPE(TBucket)
+
+////////////////////////////////////////////////////////////////////////////////
+
+class TBucketMapping
+    : public TRefCounted
+{
+public:
+    struct TExecutionPoolToListNode
+    {
+        auto operator() (TExecutionPool* pool) const
+        {
+            return &pool->LinkedListNode;
+        }
+    };
+
+    using TPoolQueue = TIntrusiveLinkedList<TExecutionPool, TExecutionPoolToListNode>;
+
+    explicit TBucketMapping(TDuration poolRetentionTime)
+        : PoolRetentionTime_(poolRetentionTime)
+    { }
+
+    ~TBucketMapping()
+    {
+        auto guard = Guard(MappingLock_);
+
+        while (RetainPoolQueue_.GetSize() > 0) {
+            auto* frontPool = RetainPoolQueue_.GetFront();
+
+            auto poolIt = PoolMapping_.find(frontPool->PoolName);
+            YT_ASSERT(poolIt != PoolMapping_.end() && poolIt->second == frontPool);
+            PoolMapping_.erase(poolIt);
+
+            RetainPoolQueue_.PopFront();
+            NYT::DestroyRefCounted(frontPool);
+        }
+    }
+
+    virtual TProfiler GetPoolProfiler(const TString& poolName) = 0;
+
+    virtual void Invoke(TClosure callback, TBucket* bucket) = 0;
+
+    // GetInvoker is protected by mapping lock (can be sharded).
+    IInvokerPtr GetInvoker(const TString& poolName, const TString& bucketName)
+    {
+        // TODO(lukyan): Use reader guard and update it to writer if needed.
+        auto guard = Guard(MappingLock_);
+
+        auto [bucketIt, bucketInserted] = BucketMapping_.emplace(std::pair(poolName, bucketName), nullptr);
+
+        auto bucket = bucketIt->second ? DangerousGetPtr(bucketIt->second) : nullptr;
+        if (!bucket) {
+            bucket = New<TBucket>(bucketName, poolName, MakeStrong(this));
+            bucketIt->second = bucket.Get();
+            bucket->Pool = GetOrRegisterPool(bucket->PoolName);
+        }
+
+        return bucket;
+    }
+
+    // GetInvoker is protected by mapping lock (can be sharded).
+    void RemoveBucket(TBucket* bucket)
+    {
+        auto guard = Guard(MappingLock_);
+        auto bucketIt = BucketMapping_.find(std::pair(bucket->PoolName, bucket->BucketName));
+
+        if (bucketIt != BucketMapping_.end() && bucketIt->second == bucket) {
+            BucketMapping_.erase(bucketIt);
+        }
+
+        // Detach under lock.
+        auto* poolDangerousPtr = bucket->Pool.Release();
+
+        // Do not want use NewWithDeleter and keep pointer to TTwoLevelFairShareQueue in each execution pool.
+        if (NYT::GetRefCounter(poolDangerousPtr)->Unref(1)) {
+            auto poolsToRemove = DetachPool(poolDangerousPtr);
+            guard.Release();
+
+            while (poolsToRemove.GetSize() > 0) {
+                auto* frontPool = poolsToRemove.GetFront();
+                poolsToRemove.PopFront();
+                NYT::DestroyRefCounted(frontPool);
+            }
+        }
+    }
+
+    TExecutionPoolPtr GetOrRegisterPool(TString poolName)
+    {
+        VERIFY_SPINLOCK_AFFINITY(MappingLock_);
+
+        auto [mappingIt, inserted] = PoolMapping_.emplace(poolName, nullptr);
+        if (!inserted) {
+            YT_ASSERT(mappingIt->second->PoolName == poolName);
+
+            auto* pool = mappingIt->second;
+            // If RetainPoolQueue_ contains only one element its LinkedListNode will be null.
+            // Determine that pool is in RetainPoolQueue_ by checking its ref count.
+            if (NYT::GetRefCounter(pool)->GetRefCount() == 0) {
+                RetainPoolQueue_.Remove(pool);
+                pool->LinkedListNode = {};
+
+                YT_LOG_TRACE("Restoring pool (PoolName: %v)", pool->PoolName);
+            }
+
+            YT_LOG_TRACE("Reusing pool (PoolName: %v)", pool->PoolName);
+
+            return pool;
+        } else {
+            YT_LOG_TRACE("Creating pool (PoolName: %v)", poolName);
+            auto pool = New<TExecutionPool>(poolName, GetPoolProfiler(poolName));
+            mappingIt->second = pool.Get();
+
+            return pool;
+        }
+    }
+
+    TPoolQueue DetachPool(TExecutionPool* pool)
+    {
+        VERIFY_SPINLOCK_AFFINITY(MappingLock_);
+
+        YT_LOG_TRACE("Removing pool (PoolName: %v)", pool->PoolName);
+
+        auto currentInstant = GetCpuInstant();
+        pool->LastUsageTime = currentInstant;
+
+        // Items in RetainPoolQueue_ are ordered by LastUsageTime.
+        // When pool is used again it is removed from RetainPoolQueue_.
+        RetainPoolQueue_.PushBack(pool);
+        return ProceedRetainQueue(currentInstant);
+    }
+
+    TPoolQueue ProceedRetainQueue(TCpuInstant currentInstant)
+    {
+        VERIFY_SPINLOCK_AFFINITY(MappingLock_);
+
+        YT_LOG_TRACE("ProceedRetainQueue (Size: %v)", RetainPoolQueue_.GetSize());
+
+        TPoolQueue poolsToRemove;
+
+        while (RetainPoolQueue_.GetSize() > 0) {
+            auto* frontPool = RetainPoolQueue_.GetFront();
+
+            auto lastUsageTime = frontPool->LastUsageTime;
+            if (CpuDurationToDuration(currentInstant - lastUsageTime) < PoolRetentionTime_) {
+                break;
+            }
+
+            YT_LOG_TRACE("Destroing pool (PoolName: %v)", frontPool->PoolName);
+
+            auto poolIt = PoolMapping_.find(frontPool->PoolName);
+            YT_ASSERT(poolIt != PoolMapping_.end() && poolIt->second == frontPool);
+            PoolMapping_.erase(poolIt);
+
+            RetainPoolQueue_.PopFront();
+            poolsToRemove.PushBack(frontPool);
+        }
+
+        return poolsToRemove;
+    }
+
+    void MaybeProceedRetainQueue(TCpuInstant currentInstant)
+    {
+        if (!MappingLock_.TryAcquire()) {
+            return;
+        }
+
+        auto finally = Finally([&] {
+            MappingLock_.Release();
+        });
+
+        auto poolsToRemove = ProceedRetainQueue(currentInstant);
+        MappingLock_.Release();
+        finally.Release();
+
+        while (poolsToRemove.GetSize() > 0) {
+            auto* frontPool = poolsToRemove.GetFront();
+            poolsToRemove.PopFront();
+            NYT::DestroyRefCounted(frontPool);
+        }
+    }
+
+private:
+    const TDuration PoolRetentionTime_;
+
+    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, MappingLock_);
+    THashMap<std::pair<TString, TString>, TBucket*> BucketMapping_;
+    THashMap<TString, TExecutionPool*> PoolMapping_;
+
+    TPoolQueue RetainPoolQueue_;
+};
+
+DEFINE_REFCOUNTED_TYPE(TBucketMapping)
+
+////////////////////////////////////////////////////////////////////////////////
+
+void TBucket::Invoke(TClosure callback)
+{
+    Parent_->Invoke(std::move(callback), this);
+}
+
+TBucket::~TBucket()
+{
+    Parent_->RemoveBucket(this);
+}
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -377,8 +586,8 @@ DEFINE_ENUM(ERequest,
 );
 
 class TTwoLevelFairShareQueue
-    : public TRefCounted
-    , protected TNotifyManager
+    : protected TNotifyManager
+    , public TBucketMapping
 {
 public:
     using TWaitTimeObserver = ITwoLevelFairShareThreadPool::TWaitTimeObserver;
@@ -388,9 +597,13 @@ public:
         const TString& threadNamePrefix,
         const TNewTwoLevelFairShareThreadPoolOptions& options)
         : TNotifyManager(std::move(callbackEventCount), GetThreadTags(threadNamePrefix), options.PollingPeriod)
+        , TBucketMapping(options.PoolRetentionTime)
         , ThreadNamePrefix_(threadNamePrefix)
         , Profiler_(TProfiler{"/fair_share_queue"}
             .WithHot())
+        , CumulativeSchedulingTimeCounter_(Profiler_
+            .WithTags(GetThreadTags(ThreadNamePrefix_))
+            .TimeCounter("/time/scheduling_cumulative"))
         , PoolWeightProvider_(options.PoolWeightProvider)
         , VerboseLogging_(options.VerboseLogging)
     { }
@@ -405,44 +618,61 @@ public:
         ThreadCount_.store(threadCount);
     }
 
-    // GetInvoker is protected by mapping lock (can be sharded).
-    IInvokerPtr GetInvoker(const TString& poolName, const TString& bucketName)
+    void Configure(TDuration pollingPeriod)
     {
-        // TODO(lukyan): Use reader guard and update it to writer if needed.
-        auto guard = Guard(MappingLock_);
-
-        auto [bucketIt, bucketInserted] = BucketMapping_.emplace(std::make_pair(poolName, bucketName), nullptr);
-
-        auto bucket = bucketIt->second ? DangerousGetPtr(bucketIt->second) : nullptr;
-        if (!bucket) {
-            bucket = New<TBucket>(bucketName, poolName, MakeStrong(this));
-            bucketIt->second = bucket.Get();
-        }
-
-        return bucket;
+        TNotifyManager::Reconfigure(pollingPeriod);
     }
 
-    // GetInvoker is protected by mapping lock (can be sharded).
-    void RemoveBucket(TBucket* bucket)
+    // (arkady-e1ppa): Explanation of memory orders and fences around Stopped_:
+    /*
+        We have two concurrent actions: Invoke and Shutdown.
+        For our logic Invoke method does 2 things:
+        1) It pushes callback to the queue (we assume it be release RMW operation)
+        In reality right now it is seq_cst, but it this can and should be changed in the future.
+        2) Now, the second (and third) action is seq_cst fence and then seq_cst read of Stopped_.
+        Shutdown also does two thigns:
+        1) It does a seq_cst rmw in Stopped_ (effectively, just write)
+        2) It drains the queue.
+        In order to prevent losing callbacks in queue
+        We need to make sure that either Invoke observes |true| in the read
+        or Shutdown observes placed callback from said Invoke.
+        We care about this, because if callback is stuck in queue it will
+        remain there until process is killed. If said callback MUST be
+        either executed or discarded (e.g. IPollable or Fiber) in order
+        for program to finish correctly (an not get stuck), then such a leak
+        can cause hung shutdown (and it used to do exactly that).
+
+        Relevant parts of execution are written below
+        (letter is the same in the code).
+            T1(Invoke)                  T2(Shutdown)
+        RMW^rel(Queue, 0, 1)   (a)   RMW^rlx(Stopping, false, true) (d)
+        Fence^sc               (b)   Fence^sc                       (e)
+        R^rlx(Stopping, false) (c)   RMW^acq(Queue, 0, 0)           (f)
+
+        We suppose that callback is lost so we haven't
+        seen 1 in (f) nor true in (c).
+        Since (c) reads false it reads from ctor which precedes
+        (d) in modification order. Thus we have (c) -cob-> (d)
+        (coherence-ordered before, https://eel.is/c++draft/atomics.order#3.3).
+        Likewise (f) must have read from some previous
+        dequeue attempt (or ctor) which precedes (a) in modification order.
+        Again, (f) -cob-> (a).
+        Now, for fences we have (sb means sequenced-before):
+        (b) -sb-> (c) -cob-> (d) -sb-> (e) => (b) -S-> (e)
+        (see https://eel.is/c++draft/atomics.order#4.4).
+        We also have
+        (e) -sb-> (f) -cob-> (a) -sb-> (b) => (b) -S-> (e).
+        Thus loop in S found contradicting the assumption
+        that (f) doesn't read 1 and (c) doesn't read true.
+    */
+
+    // Invoke is lock free on a fast path (a.k.a. no shutdown).
+    void Invoke(TClosure callback, TBucket* bucket) override
     {
-        {
-            auto guard = Guard(MappingLock_);
-            auto bucketIt = BucketMapping_.find(std::make_pair(bucket->PoolName, bucket->BucketName));
-
-            if (bucketIt != BucketMapping_.end() && bucketIt->second == bucket) {
-                BucketMapping_.erase(bucketIt);
-            }
-        }
-
-        if (auto* pool = bucket->Pool) {
-            UnlinkBucketQueue_.Enqueue(pool);
-        }
-    }
-
-    // Invoke is lock free.
-    void Invoke(TClosure callback, TBucket* bucket)
-    {
-        if (Stopped_.load()) {
+        // We can't guarantee read of |true| in time anyway
+        // So relaxed order is enough.
+        if (Stopped_.load(std::memory_order::relaxed)) {
+            Drain();
             return;
         }
 
@@ -457,9 +687,17 @@ public:
         // Callback keeps raw ptr to bucket to minimize bucket ref count.
         action.Callback = BIND(&TBucket::RunCallback, Unretained(bucket), std::move(callback), cpuInstant);
         action.BucketHolder = MakeStrong(bucket);
-        action.EnqueuedThreadCookie = ThreadCookie;
+        action.EnqueuedThreadCookie = ThreadCookie();
 
-        InvokeQueue_.Enqueue(std::move(action));
+        InvokeQueue_.Enqueue(std::move(action)); // <- (a)
+
+        std::atomic_thread_fence(std::memory_order::seq_cst); // <- (b)
+        if (Stopped_.load(std::memory_order::relaxed)) { // <- (c)
+            // We have encountered stop right after we have enqueued
+            // callback. There is a possibility that it is now stuck
+            // in queue forever. We dequeue it ourselves.
+            Drain();
+        }
 
         NotifyFromInvoke(cpuInstant, ActiveThreads_.load() == 0);
     }
@@ -504,12 +742,16 @@ public:
 
     void Shutdown()
     {
-        Drain();
+        if (Stopped_.exchange(true, std::memory_order::relaxed)) { // <- (d)
+            return;
+        }
+        std::atomic_thread_fence(std::memory_order::seq_cst); // <- (e)
+
+        Drain(); // <- (f)
     }
 
     void Drain()
     {
-        Stopped_.store(true);
         auto guard = Guard(MainLock_);
 
         WaitHeap_.Clear();
@@ -533,9 +775,11 @@ public:
             }
         }
 
+        InvokeQueue_.DequeueAll();
+
+        guard.Release();
         actions.clear();
 
-        InvokeQueue_.DequeueAll();
     }
 
     void RegisterWaitTimeObserver(TWaitTimeObserver waitTimeObserver)
@@ -566,13 +810,9 @@ private:
 
     const TString ThreadNamePrefix_;
     const TProfiler Profiler_;
+    const NProfiling::TTimeCounter CumulativeSchedulingTimeCounter_;
     const IPoolWeightProviderPtr PoolWeightProvider_;
     const bool VerboseLogging_;
-
-    // TODO(lukyan): Sharded mapping.
-    YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, MappingLock_);
-    THashMap<std::pair<TString, TString>, TBucket*> BucketMapping_;
-    TMpscStack<TExecutionPool*> UnlinkBucketQueue_;
 
     std::atomic<bool> Stopped_ = false;
     TMpscStack<TAction> InvokeQueue_;
@@ -584,38 +824,24 @@ private:
 
     std::array<TThreadState, TThreadPoolBase::MaxThreadCount> ThreadStates_;
 
-    THashMap<TString, std::unique_ptr<TExecutionPool>> PoolMapping_;
     TPriorityQueue<TExecutionPool> ActivePoolsHeap_;
     TCpuDuration LastPoolExcessTime_ = 0;
     TPriorityQueue<TEnqueuedTime> WaitHeap_;
 
     // Buffer to keep actions during distribution to threads.
     std::array<TAction, TThreadPoolBase::MaxThreadCount> OtherActions_;
-
     std::atomic<int> ThreadCount_ = 0;
     std::atomic<int> ActiveThreads_ = 0;
 
     std::atomic<bool> IsWaitTimeObserverSet_;
     TWaitTimeObserver WaitTimeObserver_;
 
-    TExecutionPool* GetOrRegisterPool(TString poolName)
+    TProfiler GetPoolProfiler(const TString& poolName) override
     {
-        VERIFY_SPINLOCK_AFFINITY(MainLock_);
-
-        auto [mappingIt, inserted] = PoolMapping_.emplace(poolName, nullptr);
-        if (!inserted) {
-            YT_ASSERT(mappingIt->second->PoolName == poolName);
-        } else {
-            YT_LOG_TRACE("Creating pool (PoolName: %v)", poolName);
-            mappingIt->second = std::make_unique<TExecutionPool>(
-                poolName,
-                Profiler_.WithTags(GetBucketTags(ThreadNamePrefix_, poolName)));
-        }
-
-        return mappingIt->second.get();
+        return Profiler_.WithTags(GetBucketTags(ThreadNamePrefix_, poolName));
     }
 
-    void ConsumeInvokeQueue(TCpuInstant currentInstant)
+    Y_NO_INLINE void ConsumeInvokeQueue()
     {
         VERIFY_SPINLOCK_AFFINITY(MainLock_);
 
@@ -625,12 +851,10 @@ private:
         InvokeQueue_.DequeueAll(true, [&] (auto& action) {
             auto* bucket = action.BucketHolder.Get();
 
-            if (bucket->Pool == nullptr) {
-                bucket->Pool = GetOrRegisterPool(bucket->PoolName);
-                bucket->Pool->BucketRefs++;
-            }
+            auto* pool = bucket->Pool.Get();
 
-            auto* pool = bucket->Pool;
+            YT_VERIFY(!pool->LinkedListNode.Next && !pool->LinkedListNode.Prev);
+
             if (!pool->GetPositionInHeap()) {
                 // ExcessTime can be greater than last pool excess time
                 // if the pool is "currently executed" and reschedules action.
@@ -682,21 +906,6 @@ private:
                 WaitHeap_.Insert(&bucket->EnqueuedTime);
             }
         });
-
-        UnlinkBucketQueue_.DequeueAll(false, [&] (TExecutionPool* pool) {
-            YT_VERIFY(pool->BucketRefs > 0);
-            if (--pool->BucketRefs == 0) {
-                auto lastUsageTime = pool->LastUsageTime.load(std::memory_order_acquire);
-                if (CpuDurationToDuration(currentInstant - lastUsageTime) > TDuration::Seconds(30)) {
-                    auto poolIt = PoolMapping_.find(pool->PoolName);
-                    YT_VERIFY(poolIt != PoolMapping_.end() && poolIt->second.get() == pool);
-                    PoolMapping_.erase(poolIt);
-                } else {
-                    ++pool->BucketRefs;
-                    UnlinkBucketQueue_.Enqueue(pool);
-                }
-            }
-        });
     }
 
     void ServeBeginExecute(TThreadState* threadState, TCpuInstant currentInstant, TAction action)
@@ -739,11 +948,11 @@ private:
         threadState->BucketToUnref = std::move(bucket);
     }
 
-    void UpdateExcessTime(TBucket* bucket, TCpuDuration duration, TCpuInstant currentInstant)
+    Y_NO_INLINE void UpdateExcessTime(TBucket* bucket, TCpuDuration duration, TCpuInstant currentInstant)
     {
         VERIFY_SPINLOCK_AFFINITY(MainLock_);
 
-        auto* pool = bucket->Pool;
+        auto* pool = bucket->Pool.Get();
 
         if (PoolWeightProvider_ && pool->NextUpdateWeightInstant < currentInstant) {
             pool->NextUpdateWeightInstant = currentInstant + DurationToCpuDuration(TDuration::Seconds(1));
@@ -771,11 +980,13 @@ private:
         YT_ASSERT(!bucket->EnqueuedTime.GetPositionInHeap() == !bucket->GetPositionInHeap());
     }
 
-    bool GetStarvingBucket(TAction* action)
+    Y_NO_INLINE bool GetStarvingBucket(TAction* action)
     {
         VERIFY_SPINLOCK_AFFINITY(MainLock_);
 
-        YT_LOG_DEBUG_IF(VerboseLogging_, "Buckets: %v",
+        YT_LOG_DEBUG_IF(
+            VerboseLogging_,
+            "Buckets: %v",
             MakeFormattableView(
                 xrange(size_t(0), ActivePoolsHeap_.GetSize()),
                 [&] (auto* builder, auto index) {
@@ -873,7 +1084,7 @@ private:
 
         YT_LOG_TRACE("Consuming invoke queue");
 
-        ConsumeInvokeQueue(currentInstant);
+        ConsumeInvokeQueue();
 
         int fetchedActions = 0;
         int otherActionCount = 0;
@@ -906,7 +1117,7 @@ private:
         }
 
         // Schedule other actions.
-        for (int threadIndex : MakeRange(threadIds.data(), requestCount)) {
+        for (int threadIndex : TRange(threadIds.data(), requestCount)) {
             if (threadRequests[threadIndex]) {
                 if (otherActionCount > 0) {
                     ServeBeginExecute(&ThreadStates_[threadIndex], currentInstant, std::move(OtherActions_[--otherActionCount]));
@@ -960,8 +1171,7 @@ private:
         auto finally = Finally([&] {
             auto bucketToUndef = std::move(threadState.BucketToUnref);
             if (bucketToUndef) {
-                auto* pool = bucketToUndef->Pool;
-                pool->LastUsageTime.store(cpuInstant, std::memory_order_release);
+                auto* pool = bucketToUndef->Pool.Get();
                 pool->SizeCounter.Record(threadState.LastActionsInQueue);
                 pool->DequeuedCounter.Increment(1);
                 pool->ExecTimeCounter.Record(threadState.TimeFromStart);
@@ -975,6 +1185,12 @@ private:
                 auto waitTime = CpuDurationToDuration(action.StartedAt - action.EnqueuedAt);
                 action.BucketHolder->Pool->WaitTimeCounter.Record(waitTime);
                 ReportWaitTime(waitTime);
+            }
+
+            CumulativeSchedulingTimeCounter_.Add(CpuDurationToDuration(GetCpuInstant() - cpuInstant));
+
+            if (!fetchNext) {
+                MaybeProceedRetainQueue(cpuInstant);
             }
         });
 
@@ -1028,18 +1244,6 @@ DEFINE_REFCOUNTED_TYPE(TTwoLevelFairShareQueue)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void TBucket::Invoke(TClosure callback)
-{
-    Parent_->Invoke(std::move(callback), this);
-}
-
-TBucket::~TBucket()
-{
-    Parent_->RemoveBucket(this);
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
 class TFairShareThread
     : public TSchedulerThread
 {
@@ -1064,7 +1268,7 @@ protected:
 
     void OnStart() override
     {
-        ThreadCookie = TTaggedPtr(Queue_.Get(), static_cast<ui16>(Index_)).Pack();
+        ThreadCookie() = TTaggedPtr(Queue_.Get(), static_cast<ui16>(Index_)).Pack();
     }
 
     void StopPrologue() override
@@ -1124,6 +1328,11 @@ public:
         TThreadPoolBase::Configure(threadCount);
     }
 
+    void Configure(TDuration pollingPeriod) override
+    {
+        Queue_->Configure(pollingPeriod);
+    }
+
     IInvokerPtr GetInvoker(
         const TString& poolName,
         const TFairShareThreadPoolTag& bucketName) override
@@ -1153,15 +1362,9 @@ private:
 
     void DoShutdown() override
     {
+        Queue_->Shutdown();
         TThreadPoolBase::DoShutdown();
-    }
-
-    TClosure MakeFinalizerCallback() override
-    {
-        return BIND([queue = Queue_, callback = TThreadPoolBase::MakeFinalizerCallback()] {
-            callback();
-            queue->Drain();
-        });
+        Queue_->Drain();
     }
 
     void DoConfigure(int threadCount) override
@@ -1170,7 +1373,7 @@ private:
         TThreadPoolBase::DoConfigure(threadCount);
     }
 
-    TSchedulerThreadBasePtr SpawnThread(int index) override
+    TSchedulerThreadPtr SpawnThread(int index) override
     {
         return New<TFairShareThread>(
             Queue_,

@@ -12,8 +12,8 @@ struct TCompactionLimits {
     static constexpr const ui64 DEFAULT_EVICTION_BYTES = 64 * 1024 * 1024;
     static constexpr const ui64 MAX_BLOBS_TO_DELETE = 10000;
 
-    static constexpr const ui64 OVERLOAD_INSERT_TABLE_SIZE_BY_PATH_ID = (ui64)2 << 30;
-    static constexpr const ui64 WARNING_INSERT_TABLE_SIZE_BY_PATH_ID = 0.3 * OVERLOAD_INSERT_TABLE_SIZE_BY_PATH_ID;
+    static constexpr const ui64 OVERLOAD_INSERT_TABLE_SIZE_BY_PATH_ID = (ui64)1 << 30;
+    static constexpr const ui64 WARNING_INSERT_TABLE_SIZE_BY_PATH_ID = 0.5 * OVERLOAD_INSERT_TABLE_SIZE_BY_PATH_ID;
     static constexpr const ui64 WARNING_INSERT_TABLE_COUNT_BY_PATH_ID = 100;
 
     static constexpr const i64 OVERLOAD_GRANULE_SIZE = 20 * MAX_BLOB_SIZE;
@@ -32,13 +32,6 @@ struct TCompactionLimits {
     i64 GranuleSizeForOverloadPrevent = WARNING_OVERLOAD_GRANULE_SIZE;
     i64 GranuleIndexedPortionsSizeLimit = WARNING_INSERTED_PORTIONS_SIZE;
     ui32 GranuleIndexedPortionsCountLimit = WARNING_INSERTED_PORTIONS_COUNT;
-
-    TSplitSettings GetSplitSettings() const {
-        return TSplitSettings()
-            .SetMinBlobSize(0.5 * std::min<ui64>(MAX_BLOB_SIZE, GranuleSizeForOverloadPrevent))
-            .SetMaxBlobSize(std::min<ui64>(MAX_BLOB_SIZE, GranuleSizeForOverloadPrevent))
-            .SetMaxPortionSize(0.5 * GranuleSizeForOverloadPrevent);
-    }
 };
 
 }

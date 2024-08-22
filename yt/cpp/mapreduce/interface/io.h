@@ -142,7 +142,8 @@ public:
     /// from the stream.
     virtual bool Retry(
         const TMaybe<ui32>& rangeIndex,
-        const TMaybe<ui64>& rowIndex) = 0;
+        const TMaybe<ui64>& rowIndex,
+        const std::exception_ptr& error) = 0;
 
     /// Resets retry attempt count to the initial value (then `Retry()` can be called again).
     virtual void ResetRetries() = 0;
@@ -300,12 +301,6 @@ public:
         return Reader_ == it.Reader_;
     }
 
-    /// Inequality operator.
-    bool operator!=(const TTableReaderIterator& it) const
-    {
-        return Reader_ != it.Reader_;
-    }
-
     /// Dereference operator.
     TTableReader<T>& operator*()
     {
@@ -392,7 +387,8 @@ public:
     /// The row may (and very probably will) *not* be written immediately.
     void AddRow(const T& row);
 
-    /// Stop writing data as soon as possible (without flushing data, e.g. before aborting parent transaction).
+    /// Complete writing and check that everything is written successfully.
+    /// No other data can be written after Finish is called.
     void Finish();
 
     size_t GetBufferMemoryUsage() const;

@@ -33,11 +33,10 @@ public:
         return NKikimrServices::TActivity::KQP_RESULT_CHANNEL_PROXY;
     }
 
-    TResultCommonChannelProxy(ui64 txId, ui64 channelId, std::shared_ptr<TQueryExecutionStats> stats, TActorId executer)
+    TResultCommonChannelProxy(ui64 txId, ui64 channelId, TActorId executer)
         : TActor(&TResultCommonChannelProxy::WorkState)
         , TxId(txId)
         , ChannelId(channelId)
-        , Stats(std::move(stats))
         , Executer(executer) {}
 
 protected:
@@ -57,16 +56,9 @@ private:
             }
         } catch (const yexception& ex) {
             InternalError(ex.what());
+        } catch (const NKikimr::TMemoryLimitExceededException& ex) {
+            InternalError("Memory limit exceeded exception", NYql::NDqProto::StatusIds::PRECONDITION_FAILED);
         }
-    }
-
-    void UpdateStatistics(const TEvComputeChannelDataOOB& data) {
-        if (!Stats) {
-            return;
-        }
-
-        Stats->ResultBytes += data.Size();
-        Stats->ResultRows += data.RowCount();
     }
 
     void HandleWork(NYql::NDq::TEvDqCompute::TEvChannelData::TPtr& ev) {
@@ -85,7 +77,6 @@ private:
             << ", seqNo: " << record.Proto.GetSeqNo()
             << ", from: " << ev->Sender);
 
-        UpdateStatistics(record);
         SendResults(record, ev->Sender);
     }
 
@@ -108,10 +99,10 @@ private:
         Send(ComputeActor, ackEv.Release(), /* TODO: undelivery */ 0, /* cookie */ ChannelId);
     }
 
-    void InternalError(const TString& msg) {
+    void InternalError(const TString& msg, const NYql::NDqProto::StatusIds_StatusCode& code = NYql::NDqProto::StatusIds::INTERNAL_ERROR) {
         LOG_CRIT_S(*NActors::TlsActivationContext, NKikimrServices::KQP_EXECUTER, msg);
 
-        auto evAbort = MakeHolder<TEvKqp::TEvAbortExecution>(NYql::NDqProto::StatusIds::INTERNAL_ERROR, msg);
+        auto evAbort = MakeHolder<TEvKqp::TEvAbortExecution>(code, msg);
         Send(Executer, evAbort.Release());
 
         Become(&TResultCommonChannelProxy::DeadState);
@@ -123,7 +114,7 @@ private:
             switch (ev->GetTypeRewrite()) {
                 hFunc(TEvents::TEvPoison, HandlePoison);
             }
-            
+
         } catch(const yexception& ex) {
             InternalError(ex.what());
         }
@@ -139,7 +130,6 @@ private:
 private:
     const ui64 TxId;
     const ui64 ChannelId;
-    std::shared_ptr<TQueryExecutionStats> Stats; // owned by KqpExecuter
     const NActors::TActorId Executer;
     NActors::TActorId ComputeActor;
 };
@@ -147,13 +137,14 @@ private:
 class TResultStreamChannelProxy : public TResultCommonChannelProxy {
 public:
     TResultStreamChannelProxy(ui64 txId, ui64 channelId, NKikimr::NMiniKQL::TType* itemType,
-        const TVector<ui32>* columnOrder, ui32 queryResultIndex, TActorId target, std::shared_ptr<TQueryExecutionStats> stats,
-        TActorId executer)
-        : TResultCommonChannelProxy(txId, channelId, std::move(stats), executer)
+        const TVector<ui32>* columnOrder, ui32 queryResultIndex, TActorId target,
+        TActorId executer, size_t statementResultIndex)
+        : TResultCommonChannelProxy(txId, channelId, executer)
         , ColumnOrder(columnOrder)
         , ItemType(itemType)
         , QueryResultIndex(queryResultIndex)
-        , Target(target) {}
+        , Target(target)
+        , StatementResultIndex(statementResultIndex) {}
 
 private:
     void SendResults(TEvComputeChannelDataOOB& computeData, TActorId sender) override {
@@ -170,7 +161,7 @@ private:
 
         auto streamEv = MakeHolder<TEvKqpExecuter::TEvStreamData>();
         streamEv->Record.SetSeqNo(computeData.Proto.GetSeqNo());
-        streamEv->Record.SetQueryResultIndex(QueryResultIndex);
+        streamEv->Record.SetQueryResultIndex(QueryResultIndex + StatementResultIndex);
         streamEv->Record.MutableResultSet()->Swap(&resultSet);
 
         LOG_DEBUG_S(*NActors::TlsActivationContext, NKikimrServices::KQP_EXECUTER,
@@ -185,13 +176,14 @@ private:
     NKikimr::NMiniKQL::TType* ItemType;
     ui32 QueryResultIndex = 0;
     const NActors::TActorId Target;
+    size_t StatementResultIndex;
 };
 
 class TResultDataChannelProxy : public TResultCommonChannelProxy {
 public:
-    TResultDataChannelProxy(ui64 txId, ui64 channelId, std::shared_ptr<TQueryExecutionStats> stats, TActorId executer,
+    TResultDataChannelProxy(ui64 txId, ui64 channelId, TActorId executer,
         ui32 inputIndex, TEvKqpExecuter::TEvTxResponse* resultReceiver)
-        : TResultCommonChannelProxy(txId, channelId, std::move(stats), executer)
+        : TResultCommonChannelProxy(txId, channelId, executer)
         , InputIndex(inputIndex)
         , ResultReceiver(resultReceiver) {}
 
@@ -222,8 +214,8 @@ private:
 } // anonymous namespace end
 
 NActors::IActor* CreateResultStreamChannelProxy(ui64 txId, ui64 channelId, NKikimr::NMiniKQL::TType* itemType,
-    const TVector<ui32>* columnOrder, ui32 queryResultIndex, TActorId target, std::shared_ptr<TQueryExecutionStats> stats,
-    TActorId executer)
+    const TVector<ui32>* columnOrder, ui32 queryResultIndex, TActorId target,
+    TActorId executer, ui32 statementResultIndex)
 {
     LOG_DEBUG_S(*NActors::TlsActivationContext, NKikimrServices::KQP_EXECUTER,
         "CreateResultStreamChannelProxy: TxId: " << txId <<
@@ -231,11 +223,10 @@ NActors::IActor* CreateResultStreamChannelProxy(ui64 txId, ui64 channelId, NKiki
     );
 
     return new TResultStreamChannelProxy(txId, channelId, itemType, columnOrder, queryResultIndex, target,
-        std::move(stats), executer);
+        executer, statementResultIndex);
 }
 
-NActors::IActor* CreateResultDataChannelProxy(ui64 txId, ui64 channelId,
-    std::shared_ptr<TQueryExecutionStats> stats, TActorId executer,
+NActors::IActor* CreateResultDataChannelProxy(ui64 txId, ui64 channelId, TActorId executer,
     ui32 inputIndex, TEvKqpExecuter::TEvTxResponse* resultsReceiver)
 {
     LOG_DEBUG_S(*NActors::TlsActivationContext, NKikimrServices::KQP_EXECUTER,
@@ -243,7 +234,7 @@ NActors::IActor* CreateResultDataChannelProxy(ui64 txId, ui64 channelId,
         ", channelId: " << channelId
     );
 
-    return new TResultDataChannelProxy(txId, channelId, std::move(stats), executer, inputIndex, resultsReceiver);
+    return new TResultDataChannelProxy(txId, channelId, executer, inputIndex, resultsReceiver);
 }
 
 } // namespace NKqp

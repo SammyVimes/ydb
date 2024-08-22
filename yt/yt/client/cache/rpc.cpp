@@ -1,9 +1,10 @@
 #include "rpc.h"
-#include "options.h"
 
 #include <yt/yt_proto/yt/client/cache/proto/config.pb.h>
 
 #include <yt/yt/client/api/client.h>
+
+#include <yt/yt/client/api/options.h>
 
 #include <yt/yt/client/api/rpc_proxy/config.h>
 #include <yt/yt/client/api/rpc_proxy/connection.h>
@@ -74,7 +75,9 @@ NApi::NRpcProxy::TConnectionConfigPtr GetConnectionConfig(const TConfig& config)
     if (config.HasEnableLegacyRpcCodecs()) {
         connectionConfig->EnableLegacyRpcCodecs = config.GetEnableLegacyRpcCodecs();
     }
-
+    if (config.HasEnableSelectQueryTracingTag()) {
+        connectionConfig->EnableSelectQueryTracingTag = config.GetEnableSelectQueryTracingTag();
+    }
     if (config.HasRetryBackoffTime()) {
         connectionConfig->RetryingChannel->RetryBackoffTime = TDuration::MilliSeconds(config.GetRetryBackoffTime());
     }
@@ -83,6 +86,18 @@ NApi::NRpcProxy::TConnectionConfigPtr GetConnectionConfig(const TConfig& config)
     }
     if (config.HasRetryTimeout()) {
         connectionConfig->RetryingChannel->RetryTimeout = TDuration::MilliSeconds(config.GetRetryTimeout());
+    }
+
+    if (config.HasClusterTag()) {
+        connectionConfig->ClusterTag = NApi::TClusterTag(config.GetClusterTag());
+    }
+
+    if (config.HasClockClusterTag()) {
+        connectionConfig->ClockClusterTag = NObjectClient::TCellTag(config.GetClockClusterTag());
+    }
+
+    if (config.HasUdfRegistryPath()) {
+        connectionConfig->UdfRegistryPath = config.GetUdfRegistryPath();
     }
 
     connectionConfig->Postprocess();
@@ -94,10 +109,21 @@ NApi::NRpcProxy::TConnectionConfigPtr GetConnectionConfig(const TConfig& config)
 
 std::pair<TStringBuf, TStringBuf> ExtractClusterAndProxyRole(TStringBuf clusterUrl)
 {
-    TStringBuf cluster;
-    TStringBuf proxyRole;
-    clusterUrl.Split('/', cluster, proxyRole);
-    return {cluster, proxyRole};
+    static const TStringBuf schemeDelim = "://";
+
+    auto startPos = clusterUrl.find(schemeDelim);
+    if (startPos != TStringBuf::npos) {
+        startPos += schemeDelim.size();
+    } else {
+        startPos = 0;
+    }
+
+    auto endPos = clusterUrl.rfind('/');
+    if (endPos != TStringBuf::npos && endPos > startPos) {
+        return {clusterUrl.Head(endPos), clusterUrl.Tail(endPos + 1)};
+    } else {
+        return {clusterUrl, ""};
+    }
 }
 
 void SetClusterUrl(const NApi::NRpcProxy::TConnectionConfigPtr& config, TStringBuf clusterUrl)
@@ -132,7 +158,7 @@ NApi::IClientPtr CreateClient(const TConfig& config, const NApi::TClientOptions&
 
 NApi::IClientPtr CreateClient(const NApi::NRpcProxy::TConnectionConfigPtr& config)
 {
-    return CreateClient(config, GetClientOpsFromEnvStatic());
+    return CreateClient(config, NApi::GetClientOpsFromEnvStatic());
 }
 
 NApi::IClientPtr CreateClient(const TConfig& config)
@@ -142,7 +168,7 @@ NApi::IClientPtr CreateClient(const TConfig& config)
 
 NApi::IClientPtr CreateClient(TStringBuf clusterUrl)
 {
-    return CreateClient(clusterUrl, GetClientOpsFromEnvStatic());
+    return CreateClient(clusterUrl, NApi::GetClientOpsFromEnvStatic());
 }
 
 NApi::IClientPtr CreateClient(TStringBuf cluster, TStringBuf proxyRole)

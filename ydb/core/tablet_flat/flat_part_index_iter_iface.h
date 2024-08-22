@@ -5,10 +5,11 @@
 
 namespace NKikimr::NTable {
     
-    struct IIndexIter {
+    struct IPartGroupIndexIter {
         using TCells = NPage::TCells;
 
         virtual EReady Seek(TRowId rowId) = 0;
+        virtual EReady SeekLast() = 0;
         virtual EReady Seek(ESeek seek, TCells key, const TKeyCellDefaults *keyDefaults) = 0;
         virtual EReady SeekReverse(ESeek seek, TCells key, const TKeyCellDefaults *keyDefaults) = 0;
         virtual EReady Next() = 0;
@@ -21,12 +22,13 @@ namespace NKikimr::NTable {
         virtual TRowId GetRowId() const = 0;
         virtual TRowId GetNextRowId() const = 0;
 
-        virtual bool HasKeyCells() const = 0;
+        virtual TPos GetKeyCellsCount() const = 0;
         virtual TCell GetKeyCell(TPos index) const = 0;
+        virtual void GetKeyCells(TSmallVec<TCell>& keyCells) const = 0;
 
-        virtual ~IIndexIter() = default;
+        virtual ~IPartGroupIndexIter() = default;
     };
 
-    THolder<IIndexIter> CreateIndexIter(const TPart* part, IPages* env, NPage::TGroupId groupId);
+    THolder<IPartGroupIndexIter> CreateIndexIter(const TPart* part, IPages* env, NPage::TGroupId groupId);
     
 }

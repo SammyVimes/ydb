@@ -4,15 +4,17 @@
 
 #include <yt/yt/client/cypress_client/public.h>
 
+#include <yt/yt/client/tablet_client/public.h>
+
 #include <yt/yt/client/transaction_client/public.h>
 
 #include <yt/yt/core/misc/range.h>
+#include <yt/yt/core/misc/protobuf_helpers.h>
 
 #include <library/cpp/yt/misc/enum.h>
+#include <library/cpp/yt/misc/strong_typedef.h>
 
 #include <util/generic/size_literals.h>
-
-#include <initializer_list>
 
 namespace NYT::NTableClient {
 
@@ -43,6 +45,7 @@ class TColumnRenameDescriptor;
 class THunkChunkRef;
 class TColumnMetaExt;
 class TVersionedRowDigestExt;
+class TCompressionDictionaryExt;
 
 } // namespace NProto
 
@@ -92,7 +95,7 @@ constexpr i64 MaxAnyValueLength = 16_MB;
 constexpr i64 MaxCompositeValueLength = 16_MB;
 constexpr i64 MaxServerVersionedRowDataWeight = 512_MB;
 constexpr i64 MaxClientVersionedRowDataWeight = 128_MB;
-constexpr int MaxKeyColumnCountInDynamicTable = 32;
+constexpr int MaxKeyColumnCountInDynamicTable = 128;
 constexpr int MaxTimestampCountPerRow = std::numeric_limits<ui16>::max();
 
 static_assert(
@@ -120,18 +123,22 @@ extern const TString RowIndexColumnName;
 extern const TString RangeIndexColumnName;
 extern const TString TabletIndexColumnName;
 extern const TString TimestampColumnName;
+extern const TString TtlColumnName;
+extern const TString TimestampColumnPrefix;
 extern const TString CumulativeDataWeightColumnName;
 extern const TString EmptyValueColumnName;
 extern const TString PrimaryLockName;
+extern const TString SequenceNumberColumnName;
 
 constexpr int TypicalHunkColumnCount = 8;
 
 ////////////////////////////////////////////////////////////////////////////////
 
 DEFINE_ENUM_WITH_UNDERLYING_TYPE(EHunkValueTag, ui8,
-    ((Inline)   (0))
-    ((LocalRef) (1))
-    ((GlobalRef)(2))
+    ((Inline)            (0))
+    ((LocalRef)          (1))
+    ((GlobalRef)         (2))
+    ((CompressedInline)  (3))
 );
 
 // Do not change these values since they are stored in the master snapshot.
@@ -215,6 +222,18 @@ DEFINE_ENUM(EMisconfiguredPartitionTactics,
     ((Skip)     (1))
 );
 
+//! NB: This enum is part of the persistent state.
+DEFINE_ENUM(EDictionaryCompressionPolicy,
+    // Placeholder representing null dictionary.
+    ((None)                  (0))
+
+    // Sample chunks according to weight.
+    ((LargeChunkFirst)       (1))
+
+    // Sample chunks according to creation time.
+    ((FreshChunkFirst)       (2))
+);
+
 using TTableId = NCypressClient::TNodeId;
 using TTableCollocationId = NObjectClient::TObjectId;
 using TMasterTableSchemaId = NObjectClient::TObjectId;
@@ -285,7 +304,7 @@ class TKeyComparer;
 struct TColumnRenameDescriptor;
 using TColumnRenameDescriptors = std::vector<TColumnRenameDescriptor>;
 
-class TStableName;
+YT_DEFINE_STRONG_TYPEDEF(TColumnStableName, TString);
 
 class TColumnSchema;
 
@@ -335,7 +354,11 @@ DECLARE_REFCOUNTED_CLASS(TChunkWriterConfig)
 DECLARE_REFCOUNTED_CLASS(TKeyFilterWriterConfig)
 DECLARE_REFCOUNTED_CLASS(TKeyPrefixFilterWriterConfig)
 
+DECLARE_REFCOUNTED_CLASS(TDictionaryCompressionConfig)
+
 DECLARE_REFCOUNTED_CLASS(TBatchHunkReaderConfig)
+
+DECLARE_REFCOUNTED_CLASS(TDictionaryCompressionSessionConfig)
 
 DECLARE_REFCOUNTED_CLASS(TTableReaderConfig)
 DECLARE_REFCOUNTED_CLASS(TTableWriterConfig)
@@ -349,6 +372,10 @@ DECLARE_REFCOUNTED_CLASS(TChunkReaderOptions)
 DECLARE_REFCOUNTED_CLASS(TChunkWriterOptions)
 
 DECLARE_REFCOUNTED_CLASS(TVersionedRowDigestConfig)
+
+DECLARE_REFCOUNTED_CLASS(TSchemalessBufferedDynamicTableWriterConfig)
+
+DECLARE_REFCOUNTED_CLASS(TSchemafulPipe)
 
 class TSaveContext;
 class TLoadContext;
@@ -404,6 +431,15 @@ DEFINE_ENUM(ESchemaCompatibility,
 );
 
 static constexpr TMasterTableSchemaId NullTableSchemaId = TMasterTableSchemaId();
+
+using TDynamicTableKeyMask = __uint128_t;
+
+static_assert(sizeof(TDynamicTableKeyMask) * 8 == MaxKeyColumnCountInDynamicTable);
+
+// Function that compares two TUnversionedValue values.
+using TUUComparerSignature = int(const TUnversionedValue*, const TUnversionedValue*, int);
+
+struct TVersionedReadOptions;
 
 ////////////////////////////////////////////////////////////////////////////////
 

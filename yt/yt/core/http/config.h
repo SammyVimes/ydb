@@ -16,6 +16,8 @@ class THttpIOConfig
 public:
     int ReadBufferSize;
 
+    int MaxRedirectCount;
+
     TDuration ConnectionIdleTimeout;
 
     TDuration HeaderReadTimeout;
@@ -48,7 +50,7 @@ public:
 
     bool EnableKeepAlive;
 
-    bool CancelFiberOnConnectionClose;
+    std::optional<bool> CancelFiberOnConnectionClose;
 
     //! Disables Nagle's algorithm.
     bool NoDelay;

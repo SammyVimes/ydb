@@ -42,7 +42,7 @@ public:
     TBindState()
         : TBindStateBase(
 #ifdef YT_ENABLE_BIND_LOCATION_TRACKING
-            FROM_HERE
+            YT_CURRENT_SOURCE_LOCATION
 #endif
         )
     { }
@@ -56,7 +56,7 @@ struct TBindState<true, void(), void(), void(TFakeInvoker, TFakeInvoker)>
     TBindState()
         : TBindStateBase(
 #ifdef YT_ENABLE_BIND_LOCATION_TRACKING
-            FROM_HERE
+            YT_CURRENT_SOURCE_LOCATION
 #endif
         )
     { }
@@ -103,11 +103,11 @@ TEST_F(TCallbackTest, DefaultConstruction)
     TCallback<void()> c0;
 
     TCallback<void(int)> c1;
-    TCallback<void(int,int)> c2;
-    TCallback<void(int,int,int)> c3;
-    TCallback<void(int,int,int,int)> c4;
-    TCallback<void(int,int,int,int,int)> c5;
-    TCallback<void(int,int,int,int,int,int)> c6;
+    TCallback<void(int, int)> c2;
+    TCallback<void(int, int, int)> c3;
+    TCallback<void(int, int, int, int)> c4;
+    TCallback<void(int, int, int, int, int)> c5;
+    TCallback<void(int, int, int, int, int, int)> c6;
 
     EXPECT_FALSE(c0);
     EXPECT_FALSE(c1);

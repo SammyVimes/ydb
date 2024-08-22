@@ -129,6 +129,11 @@ void Deserialize(EValueType& valueType, const TNode& node)
         {"interval", VT_INTERVAL},
         {"float", VT_FLOAT},
         {"json", VT_JSON},
+
+        {"date32", VT_DATE32},
+        {"datetime64", VT_DATETIME64},
+        {"timestamp64", VT_TIMESTAMP64},
+        {"interval64", VT_INTERVAL64},
     };
 
     auto it = str2ValueType.find(nodeStr);
@@ -216,12 +221,12 @@ void Serialize(const TColumnSchema& columnSchema, NYson::IYsonConsumer* consumer
             auto simplify = [&](const TNode& typeV3) -> TMaybe<std::pair<TString, bool>> {
                 auto simple = getSimple(typeV3);
                 if (simple) {
-                    return std::make_pair(*simple, isRequired(*simple));
+                    return std::pair(*simple, isRequired(*simple));
                 }
                 if (typeV3.IsMap() && typeV3["type_name"] == "optional") {
                     auto simpleItem = getSimple(typeV3["item"]);
                     if (simpleItem && isRequired(*simpleItem)) {
-                        return std::make_pair(*simpleItem, false);
+                        return std::pair(*simpleItem, false);
                     }
                 }
                 return {};
@@ -254,7 +259,7 @@ void Serialize(const TColumnSchema& columnSchema, NYson::IYsonConsumer* consumer
         })
         .DoIf(columnSchema.StableName().Defined(), [&] (TFluentMap fluent) {
             fluent.Item("stable_name").Value(*columnSchema.StableName());
-         })
+        })
         .DoIf(columnSchema.Deleted().Defined(), [&] (TFluentMap fluent) {
             fluent.Item("deleted").Value(*columnSchema.Deleted());
         })
@@ -504,6 +509,7 @@ void Deserialize(TTableColumnarStatistics& statistics, const TNode& node)
 {
     const auto& nodeMap = node.AsMap();
     DESERIALIZE_ITEM("column_data_weights", statistics.ColumnDataWeight);
+    DESERIALIZE_ITEM("column_estimated_unique_counts", statistics.ColumnEstimatedUniqueCounts);
     DESERIALIZE_ITEM("legacy_chunks_data_weight", statistics.LegacyChunksDataWeight);
     DESERIALIZE_ITEM("timestamp_total_weight", statistics.TimestampTotalWeight);
 }

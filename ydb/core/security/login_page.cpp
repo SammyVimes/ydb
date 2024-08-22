@@ -9,7 +9,7 @@
 #include <ydb/core/base/tablet_pipe.h>
 #include <ydb/core/tx/scheme_cache/scheme_cache.h>
 #include <ydb/core/tx/schemeshard/schemeshard.h>
-#include <ydb/core/security/ldap_auth_provider.h>
+#include <ydb/core/security/ldap_auth_provider/ldap_auth_provider.h>
 
 #include <ydb/library/login/login.h>
 #include <ydb/library/security/util.h>
@@ -96,18 +96,7 @@ public:
             ALOG_DEBUG(NActorsServices::HTTP, "Login: Requesting LDAP provider for user " << AuthCredentials.Login);
             Send(MakeLdapAuthProviderID(), new TEvLdapAuthProvider::TEvAuthenticateRequest(AuthCredentials.Login, AuthCredentials.Password));
         } else {
-            TDomainsInfo* domainsInfo = AppData()->DomainsInfo.Get();
-            const TDomainsInfo::TDomain& domain = *domainsInfo->Domains.begin()->second.Get();
-            TString rootDatabase = "/" + domain.Name;
-            ui64 rootSchemeShardTabletId = domain.SchemeRoot;
-            if (!Database.empty() && Database != rootDatabase) {
-                Database = rootDatabase;
-                ALOG_DEBUG(NActorsServices::HTTP, "Login: Requesting schemecache for database " << Database);
-                Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvNavigateKeySet(CreateNavigateKeySetRequest(Database).Release()));
-            } else {
-                Database = rootDatabase;
-                RequestSchemeShard(rootSchemeShardTabletId);
-            }
+            RequestLoginProvider();
         }
         Become(&TThis::StateWork, Timeout, new TEvents::TEvWakeup());
     }
@@ -124,6 +113,7 @@ public:
         PipeClient = RegisterWithSameMailbox(pipe);
         THolder<TEvSchemeShard::TEvLogin> request = MakeHolder<TEvSchemeShard::TEvLogin>();
         request.Get()->Record = CreateLoginRequest(AuthCredentials, AppData()->AuthConfig);
+        request.Get()->Record.SetPeerName(Request->Address->ToString());
         NTabletPipe::SendData(SelfId(), PipeClient, request.Release());
     }
 
@@ -147,10 +137,23 @@ public:
     void Handle(TEvLdapAuthProvider::TEvAuthenticateResponse::TPtr& ev) {
         TEvLdapAuthProvider::TEvAuthenticateResponse* response = ev->Get();
         if (response->Status == TEvLdapAuthProvider::EStatus::SUCCESS) {
+            RequestLoginProvider();
+        } else {
+            ReplyErrorAndPassAway("403", "Forbidden", response->Error.Message);
+        }
+    }
+
+    void RequestLoginProvider() {
+        auto *domain = AppData()->DomainsInfo->GetDomain();
+        TString rootDatabase = "/" + domain->Name;
+        ui64 rootSchemeShardTabletId = domain->SchemeRoot;
+        if (!Database.empty() && Database != rootDatabase) {
+            Database = rootDatabase;
             ALOG_DEBUG(NActorsServices::HTTP, "Login: Requesting schemecache for database " << Database);
             Send(MakeSchemeCacheID(), new TEvTxProxySchemeCache::TEvNavigateKeySet(CreateNavigateKeySetRequest(Database).Release()));
         } else {
-            ReplyErrorAndPassAway("403", "Forbidden", response->Error.Message);
+            Database = rootDatabase;
+            RequestSchemeShard(rootSchemeShardTabletId);
         }
     }
 

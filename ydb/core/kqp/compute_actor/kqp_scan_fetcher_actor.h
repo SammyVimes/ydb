@@ -153,7 +153,7 @@ private:
 
 private:
     void PassAway() override {
-        Send(MakePipePeNodeCacheID(false), new TEvPipeCache::TEvUnlink(0));
+        Send(MakePipePerNodeCacheID(false), new TEvPipeCache::TEvUnlink(0));
         TBase::PassAway();
     }
 
@@ -167,6 +167,9 @@ private:
     std::deque<std::pair<TEvKqpCompute::TEvScanData::TPtr, TInstant>> PendingScanData;
     std::deque<TShardState> PendingShards;
     std::deque<TShardState> PendingResolveShards;
+
+    static inline TAtomicCounter ScanIdCounter = 0;
+    const ui64 ScanId = ScanIdCounter.Inc();
 
     TInFlightShards InFlightShards;
     TInFlightComputes InFlightComputes;

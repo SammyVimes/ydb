@@ -34,7 +34,7 @@ using namespace NBus;
 ////////////////////////////////////////////////////////////////////////////////
 
 class TGrpcCallTracer final
-    : public grpc_core::ServerCallTracer
+    : public grpc_core::ClientCallTracer::CallAttemptTracer
 {
 public:
     void RecordAnnotation(y_absl::string_view /*annotation*/) override
@@ -95,15 +95,17 @@ public:
             statusDetail = "Unknown error";
         }
 
-        return TError(StatusCodeToErrorCode(static_cast<grpc_status_code>(statusCode)), statusDetail)
+        return TError(StatusCodeToErrorCode(static_cast<grpc_status_code>(statusCode)), std::move(statusDetail), TError::DisableFormat)
             << TErrorAttribute("status_code", statusCode);
     }
 
     void RecordReceivedTrailingMetadata(
-        grpc_metadata_batch* /*recv_trailing_metadata*/) override
+        y_absl::Status /*status*/,
+        grpc_metadata_batch* /*recv_trailing_metadata*/,
+        const grpc_transport_stream_stats* /*transport_stream_stats*/) override
     { }
 
-    void RecordEnd(const grpc_call_final_info* /*final_info*/) override
+    void RecordEnd(const gpr_timespec& /*latency*/) override
     { }
 
 private:
@@ -166,7 +168,7 @@ public:
         if (!TerminationError_.IsOK()) {
             auto error = TerminationError_;
             guard.Release();
-            responseHandler->HandleError(error);
+            responseHandler->HandleError(std::move(error));
             return nullptr;
         }
         return New<TCallHandler>(
@@ -214,10 +216,16 @@ public:
         YT_UNIMPLEMENTED();
     }
 
+    const IMemoryUsageTrackerPtr& GetChannelMemoryTracker() override
+    {
+        return MemoryUsageTracker_;
+    }
+
 private:
     const TChannelConfigPtr Config_;
     const TString EndpointAddress_;
     const IAttributeDictionaryPtr EndpointAttributes_;
+    const IMemoryUsageTrackerPtr MemoryUsageTracker_ = GetNullMemoryUsageTracker();
 
     TSingleShotCallbackList<void(const TError&)> Terminated_;
 
@@ -244,7 +252,6 @@ private:
             , Request_(std::move(request))
             , ResponseHandler_(std::move(responseHandler))
             , GuardedCompletionQueue_(TDispatcher::Get()->PickRandomGuardedCompletionQueue())
-            , Logger(GrpcLogger)
         {
             YT_LOG_DEBUG("Sending request (RequestId: %v, Method: %v.%v, Timeout: %v)",
                 Request_->GetRequestId(),
@@ -262,13 +269,13 @@ private:
                 auto methodSlice = BuildGrpcMethodString();
                 Call_ = TGrpcCallPtr(grpc_channel_create_call(
                     Owner_->Channel_.Unwrap(),
-                    nullptr,
-                    0,
+                    /*parent_call*/ nullptr,
+                    /*propagation_mask*/ 0,
                     completionQueueGuard->Unwrap(),
                     methodSlice,
-                    nullptr,
+                    /*host*/ nullptr,
                     GetDeadline(),
-                    nullptr));
+                    /*reserved*/ nullptr));
                 grpc_slice_unref(methodSlice);
 
                 Tracer_ = New<TGrpcCallTracer>();
@@ -335,6 +342,13 @@ private:
                 responseHandler->HandleError(TError(NRpc::EErrorCode::TransportError, "Request serialization failed")
                     << ex);
                 return;
+            }
+
+            if (Request_->Header().has_request_codec()) {
+                InitialMetadataBuilder_.Add(RequestCodecKey, ToString(Request_->Header().request_codec()));
+            }
+            if (Request_->Header().has_response_codec()) {
+                InitialMetadataBuilder_.Add(ResponseCodecKey, ToString(Request_->Header().response_codec()));
             }
 
             YT_VERIFY(RequestBody_.Size() >= 2);
@@ -433,16 +447,15 @@ private:
         const TSendOptions Options_;
         const IClientRequestPtr Request_;
 
+        const NLogging::TLogger& Logger = GrpcLogger();
+
         YT_DECLARE_SPIN_LOCK(NThreading::TSpinLock, ResponseHandlerLock_);
         IClientResponseHandlerPtr ResponseHandler_;
 
         // Completion queue must be accessed under read lock
         // in order to prohibit creating new requests after shutting completion queue down.
         TGuardedGrpcCompletionQueue* GuardedCompletionQueue_;
-        const NLogging::TLogger& Logger;
-
         NYT::NTracing::TTraceContextHandler TraceContext_;
-
         TGrpcCallPtr Call_;
         TGrpcCallTracerPtr Tracer_;
         TSharedRefArray RequestBody_;
@@ -580,7 +593,7 @@ private:
                 if (serializedError) {
                     error = DeserializeError(serializedError);
                 } else {
-                    error = TError(StatusCodeToErrorCode(ResponseStatusCode_), ResponseStatusDetails_.AsString())
+                    error = TError(StatusCodeToErrorCode(ResponseStatusCode_), ResponseStatusDetails_.AsString(), TError::DisableFormat)
                         << TErrorAttribute("status_code", ResponseStatusCode_);
                 }
                 NotifyError(TStringBuf("Request failed"), error);
@@ -607,19 +620,23 @@ private:
                 }
             }
 
+            NRpc::NProto::TResponseHeader responseHeader;
+            ToProto(responseHeader.mutable_request_id(), Request_->GetRequestId());
+            if (Request_->Header().has_response_codec()) {
+                responseHeader.set_codec(Request_->Header().response_codec());
+            }
+
             TMessageWithAttachments messageWithAttachments;
             try {
                 messageWithAttachments = ByteBufferToMessageWithAttachments(
                     ResponseBodyBuffer_.Unwrap(),
-                    messageBodySize);
+                    messageBodySize,
+                    !responseHeader.has_codec());
             } catch (const std::exception& ex) {
                 auto error = TError(NRpc::EErrorCode::TransportError, "Failed to receive request body") << ex;
                 NotifyError(TStringBuf("Failed to receive request body"), error);
                 return;
             }
-
-            NRpc::NProto::TResponseHeader responseHeader;
-            ToProto(responseHeader.mutable_request_id(), Request_->GetRequestId());
 
             auto responseMessage = CreateResponseMessage(
                 responseHeader,
@@ -673,7 +690,7 @@ private:
                 reason,
                 Request_->GetRequestId());
 
-            responseHandler->HandleError(detailedError);
+            responseHandler->HandleError(std::move(detailedError));
         }
 
         void NotifyResponse(TSharedRefArray message)

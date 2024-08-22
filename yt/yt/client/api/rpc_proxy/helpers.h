@@ -137,6 +137,14 @@ void FromProto(
     const NProto::TQueryStatistics& protoStatistics);
 
 void ToProto(
+    NProto::TVersionedReadOptions* protoOptions,
+    const NTableClient::TVersionedReadOptions& options);
+
+void FromProto(
+    NTableClient::TVersionedReadOptions* options,
+    const NProto::TVersionedReadOptions& protoOptions);
+
+void ToProto(
     NProto::TOperation* protoOperation,
     const NApi::TOperation& operation);
 
@@ -204,6 +212,38 @@ void FromProto(
     NQueueClient::TQueueRowBatchReadOptions* result,
     const NProto::TRowBatchReadOptions& proto);
 
+void ToProto(
+    NProto::TTableBackupManifest* protoManifest,
+    const NApi::TTableBackupManifestPtr& manifest);
+
+void FromProto(
+    NApi::TTableBackupManifestPtr* manifest,
+    const NProto::TTableBackupManifest& protoManifest);
+
+void ToProto(
+    NProto::TBackupManifest::TClusterManifest* protoEntry,
+    const std::pair<TString, std::vector<NApi::TTableBackupManifestPtr>>& entry);
+
+void FromProto(
+    std::pair<TString, std::vector<NApi::TTableBackupManifestPtr>>* entry,
+    const NProto::TBackupManifest::TClusterManifest& protoEntry);
+
+void ToProto(
+    NProto::TBackupManifest* protoManifest,
+    const NApi::TBackupManifest& manifest);
+
+void FromProto(
+    NApi::TBackupManifest* manifest,
+    const NProto::TBackupManifest& protoManifest);
+
+void ToProto(
+    NProto::TQuery* protoQuery,
+    const NApi::TQuery& query);
+
+void FromProto(
+    NApi::TQuery* query,
+    const NProto::TQuery& protoQuery);
+
 NProto::EOperationType ConvertOperationTypeToProto(
     NScheduler::EOperationType operationType);
 
@@ -228,11 +268,25 @@ NProto::EJobState ConvertJobStateToProto(
 NJobTrackerClient::EJobState ConvertJobStateFromProto(
     NProto::EJobState proto);
 
+NProto::EQueryEngine ConvertQueryEngineToProto(
+    NQueryTrackerClient::EQueryEngine queryEngine);
+
+NQueryTrackerClient::EQueryEngine ConvertQueryEngineFromProto(
+    NProto::EQueryEngine proto);
+
+NProto::EQueryState ConvertQueryStateToProto(
+    NQueryTrackerClient::EQueryState queryState);
+
+NQueryTrackerClient::EQueryState ConvertQueryStateFromProto(
+    NProto::EQueryState proto);
 } // namespace NProto
 
 ////////////////////////////////////////////////////////////////////////////////
 
-bool IsRetriableError(const TError& error, bool retryProxyBanned = true);
+bool IsRetriableError(
+    const TError& error,
+    bool retryProxyBanned = true,
+    bool retrySequoiaErrorsOnly = false);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -256,7 +310,8 @@ std::vector<TSharedRef> SerializeRowset(
 template <class TRow>
 TIntrusivePtr<NApi::IRowset<TRow>> DeserializeRowset(
     const NProto::TRowsetDescriptor& descriptor,
-    const TSharedRef& data);
+    const TSharedRef& data,
+    NTableClient::TRowBufferPtr buffer = nullptr);
 
 std::vector<TSharedRef> SerializeRowset(
     const NTableClient::TTableSchema& schema,

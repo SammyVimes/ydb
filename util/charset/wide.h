@@ -49,8 +49,8 @@ namespace NDetail {
 
     inline wchar32 ReadSurrogatePair(const wchar16* chars) noexcept {
         const wchar32 SURROGATE_OFFSET = static_cast<wchar32>(0x10000 - (0xD800 << 10) - 0xDC00);
-        wchar16 lead = chars[0];
-        wchar16 tail = chars[1];
+        wchar32 lead = chars[0];
+        wchar32 tail = chars[1];
 
         Y_ASSERT(IsW16SurrogateLead(lead));
         Y_ASSERT(IsW16SurrogateTail(tail));
@@ -98,7 +98,7 @@ inline wchar32 ReadSymbol(const wchar32* begin, const wchar32* end) noexcept {
 }
 
 //! presuming input data is either big enought of null terminated
-inline wchar32 ReadSymbolAndAdvance(const wchar16*& begin) noexcept {
+inline wchar32 ReadSymbolAndAdvance(const char16_t*& begin) noexcept {
     Y_ASSERT(*begin);
     if (IsW16SurrogateLead(begin[0])) {
         if (IsW16SurrogateTail(begin[1])) {
@@ -117,12 +117,30 @@ inline wchar32 ReadSymbolAndAdvance(const wchar16*& begin) noexcept {
 }
 
 //! presuming input data is either big enought of null terminated
-inline wchar32 ReadSymbolAndAdvance(const wchar32*& begin) noexcept {
+inline wchar32 ReadSymbolAndAdvance(const char32_t*& begin) noexcept {
     Y_ASSERT(*begin);
     return *(begin++);
 }
 
-inline wchar32 ReadSymbolAndAdvance(const wchar16*& begin, const wchar16* end) noexcept {
+inline wchar32 ReadSymbolAndAdvance(const wchar_t*& begin) noexcept {
+    // According to
+    // https://en.cppreference.com/w/cpp/language/types
+    // wchar_t holds UTF-16 on Windows and UTF-32 on Linux / macOS
+    //
+    // Apply reinterpret cast and dispatch to a proper type
+
+#ifdef _win_
+    using TDistinctChar = char16_t;
+#else
+    using TDistinctChar = char32_t;
+#endif
+    const TDistinctChar*& distinctBegin = reinterpret_cast<const TDistinctChar*&>(begin);
+    wchar32 result = ReadSymbolAndAdvance(distinctBegin);
+    begin = reinterpret_cast<const wchar_t*&>(distinctBegin);
+    return result;
+}
+
+inline wchar32 ReadSymbolAndAdvance(const char16_t*& begin, const char16_t* end) noexcept {
     Y_ASSERT(begin < end);
     if (IsW16SurrogateLead(begin[0])) {
         if (begin + 1 != end && IsW16SurrogateTail(begin[1])) {
@@ -142,6 +160,25 @@ inline wchar32 ReadSymbolAndAdvance(const wchar16*& begin, const wchar16* end) n
 inline wchar32 ReadSymbolAndAdvance(const wchar32*& begin, const wchar32* end) noexcept {
     Y_ASSERT(begin < end);
     return *(begin++);
+}
+
+inline wchar32 ReadSymbolAndAdvance(const wchar_t*& begin, const wchar_t* end) noexcept {
+    // According to
+    // https://en.cppreference.com/w/cpp/language/types
+    // wchar_t holds UTF-16 on Windows and UTF-32 on Linux / macOS
+    //
+    // Apply reinterpret cast and dispatch to a proper type
+
+#ifdef _win_
+    using TDistinctChar = char16_t;
+#else
+    using TDistinctChar = char32_t;
+#endif
+    const TDistinctChar* distinctBegin = reinterpret_cast<const TDistinctChar*>(begin);
+    const TDistinctChar* distinctEnd = reinterpret_cast<const TDistinctChar*>(end);
+    wchar32 result = ::ReadSymbolAndAdvance(distinctBegin, distinctEnd);
+    begin = reinterpret_cast<const wchar_t*>(distinctBegin);
+    return result;
 }
 
 template <class T>
@@ -304,7 +341,7 @@ inline size_t UTF8ToWideImpl(const char* text, size_t len, TCharType* dest, size
     const unsigned char* cur = reinterpret_cast<const unsigned char*>(text);
     const unsigned char* last = cur + len;
     TCharType* p = dest;
-#ifdef _sse_ //can't check for sse4, as we build most of arcadia without sse4 support even on platforms that support it
+#ifdef _sse_ // can't check for sse4, as we build most of arcadia without sse4 support even on platforms that support it
     if (cur + 16 <= last && NX86::CachedHaveSSE41()) {
         ::NDetail::UTF8ToWideImplSSE41(cur, last, p);
     }
@@ -427,6 +464,16 @@ inline TString WideToUTF8(const wchar16* text, size_t len) {
     s.remove(written);
     return s;
 }
+
+#if defined(_win_)
+inline TString WideToUTF8(const wchar_t* text, size_t len) {
+    return WideToUTF8(reinterpret_cast<const wchar16*>(text), len);
+}
+
+inline std::string WideToUTF8(std::wstring_view text) {
+    return WideToUTF8(text.data(), text.size()).ConstRef();
+}
+#endif
 
 inline TString WideToUTF8(const wchar32* text, size_t len) {
     TString s = TString::Uninitialized(WideToUTF8BufferSize(len));
@@ -559,7 +606,7 @@ namespace NDetail {
 
 #ifdef _sse2_
     inline bool DoIsStringASCIISSE(const unsigned char* first, const unsigned char* last) {
-        //scalar version for short strings
+        // scalar version for short strings
         if (first + 8 > last) {
             return ::NDetail::DoIsStringASCIISlow(first, last);
         }
@@ -590,7 +637,7 @@ namespace NDetail {
 
         return ::NDetail::DoIsStringASCIISlow(first, last);
     }
-#endif //_sse2_
+#endif // _sse2_
 
 }
 

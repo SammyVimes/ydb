@@ -1,7 +1,6 @@
 #include "config.h"
 #include "control_plane_proxy.h"
 #include "probes.h"
-#include "utils.h"
 
 #include <ydb/core/fq/libs/actors/logging/log.h>
 #include <ydb/core/fq/libs/compute/ydb/control_plane/compute_database_control_plane_service.h>
@@ -23,6 +22,7 @@
 #include <ydb/core/fq/libs/control_plane_proxy/actors/utils.h>
 #include <ydb/core/fq/libs/control_plane_proxy/actors/ydb_schema_query_actor.h>
 #include <ydb/core/fq/libs/control_plane_proxy/events/events.h>
+#include <ydb/core/fq/libs/control_plane_proxy/utils/utils.h>
 #include <ydb/public/lib/fq/scope.h>
 
 #include <ydb/library/actors/core/actor.h>
@@ -105,7 +105,7 @@ public:
     }
 
     void HandleTimeout() {
-        CPP_LOG_D("Quota request timeout. Cloud id: " << Event->Get()->CloudId << " Actor id: " << SelfId());
+        CPP_LOG_W("Quota request timeout. Cloud id: " << Event->Get()->CloudId << " Actor id: " << SelfId());
         Send(MakeQuotaServiceActorId(SelfId().NodeId()), new TEvQuotaService::TQuotaGetRequest(SUBJECT_TYPE_CLOUD, Event->Get()->CloudId, true));
     }
 };
@@ -183,7 +183,7 @@ public:
     )
 
     void HandleTimeout() {
-        CPP_LOG_D("Resolve subject type timeout. Token: " << MaskTicket(Token) << " Actor id: " << SelfId());
+        CPP_LOG_W("Resolve subject type timeout. Token: " << MaskTicket(Token) << " Actor id: " << SelfId());
         NYql::TIssues issues;
         NYql::TIssue issue = MakeErrorIssue(TIssuesIds::TIMEOUT, "Request (resolve subject type) timeout. Try repeating the request later");
         issues.AddIssue(issue);
@@ -196,8 +196,6 @@ public:
     }
 
     void Handle(NCloud::TEvAccessService::TEvAuthenticateResponse::TPtr& ev) {
-        Counters->InFly->Dec();
-        Counters->LatencyMs->Collect((TInstant::Now() - StartTime).MilliSeconds());
         const auto& response = ev->Get()->Response;
         const auto& status = ev->Get()->Status;
         if (!status.Ok() || !response.has_subject()) {
@@ -209,19 +207,22 @@ public:
                 TActivationContext::Schedule(*delay, new IEventHandle(AccessService, static_cast<const TActorId&>(SelfId()), CreateRequest().release()));
                 return;
             }
+            const TDuration delta = TInstant::Now() - StartTime;
+            Counters->InFly->Dec();
+            Counters->LatencyMs->Collect((delta).MilliSeconds());
             Counters->Error->Inc();
             CPP_LOG_E(errorMessage);
             NYql::TIssues issues;
             NYql::TIssue issue = MakeErrorIssue(TIssuesIds::INTERNAL_ERROR, "Resolve subject type error");
             issues.AddIssue(issue);
-            Counters->Error->Inc();
-            const TDuration delta = TInstant::Now() - StartTime;
             Probe(delta, false, false);
             Send(Sender, new TResponseProxy(issues, {}), 0, Cookie);
             PassAway();
             return;
         }
 
+        Counters->InFly->Dec();
+        Counters->LatencyMs->Collect((TInstant::Now() - StartTime).MilliSeconds());
         Counters->Ok->Inc();
         TString subjectType = GetSubjectType(response.subject());
         Event->Get()->SubjectType = subjectType;
@@ -319,7 +320,7 @@ public:
     )
 
     void HandleTimeout() {
-        CPP_LOG_D("Resolve folder timeout. Folder id: " << FolderId << " Actor id: " << SelfId());
+        CPP_LOG_W("Resolve folder timeout. Folder id: " << FolderId << " Actor id: " << SelfId());
         NYql::TIssues issues;
         NYql::TIssue issue = MakeErrorIssue(TIssuesIds::TIMEOUT, "Request timeout. Try repeating the request later");
         issues.AddIssue(issue);
@@ -332,8 +333,7 @@ public:
     }
 
     void Handle(NKikimr::NFolderService::TEvFolderService::TEvGetCloudByFolderResponse::TPtr& ev) {
-        Counters->InFly->Dec();
-        Counters->LatencyMs->Collect((TInstant::Now() - StartTime).MilliSeconds());
+
         const auto& status = ev->Get()->Status;
         if (!status.Ok() || ev->Get()->CloudId.empty()) {
             TString errorMessage = "Msg: " + status.Msg + " Details: " + status.Details + " Code: " + ToString(status.GRpcStatusCode) + " InternalError: " + ToString(status.InternalError);
@@ -344,18 +344,22 @@ public:
                 TActivationContext::Schedule(*delay, new IEventHandle(NKikimr::NFolderService::FolderServiceActorId(), static_cast<const TActorId&>(SelfId()), CreateRequest().release()));
                 return;
             }
+            const TDuration delta = TInstant::Now() - StartTime;
+            Counters->InFly->Dec();
+            Counters->LatencyMs->Collect((delta).MilliSeconds());
             Counters->Error->Inc();
             CPP_LOG_E(errorMessage);
             NYql::TIssues issues;
             NYql::TIssue issue = MakeErrorIssue(TIssuesIds::INTERNAL_ERROR, "Resolve folder error");
             issues.AddIssue(issue);
-            const TDuration delta = TInstant::Now() - StartTime;
             Probe(delta, false, false);
             Send(Sender, new TResponseProxy(issues, {}), 0, Cookie);
             PassAway();
             return;
         }
 
+        Counters->InFly->Dec();
+        Counters->LatencyMs->Collect((TInstant::Now() - StartTime).MilliSeconds());
         Counters->Ok->Inc();
         TString cloudId = ev->Get()->CloudId;
         Event->Get()->CloudId = cloudId;
@@ -446,7 +450,7 @@ public:
     )
 
     void HandleTimeout() {
-        CPP_LOG_D("Create database timeout. CloudId: " << CloudId << " Scope: " << Scope << " Actor id: " << SelfId());
+        CPP_LOG_W("Create database timeout. CloudId: " << CloudId << " Scope: " << Scope << " Actor id: " << SelfId());
         NYql::TIssues issues;
         NYql::TIssue issue = MakeErrorIssue(TIssuesIds::TIMEOUT, "Create database: request timeout. Try repeating the request later");
         issues.AddIssue(issue);
@@ -1446,6 +1450,7 @@ private:
                                                              Counters,
                                                              availablePermissions,
                                                              Config.CommonConfig,
+                                                             Config.ComputeConfig,
                                                              Signer));
                 return;
             }
@@ -1742,6 +1747,7 @@ private:
                     Config.RequestTimeout,
                     Counters,
                     Config.CommonConfig,
+                    Config.ComputeConfig,
                     Signer));
                 return;
             }
@@ -2069,7 +2075,8 @@ private:
                                             std::move(ev),
                                             Config.RequestTimeout,
                                             Counters,
-                                            availablePermissions));
+                                            availablePermissions,
+                                            Config.ComputeConfig));
             return;
         }
 
@@ -2356,7 +2363,8 @@ private:
                 Register(MakeModifyBindingActor(ControlPlaneProxyActorId(),
                                                 std::move(ev),
                                                 Config.RequestTimeout,
-                                                Counters));
+                                                Counters,
+                                                Config.ComputeConfig));
                 return;
             }
             Send(sender, ev->Get()->Response.release());

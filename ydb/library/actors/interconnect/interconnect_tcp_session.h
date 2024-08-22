@@ -33,6 +33,9 @@
 #include <unordered_map>
 
 namespace NActors {
+
+    static constexpr ui64 StarvingInRowForNotEnoughCpu = 32;
+
     class TSlowPathChecker {
         using TTraceCallback = std::function<void(double)>;
         TTraceCallback Callback;
@@ -299,6 +302,8 @@ namespace NActors {
         std::array<ui32, 16> InputTrafficArray;
         THashMap<ui16, ui32> InputTrafficMap;
 
+        ui64 StarvingInRow = 0;
+
         bool CloseInputSessionRequested = false;
 
         void CloseInputSession();
@@ -440,7 +445,9 @@ namespace NActors {
         void Terminate(TDisconnectReason reason);
         void PassAway() override;
 
+        void Enqueue(STATEFN_SIG);
         void Forward(STATEFN_SIG);
+        void ForwardDelayed();
         void Subscribe(STATEFN_SIG);
         void Unsubscribe(STATEFN_SIG);
 
@@ -451,6 +458,7 @@ namespace NActors {
             TimeLimit.emplace(GetMaxCyclesPerEvent());
             STRICT_STFUNC_BODY(
                 fFunc(TEvInterconnect::EvForward, Forward)
+                cFunc(TEvInterconnect::EvForwardDelayed, ForwardDelayed)
                 cFunc(TEvents::TEvPoisonPill::EventType, HandlePoison)
                 fFunc(TEvInterconnect::TEvConnectNode::EventType, Subscribe)
                 fFunc(TEvents::TEvSubscribe::EventType, Subscribe)
@@ -606,6 +614,12 @@ namespace NActors {
 
         std::unordered_map<TActorId, ui64, TActorId::THash> Subscribers;
 
+        struct TDelayedEvent {
+            TAutoPtr<IEventHandle> Event;
+            NWilson::TSpan Span;
+        };
+        std::deque<TDelayedEvent> DelayedEvents;
+
         // time at which we want to send confirmation packet even if there was no outgoing data
         ui64 UnconfirmedBytes = 0;
         TMonotonic ForcePacketTimestamp = TMonotonic::Max();
@@ -634,6 +648,8 @@ namespace NActors {
         bool StartHandshakeOnSessionClose = false;
 
         ui64 EqualizeCounter = 0;
+
+        ui64 StarvingInRow = 0;
     };
 
     class TInterconnectSessionKiller

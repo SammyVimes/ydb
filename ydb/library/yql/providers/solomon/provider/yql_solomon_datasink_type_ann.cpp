@@ -54,13 +54,14 @@ private:
 
             for (auto* structItem : structType->GetItems()) {
                 const auto itemName = structItem->GetName();
-                const auto* itemType = structItem->GetItemType();
-                if (itemType->GetKind() == ETypeAnnotationKind::Optional) {
-                    ctx.AddError(TIssue(ctx.GetPosition(write.Input().Pos()), TStringBuilder() << "Optional types are not supported in writing into Monitoring. FieldName: " << itemName));
+                const TDataExprType* itemType = nullptr;
+
+                bool isOptional = false;
+                if (!IsDataOrOptionalOfData(structItem->GetItemType(), isOptional, itemType)) {
                     return TStatus::Error;
                 }
 
-                const auto dataType = NUdf::GetDataTypeInfo(itemType->Cast<TDataExprType>()->GetSlot());
+                const auto dataType = NUdf::GetDataTypeInfo(itemType->GetSlot());
 
                 if (dataType.Features & NUdf::DateType || dataType.Features & NUdf::TzDateType) {
                     if (hasTimestampMember) {
@@ -68,7 +69,15 @@ private:
                         return TStatus::Error;
                     }
                     hasTimestampMember = true;
-                } else if (dataType.Features & NUdf::StringType) {
+                    continue;
+                }
+
+                if (isOptional) {
+                    ctx.AddError(TIssue(ctx.GetPosition(write.Input().Pos()), TStringBuilder() << "Optional types for labels and metric values are not supported in writing into Monitoring. FieldName: " << itemName));
+                    return TStatus::Error;
+                }
+                
+                if (dataType.Features & NUdf::StringType) {
                     labelMembers++;
                 } else if (dataType.Features & NUdf::NumericType) {
                     sensorMembers++;
@@ -106,7 +115,7 @@ private:
     TStatus HandleSoShard(TExprBase input, TExprContext& ctx) {
         YQL_ENSURE(!State_->IsRtmrMode(), "SoShard can't be used in rtmr mode");
 
-        if (!EnsureMinArgsCount(input.Ref(), 4, ctx) || !EnsureMaxArgsCount(input.Ref(), 5, ctx)) {
+        if (!EnsureMinMaxArgsCount(input.Ref(), 5, 6, ctx)) {
             return TStatus::Error;
         }
 
@@ -125,6 +134,10 @@ private:
         }
 
         if (!EnsureAtom(shard.Service().Ref(), ctx)) {
+            return TStatus::Error;
+        }
+
+        if (!EnsureType(shard.RowType().Ref(), ctx)) {
             return TStatus::Error;
         }
 

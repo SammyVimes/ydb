@@ -24,7 +24,7 @@ TEST(TBuildValidityBitmapFromDictionaryIndexesWithZeroNullTest, LessThanByte)
     std::array<ui32, 6> indexes{0, 0, 1, 3, 4, 0};
     ui8 result;
     BuildValidityBitmapFromDictionaryIndexesWithZeroNull(
-        MakeRange(indexes),
+        TRange(indexes),
         TMutableRef(&result, 1));
     EXPECT_EQ(0x1c, result);
 }
@@ -37,7 +37,7 @@ TEST(TBuildValidityBitmapFromDictionaryIndexesWithZeroNullTest, TenBytes)
     }
     std::array<ui8, indexes.size() / 8> result;
     BuildValidityBitmapFromDictionaryIndexesWithZeroNull(
-        MakeRange(indexes),
+        TRange(indexes),
         TMutableRef(&result, result.size()));
     for (int i = 0; i < std::ssize(result); ++i) {
         EXPECT_EQ(0xaa, result[i]);
@@ -52,7 +52,7 @@ TEST(TBuildValidityBitmapFromDictionaryIndexesWithZeroNullTest, ManyBits)
     }
     std::array<ui8, indexes.size() / 8 + 1> result;
     BuildValidityBitmapFromDictionaryIndexesWithZeroNull(
-        MakeRange(indexes),
+        TRange(indexes),
         TMutableRef(&result, result.size()));
     for (int i = 0; i < std::ssize(result) - 1; ++i) {
         EXPECT_EQ(0xaa, result[i]);
@@ -74,8 +74,8 @@ TEST(TBuildDictionaryIndexesFromDictionaryIndexesWithZeroNullTest, NonEmpty)
     std::array<ui32, 6> indexes{0, 1, 2, 3, 4, 5};
     std::array<ui32, indexes.size()> result;
     BuildDictionaryIndexesFromDictionaryIndexesWithZeroNull(
-        MakeRange(indexes),
-        MakeMutableRange(result));
+        TRange(indexes),
+        TMutableRange(result));
     for (int i = 1; i < std::ssize(result); ++i) {
         EXPECT_EQ(indexes[i] - 1, result[i]);
     }
@@ -91,7 +91,7 @@ TEST(TCountNullsInDictionaryIndexesWithZeroNullTest, Empty)
 TEST(TCountNullsInDictionaryIndexesWithZeroNullTest, NonEmpty)
 {
     std::array<ui32, 6> indexes{0, 1, 2, 0, 4, 5};
-    EXPECT_EQ(2, CountNullsInDictionaryIndexesWithZeroNull(MakeRange(indexes)));
+    EXPECT_EQ(2, CountNullsInDictionaryIndexesWithZeroNull(TRange(indexes)));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -201,15 +201,15 @@ INSTANTIATE_TEST_SUITE_P(
     TCopyBitmapRangeToBitmapTest,
     TCopyBitmapRangeToBitmapTest,
     ::testing::Values(
-        std::make_tuple(  0,   0),
-        std::make_tuple(  0,  64),
-        std::make_tuple(  0, 192),
-        std::make_tuple( 64, 128),
-        std::make_tuple(  8,  16),
-        std::make_tuple( 10,  13),
-        std::make_tuple(  5, 120),
-        std::make_tuple( 23,  67),
-        std::make_tuple(  1, 191)));
+        std::tuple(  0,   0),
+        std::tuple(  0,  64),
+        std::tuple(  0, 192),
+        std::tuple( 64, 128),
+        std::tuple(  8,  16),
+        std::tuple( 10,  13),
+        std::tuple(  5, 120),
+        std::tuple( 23,  67),
+        std::tuple(  1, 191)));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -217,7 +217,7 @@ TEST(TTranslateRleIndexTest, CheckAll)
 {
     std::array<ui64, 8> rleIndexes{0, 1, 3, 10, 11, 15, 20, 21};
     for (ui64 i = 0; i < rleIndexes[rleIndexes.size() - 1] + 10; ++i) {
-        auto j = TranslateRleIndex(MakeRange(rleIndexes), i);
+        auto j = TranslateRleIndex(TRange(rleIndexes), i);
         EXPECT_LE(rleIndexes[j], i);
         if (j < std::ssize(rleIndexes) - 1) {
             EXPECT_LT(i, rleIndexes[j + 1]);
@@ -256,13 +256,13 @@ INSTANTIATE_TEST_SUITE_P(
     TDecodeRleVectorTest,
     TDecodeRleVectorTest,
     ::testing::Values(
-        std::make_tuple(  0,   0, std::vector<int>{}),
-        std::make_tuple(  0,   1, std::vector<int>{1}),
-        std::make_tuple(  0,   5, std::vector<int>{1, 2, 2, 2, 2}),
-        std::make_tuple(  9,  13, std::vector<int>{2, 3, 4, 4}),
-        std::make_tuple( 20,  25, std::vector<int>{5, 5, 5, 5, 5}),
-        std::make_tuple( 25,  27, std::vector<int>{6, 6}),
-        std::make_tuple( 50,  53, std::vector<int>{6, 6, 6})));
+        std::tuple(  0,   0, std::vector<int>{}),
+        std::tuple(  0,   1, std::vector<int>{1}),
+        std::tuple(  0,   5, std::vector<int>{1, 2, 2, 2, 2}),
+        std::tuple(  9,  13, std::vector<int>{2, 3, 4, 4}),
+        std::tuple( 20,  25, std::vector<int>{5, 5, 5, 5, 5}),
+        std::tuple( 25,  27, std::vector<int>{6, 6}),
+        std::tuple( 50,  53, std::vector<int>{6, 6, 6})));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -291,7 +291,7 @@ TEST_F(TDecodeStringsTest, Single)
 {
     std::vector<ui32> result;
     for (int index = 0; index <= std::ssize(Offsets); ++index) {
-        result.push_back(DecodeStringOffset(MakeRange(Offsets), AvgLength, index));
+        result.push_back(DecodeStringOffset(TRange(Offsets), AvgLength, index));
     }
     EXPECT_EQ(Expected, result);
 }
@@ -301,10 +301,10 @@ TEST_F(TDecodeStringsTest, Multiple)
     for (int i = 0; i <= std::ssize(Offsets); ++i) {
         for (int j = i; j <= std::ssize(Offsets); ++j) {
             std::vector<ui32> result(j - i + 1);
-            DecodeStringOffsets(MakeRange(Offsets), AvgLength, i, j, MakeMutableRange(result));
+            DecodeStringOffsets(TRange(Offsets), AvgLength, i, j, TMutableRange(result));
             std::vector<ui32> expected;
             for (int k = i; k <= j; ++k) {
-                expected.push_back(Expected[k] - DecodeStringOffset(MakeRange(Offsets), AvgLength, i));
+                expected.push_back(Expected[k] - DecodeStringOffset(TRange(Offsets), AvgLength, i));
             }
             EXPECT_EQ(expected, result);
         }
@@ -317,11 +317,11 @@ TEST_F(TDecodeStringsTest, PointersAndLengths)
     std::vector<const char*> strings(Offsets.size());
     std::vector<i32> lengths(Offsets.size());
     DecodeStringPointersAndLengths(
-        MakeRange(Offsets),
+        TRange(Offsets),
         AvgLength,
         TRef(chars.data(), chars.size()),
-        MakeMutableRange(strings),
-        MakeMutableRange(lengths));
+        TMutableRange(strings),
+        TMutableRange(lengths));
     for (int i = 0; i < std::ssize(Offsets); ++i) {
         EXPECT_EQ(Expected[i], strings[i] - chars.data());
         EXPECT_EQ(static_cast<ssize_t>(Expected[i + 1] - Expected[i]), lengths[i]);
@@ -354,8 +354,8 @@ TEST_P(TDecodeNullsFromRleDictionaryIndexesWithZeroNullTest, ValidityBitmap)
     auto [startIndex, endIndex] = GetParam();
     std::vector<ui8> bitmap(GetBitmapByteSize(endIndex - startIndex));
     BuildValidityBitmapFromRleDictionaryIndexesWithZeroNull(
-        MakeRange(DictionaryIndexes),
-        MakeRange(RleIndexes),
+        TRange(DictionaryIndexes),
+        TRange(RleIndexes),
         startIndex,
         endIndex,
         TMutableRef(bitmap.data(), bitmap.size()));
@@ -370,11 +370,11 @@ TEST_P(TDecodeNullsFromRleDictionaryIndexesWithZeroNullTest, NullBytemap)
     auto [startIndex, endIndex] = GetParam();
     std::vector<ui8> bytemap(endIndex - startIndex);
     BuildNullBytemapFromRleDictionaryIndexesWithZeroNull(
-        MakeRange(DictionaryIndexes),
-        MakeRange(RleIndexes),
+        TRange(DictionaryIndexes),
+        TRange(RleIndexes),
         startIndex,
         endIndex,
-        MakeMutableRange(bytemap));
+        TMutableRange(bytemap));
     for (int i = startIndex; i < endIndex; ++i) {
         EXPECT_TRUE(bytemap[i - startIndex] == 0 || bytemap[i - startIndex] == 1);
         EXPECT_EQ(Expected[i], bytemap[i - startIndex] == 0)
@@ -386,13 +386,13 @@ INSTANTIATE_TEST_SUITE_P(
     TDecodeNullsFromRleDictionaryIndexesWithZeroNullTest,
     TDecodeNullsFromRleDictionaryIndexesWithZeroNullTest,
     ::testing::Values(
-        std::make_tuple(  0,   0),
-        std::make_tuple(  0, 800),
-        std::make_tuple(256, 512),
-        std::make_tuple( 10,  20),
-        std::make_tuple( 10,  20),
-        std::make_tuple( 20, 100),
-        std::make_tuple( 90, 110)));
+        std::tuple(  0,   0),
+        std::tuple(  0, 800),
+        std::tuple(256, 512),
+        std::tuple( 10,  20),
+        std::tuple( 10,  20),
+        std::tuple( 20, 100),
+        std::tuple( 90, 110)));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -413,11 +413,11 @@ TEST_P(TBuildDictionaryIndexesFromRleDictionaryIndexesWithZeroNullTest, CheckAll
     auto [startIndex, endIndex] = GetParam();
     std::vector<ui32> result(endIndex - startIndex);
     BuildDictionaryIndexesFromRleDictionaryIndexesWithZeroNull(
-        MakeRange(DictionaryIndexes),
-        MakeRange(RleIndexes),
+        TRange(DictionaryIndexes),
+        TRange(RleIndexes),
         startIndex,
         endIndex,
-        MakeMutableRange(result));
+        TMutableRange(result));
     for (int i = startIndex; i < endIndex; ++i) {
         EXPECT_EQ(Expected[i], result[i - startIndex])
             << "i = " << i;
@@ -428,11 +428,11 @@ INSTANTIATE_TEST_SUITE_P(
     TBuildDictionaryIndexesFromRleDictionaryIndexesWithZeroNullTest,
     TBuildDictionaryIndexesFromRleDictionaryIndexesWithZeroNullTest,
     ::testing::Values(
-        std::make_tuple(  0,   0),
-        std::make_tuple(  0,  15),
-        std::make_tuple(  3,   5),
-        std::make_tuple(  1,  10),
-        std::make_tuple( 13,  15)));
+        std::tuple(  0,   0),
+        std::tuple(  0,  15),
+        std::tuple(  3,   5),
+        std::tuple(  1,  10),
+        std::tuple( 13,  15)));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -449,10 +449,10 @@ TEST_P(TBuildIotaDictionaryIndexesFromRleIndexesTest, CheckAll)
     auto [startIndex, endIndex, expected] = GetParam();
     std::vector<ui32> result(endIndex - startIndex);
     BuildIotaDictionaryIndexesFromRleIndexes(
-        MakeRange(RleIndexes),
+        TRange(RleIndexes),
         startIndex,
         endIndex,
-        MakeMutableRange(result));
+        TMutableRange(result));
     EXPECT_EQ(expected, result);
 }
 
@@ -460,11 +460,11 @@ INSTANTIATE_TEST_SUITE_P(
     TBuildIotaDictionaryIndexesFromRleIndexesTest,
     TBuildIotaDictionaryIndexesFromRleIndexesTest,
     ::testing::Values(
-        std::make_tuple(  0,   0, std::vector<ui32>{}),
-        std::make_tuple(  0,  15, std::vector<ui32>{0, 0, 0, 1, 1, 2, 2, 2, 2, 2, 3, 3, 4, 4, 4}),
-        std::make_tuple(  3,   5, std::vector<ui32>{0, 0}),
-        std::make_tuple(  1,  10, std::vector<ui32>{0, 0, 1, 1, 2, 2, 2, 2, 2}),
-        std::make_tuple( 13,  15, std::vector<ui32>{0, 0})));
+        std::tuple(  0,   0, std::vector<ui32>{}),
+        std::tuple(  0,  15, std::vector<ui32>{0, 0, 0, 1, 1, 2, 2, 2, 2, 2, 3, 3, 4, 4, 4}),
+        std::tuple(  3,   5, std::vector<ui32>{0, 0}),
+        std::tuple(  1,  10, std::vector<ui32>{0, 0, 1, 1, 2, 2, 2, 2, 2}),
+        std::tuple( 13,  15, std::vector<ui32>{0, 0})));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -476,17 +476,17 @@ class TCountNullsInDictionaryIndexesWithZeroNullTest
 TEST_P(TCountNullsInDictionaryIndexesWithZeroNullTest, CheckAll)
 {
     const auto& [indexes, expected] = GetParam();
-    EXPECT_EQ(expected, CountNullsInDictionaryIndexesWithZeroNull(MakeRange(indexes)));
+    EXPECT_EQ(expected, CountNullsInDictionaryIndexesWithZeroNull(TRange(indexes)));
 }
 
 INSTANTIATE_TEST_SUITE_P(
     TCountNullsInDictionaryIndexesWithZeroNullTest,
     TCountNullsInDictionaryIndexesWithZeroNullTest,
     ::testing::Values(
-        std::make_tuple(std::vector<ui32>{}, 0),
-        std::make_tuple(std::vector<ui32>{0, 0, 0}, 3),
-        std::make_tuple(std::vector<ui32>{1, 2, 3}, 0),
-        std::make_tuple(std::vector<ui32>{1, 0, 3}, 1)));
+        std::tuple(std::vector<ui32>{}, 0),
+        std::tuple(std::vector<ui32>{0, 0, 0}, 3),
+        std::tuple(std::vector<ui32>{1, 2, 3}, 0),
+        std::tuple(std::vector<ui32>{1, 0, 3}, 1)));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -502,19 +502,19 @@ protected:
 TEST_P(TCountOnesInRleBitmapTest, CheckAll)
 {
     auto [startIndex, endIndex, expected] = GetParam();
-    EXPECT_EQ(expected, CountOnesInRleBitmap(TRef(&Bitmap, 1), MakeRange(RleIndexes), startIndex, endIndex));
+    EXPECT_EQ(expected, CountOnesInRleBitmap(TRef(&Bitmap, 1), TRange(RleIndexes), startIndex, endIndex));
 }
 
 INSTANTIATE_TEST_SUITE_P(
     TCountOnesInRleBitmapTest,
     TCountOnesInRleBitmapTest,
     ::testing::Values(
-        std::make_tuple(  0,   0,   0),
-        std::make_tuple( 50,  60,  10),
-        std::make_tuple( 40,  60,  10),
-        std::make_tuple( 60, 100,  40),
-        std::make_tuple(  3,   5,   0),
-        std::make_tuple(  2,   6,   2)));
+        std::tuple(  0,   0,   0),
+        std::tuple( 50,  60,  10),
+        std::tuple( 40,  60,  10),
+        std::tuple( 60, 100,  40),
+        std::tuple(  3,   5,   0),
+        std::tuple(  2,   6,   2)));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -543,7 +543,7 @@ TEST_P(TDecodeNullsFromRleNullBitmapTest, ValidityBitmap)
     std::vector<ui8> bitmap(GetBitmapByteSize(endIndex - startIndex));
     BuildValidityBitmapFromRleNullBitmap(
         TRef(&Bitmap, 1),
-        MakeRange(RleIndexes),
+        TRange(RleIndexes),
         startIndex,
         endIndex,
         TMutableRef(bitmap.data(), bitmap.size()));
@@ -559,10 +559,10 @@ TEST_P(TDecodeNullsFromRleNullBitmapTest, NullBytemap)
     std::vector<ui8> bytemap(endIndex - startIndex);
     BuildNullBytemapFromRleNullBitmap(
         TRef(&Bitmap, 1),
-        MakeRange(RleIndexes),
+        TRange(RleIndexes),
         startIndex,
         endIndex,
-        MakeMutableRange(bytemap));
+        TMutableRange(bytemap));
     for (int i = startIndex; i < endIndex; ++i) {
         EXPECT_TRUE(bytemap[i - startIndex] == 0 || bytemap[i - startIndex] == 1);
         EXPECT_EQ(Expected[i], bytemap[i - startIndex] == 0)
@@ -574,13 +574,13 @@ INSTANTIATE_TEST_SUITE_P(
     TDecodeNullsFromRleNullBitmapTest,
     TDecodeNullsFromRleNullBitmapTest,
     ::testing::Values(
-        std::make_tuple(  0,   0),
-        std::make_tuple(  0, 800),
-        std::make_tuple(256, 512),
-        std::make_tuple( 10,  20),
-        std::make_tuple( 10,  20),
-        std::make_tuple( 20, 100),
-        std::make_tuple( 90, 110)));
+        std::tuple(  0,   0),
+        std::tuple(  0, 800),
+        std::tuple(256, 512),
+        std::tuple( 10,  20),
+        std::tuple( 10,  20),
+        std::tuple( 20, 100),
+        std::tuple( 90, 110)));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -614,7 +614,7 @@ TEST_P(TDecodeBytemapFromBitmapTest, CheckAll)
         TRef(Bitmap.data(), Bitmap.size()),
         startIndex,
         endIndex,
-        MakeMutableRange(bytemap));
+        TMutableRange(bytemap));
     for (int i = startIndex; i < endIndex; ++i) {
         EXPECT_TRUE(bytemap[i - startIndex] == 0 || bytemap[i - startIndex] == 1);
         EXPECT_EQ(Expected[i], bytemap[i - startIndex])
@@ -626,15 +626,15 @@ INSTANTIATE_TEST_SUITE_P(
     TDecodeBytemapFromBitmapTest,
     TDecodeBytemapFromBitmapTest,
     ::testing::Values(
-        std::make_tuple(  0,    0),
-        std::make_tuple(  18,  19),
-        std::make_tuple(  0,  512),
-        std::make_tuple(  0,  800),
-        std::make_tuple(256,  512),
-        std::make_tuple( 10,   20),
-        std::make_tuple( 10,   20),
-        std::make_tuple( 20,  100),
-        std::make_tuple( 90,  110)));
+        std::tuple(  0,    0),
+        std::tuple(  18,  19),
+        std::tuple(  0,  512),
+        std::tuple(  0,  800),
+        std::tuple(256,  512),
+        std::tuple( 10,   20),
+        std::tuple( 10,   20),
+        std::tuple( 20,  100),
+        std::tuple( 90,  110)));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -661,7 +661,7 @@ protected:
 
         for (int i = 0; i < std::ssize(Offsets); ++i) {
             auto [startOffset, endOffset] = DecodeStringRange(
-                MakeRange(Offsets),
+                TRange(Offsets),
                 AvgLength,
                 i);
             Lengths.push_back(endOffset - startOffset);
@@ -681,18 +681,18 @@ TEST_P(TCountTotalStringLengthInRleDictionaryIndexesWithZeroNullTest, CheckAll)
     auto [startIndex, endIndex] = GetParam();
 
     auto actual = CountTotalStringLengthInRleDictionaryIndexesWithZeroNull(
-        MakeRange(DictionaryIndexes),
-        MakeRange(RleIndexes),
-        MakeRange(Lengths),
+        TRange(DictionaryIndexes),
+        TRange(RleIndexes),
+        TRange(Lengths),
         startIndex,
         endIndex);
 
     i64 expected = 0;
     for (int i = startIndex; i < endIndex; ++i) {
-        int j = TranslateRleIndex(MakeRange(RleIndexes), i);
+        int j = TranslateRleIndex(TRange(RleIndexes), i);
         auto k = DictionaryIndexes[j];
         if (k != 0) {
-            auto [startOffset, endOffset] = DecodeStringRange(MakeRange(Offsets), AvgLength, k - 1);
+            auto [startOffset, endOffset] = DecodeStringRange(TRange(Offsets), AvgLength, k - 1);
             expected += (endOffset - startOffset);
         }
     }
@@ -704,12 +704,12 @@ INSTANTIATE_TEST_SUITE_P(
     TCountTotalStringLengthInRleDictionaryIndexesWithZeroNullTest,
     TCountTotalStringLengthInRleDictionaryIndexesWithZeroNullTest,
     ::testing::Values(
-        std::make_tuple(  0,   0),
-        std::make_tuple(  0,  30),
-        std::make_tuple(  1,   3),
-        std::make_tuple(  5,  10),
-        std::make_tuple(  4,  25),
-        std::make_tuple(  2,   4)));
+        std::tuple(  0,   0),
+        std::tuple(  0,  30),
+        std::tuple(  1,   3),
+        std::tuple(  5,  10),
+        std::tuple(  4,  25),
+        std::tuple(  2,   4)));
 
 ////////////////////////////////////////////////////////////////////////////////
 

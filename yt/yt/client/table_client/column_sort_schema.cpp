@@ -56,16 +56,6 @@ void Deserialize(TColumnSortSchema& schema, TYsonPullParserCursor* cursor)
     Deserialize(schema, ExtractTo<INodePtr>(cursor));
 }
 
-bool operator == (const TColumnSortSchema& lhs, const TColumnSortSchema& rhs)
-{
-    return lhs.Name == rhs.Name && lhs.SortOrder == rhs.SortOrder;
-}
-
-bool operator != (const TColumnSortSchema& lhs, const TColumnSortSchema& rhs)
-{
-    return !(lhs == rhs);
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
 void ValidateSortColumns(const std::vector<TColumnSortSchema>& columns)
@@ -107,16 +97,11 @@ void FromProto(
     }
 }
 
-void FormatValue(TStringBuilderBase* builder, const TSortColumns& sortColumns, TStringBuf /* format */)
+void FormatValue(TStringBuilderBase* builder, const TSortColumns& sortColumns, TStringBuf /* spec */)
 {
     builder->AppendFormat("{ColumnNames: %v, Comparator: %v}",
         GetColumnNames(sortColumns),
         GetComparator(sortColumns));
-}
-
-TString ToString(const TSortColumns& sortColumns)
-{
-    return ToStringViaBuilder(sortColumns);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -110,6 +110,7 @@ public:
         case TCacheCacheConfig::CacheGenNone: // place in fresh
         case TCacheCacheConfig::CacheGenEvicted: // corner case: was evicted from staging and touched in same update
             AddToFresh(item, evictedList);
+	    [[fallthrough]];
         case TCacheCacheConfig::CacheGenFresh: // just update inside fresh
             xitem->Unlink();
             FreshList.PushFront(xitem);
@@ -122,7 +123,7 @@ public:
             WarmList.PushFront(xitem);
             break;
         default:
-            Y_DEBUG_ABORT_UNLESS(false, "unknown/broken cache generation");
+            Y_DEBUG_ABORT("unknown/broken cache generation");
             break;
         }
 
@@ -152,7 +153,7 @@ public:
                 *Config.ReportedWarm = WarmWeight;
             break;
         default:
-            Y_DEBUG_ABORT_UNLESS(false, "unknown cache generaton");
+            Y_DEBUG_ABORT("unknown cache generaton");
         }
     }
 
@@ -181,7 +182,7 @@ public:
                 *Config.ReportedWarm = WarmWeight;
             break;
         default:
-            Y_DEBUG_ABORT_UNLESS(false, "unknown cache generaton");
+            Y_DEBUG_ABORT("unknown cache generaton");
         }
     }
 

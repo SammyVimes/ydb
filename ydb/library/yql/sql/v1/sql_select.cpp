@@ -9,6 +9,8 @@ namespace NSQLTranslationV1 {
 
 using namespace NSQLv1Generated;
 
+namespace {
+
 bool IsColumnsOnly(const TVector<TSortSpecificationPtr>& container) {
     for (const auto& elem: container) {
         if (!elem->OrderExpr->GetColumnName()) {
@@ -18,6 +20,39 @@ bool IsColumnsOnly(const TVector<TSortSpecificationPtr>& container) {
     return true;
 }
 
+bool CollectJoinLinkSettings(TPosition pos, TJoinLinkSettings& linkSettings, TContext& ctx) {
+    linkSettings = {};
+    auto hints = ctx.PullHintForToken(pos);
+    for (const auto& hint: hints) {
+        const auto canonizedName = to_lower(hint.Name);
+        auto newStrategy =  TJoinLinkSettings::EStrategy::Default;
+        if (canonizedName == "merge") {
+            newStrategy = TJoinLinkSettings::EStrategy::SortedMerge;
+        } else if (canonizedName == "streamlookup") {
+            newStrategy = TJoinLinkSettings::EStrategy::StreamLookup;
+        } else if (canonizedName == "map") {
+            newStrategy = TJoinLinkSettings::EStrategy::ForceMap;
+        } else if (canonizedName == "grace") {
+            newStrategy = TJoinLinkSettings::EStrategy::ForceGrace;
+        } else {
+            ctx.Warning(hint.Pos, TIssuesIds::YQL_UNUSED_HINT) << "Unsupported join strategy: " << hint.Name;
+        }
+
+        if (TJoinLinkSettings::EStrategy::Default == linkSettings.Strategy) {
+            linkSettings.Strategy = newStrategy;
+        } else if (newStrategy == linkSettings.Strategy) {
+            ctx.Error() << "Duplicate join strategy hint";
+            return false;
+        } else {
+            ctx.Error() << "Conflicting join strategy hints";
+            return false;
+        }
+    }
+    return true;
+}
+
+} // namespace
+
 bool TSqlSelect::JoinOp(ISource* join, const TRule_join_source::TBlock3& block, TMaybe<TPosition> anyPos) {
     // block: (join_op (ANY)? flatten_source join_constraint?)
     // join_op:
@@ -25,11 +60,23 @@ bool TSqlSelect::JoinOp(ISource* join, const TRule_join_source::TBlock3& block, 
     //  | (NATURAL)? ((LEFT (ONLY | SEMI)? | RIGHT (ONLY | SEMI)? | EXCLUSION | FULL)? (OUTER)? | INNER | CROSS) JOIN
     //;
     const auto& node = block.GetRule_join_op1();
+    TString joinOp("Inner");
+    TJoinLinkSettings linkSettings;
     switch (node.Alt_case()) {
-        case TRule_join_op::kAltJoinOp1:
+        case TRule_join_op::kAltJoinOp1: {
+            joinOp = "Cross";
+            if (!Ctx.AnsiImplicitCrossJoin) {
+                Error() << "Cartesian product of tables is disabled. Please use "
+                           "explicit CROSS JOIN or enable it via PRAGMA AnsiImplicitCrossJoin";
+                return false;
+            }
+            auto alt = node.GetAlt_join_op1();
+            if (!CollectJoinLinkSettings(Ctx.TokenPosition(alt.GetToken1()), linkSettings, Ctx)) {
+                return false;
+            }
             Ctx.IncrementMonCounter("sql_join_operations", "CartesianProduct");
-            Error() << "Cartesian product of tables is not supported. Please use explicit CROSS JOIN";
-            return false;
+            break;
+        }
         case TRule_join_op::kAltJoinOp2: {
             auto alt = node.GetAlt_join_op2();
             if (alt.HasBlock1()) {
@@ -37,10 +84,9 @@ bool TSqlSelect::JoinOp(ISource* join, const TRule_join_source::TBlock3& block, 
                 Error() << "Natural join is not implemented yet";
                 return false;
             }
-            TString joinOp("Inner");
-            auto hints = Ctx.PullHintForToken(Ctx.TokenPosition(alt.GetToken3()));
-            TJoinLinkSettings linkSettings;
-            linkSettings.ForceSortedMerge = AnyOf(hints, [](const NSQLTranslation::TSQLHint& hint) { return to_lower(hint.Name) == "merge"; });
+            if (!CollectJoinLinkSettings(Ctx.TokenPosition(alt.GetToken3()), linkSettings, Ctx)) {
+                return false;
+            }
             switch (alt.GetBlock2().Alt_case()) {
                 case TRule_join_op::TAlt2::TBlock2::kAlt1:
                     if (alt.GetBlock2().GetAlt1().HasBlock1()) {
@@ -98,41 +144,8 @@ bool TSqlSelect::JoinOp(ISource* join, const TRule_join_source::TBlock3& block, 
                     AltNotImplemented("join_op", node);
                     return false;
             }
-
-            joinOp = NormalizeJoinOp(joinOp);
             Ctx.IncrementMonCounter("sql_features", "Join");
             Ctx.IncrementMonCounter("sql_join_operations", joinOp);
-
-            TNodePtr joinKeyExpr;
-            if (block.HasBlock4()) {
-                if (joinOp == "Cross") {
-                    Error() << "Cross join should not have ON or USING expression";
-                    Ctx.IncrementMonCounter("sql_errors", "BadJoinExpr");
-                    return false;
-                }
-
-                joinKeyExpr = JoinExpr(join, block.GetBlock4().GetRule_join_constraint1());
-                if (!joinKeyExpr) {
-                    Ctx.IncrementMonCounter("sql_errors", "BadJoinExpr");
-                    return false;
-                }
-            }
-            else {
-                if (joinOp != "Cross") {
-                    Error() << "Expected ON or USING expression";
-                    Ctx.IncrementMonCounter("sql_errors", "BadJoinExpr");
-                    return false;
-                }
-            }
-
-            if (joinOp == "Cross" && anyPos) {
-                Ctx.Error(*anyPos) << "ANY should not be used with Cross JOIN";
-                Ctx.IncrementMonCounter("sql_errors", "BadJoinAny");
-                return false;
-            }
-
-            Y_DEBUG_ABORT_UNLESS(join->GetJoin());
-            join->GetJoin()->SetupJoin(joinOp, joinKeyExpr, linkSettings);
             break;
         }
         case TRule_join_op::ALT_NOT_SET:
@@ -140,6 +153,43 @@ bool TSqlSelect::JoinOp(ISource* join, const TRule_join_source::TBlock3& block, 
             AltNotImplemented("join_op", node);
             return false;
     }
+    joinOp = NormalizeJoinOp(joinOp);
+    if (linkSettings.Strategy != TJoinLinkSettings::EStrategy::Default && joinOp == "Cross") {
+        Ctx.Warning(Ctx.Pos(), TIssuesIds::YQL_UNUSED_HINT) << "Non-default join strategy will not be used for CROSS JOIN";
+        linkSettings.Strategy = TJoinLinkSettings::EStrategy::Default;
+    }
+
+    TNodePtr joinKeyExpr;
+    if (block.HasBlock4()) {
+        if (joinOp == "Cross") {
+            Error() << "Cross join should not have ON or USING expression";
+            Ctx.IncrementMonCounter("sql_errors", "BadJoinExpr");
+            return false;
+        }
+
+        joinKeyExpr = JoinExpr(join, block.GetBlock4().GetRule_join_constraint1());
+        if (!joinKeyExpr) {
+            Ctx.IncrementMonCounter("sql_errors", "BadJoinExpr");
+            return false;
+        }
+    }
+    else {
+        if (joinOp != "Cross") {
+            Error() << "Expected ON or USING expression";
+            Ctx.IncrementMonCounter("sql_errors", "BadJoinExpr");
+            return false;
+        }
+    }
+
+    if (joinOp == "Cross" && anyPos) {
+        Ctx.Error(*anyPos) << "ANY should not be used with Cross JOIN";
+        Ctx.IncrementMonCounter("sql_errors", "BadJoinAny");
+        return false;
+    }
+
+    Y_DEBUG_ABORT_UNLESS(join->GetJoin());
+    join->GetJoin()->SetupJoin(joinOp, joinKeyExpr, linkSettings);
+
     return true;
 }
 
@@ -382,7 +432,7 @@ bool TSqlSelect::SelectTerm(TVector<TNodePtr>& terms, const TRule_result_column&
                 bool implicitLabel = false;
                 switch (alt.GetBlock2().Alt_case()) {
                     case TRule_result_column_TAlt2_TBlock2::kAlt1:
-                        label = Id(alt.GetBlock2().GetAlt1().GetBlock1().GetRule_an_id_or_type2(), *this);
+                        label = Id(alt.GetBlock2().GetAlt1().GetRule_an_id_or_type2(), *this);
                         break;
                     case TRule_result_column_TAlt2_TBlock2::kAlt2:
                         label = Id(alt.GetBlock2().GetAlt2().GetRule_an_id_as_compat1(), *this);
@@ -536,7 +586,7 @@ TSourcePtr TSqlSelect::NamedSingleSource(const TRule_named_single_source& node, 
         TString label;
         switch (node.GetBlock3().GetBlock1().Alt_case()) {
             case TRule_named_single_source_TBlock3_TBlock1::kAlt1:
-                label = Id(node.GetBlock3().GetBlock1().GetAlt1().GetBlock1().GetRule_an_id2(), *this);
+                label = Id(node.GetBlock3().GetBlock1().GetAlt1().GetRule_an_id2(), *this);
                 break;
             case TRule_named_single_source_TBlock3_TBlock1::kAlt2:
                 label = Id(node.GetBlock3().GetBlock1().GetAlt2().GetRule_an_id_as_compat1(), *this);
@@ -552,7 +602,8 @@ TSourcePtr TSqlSelect::NamedSingleSource(const TRule_named_single_source& node, 
         singleSource->SetLabel(label);
     }
     if (node.HasBlock4()) {
-        ESampleMode mode = ESampleMode::Auto;
+        ESampleClause sampleClause;
+        ESampleMode mode;
         TSqlExpression expr(Ctx, Mode);
         TNodePtr samplingRateNode;
         TNodePtr samplingSeedNode;
@@ -561,6 +612,8 @@ TSourcePtr TSqlSelect::NamedSingleSource(const TRule_named_single_source& node, 
         switch (sampleBlock.Alt_case()) {
         case TRule_named_single_source::TBlock4::kAlt1:
             {
+                sampleClause = ESampleClause::Sample;
+                mode = ESampleMode::Bernoulli;
                 const auto& sampleExpr = sampleBlock.GetAlt1().GetRule_sample_clause1().GetRule_expr2();
                 samplingRateNode = expr.Build(sampleExpr);
                 if (!samplingRateNode) {
@@ -572,6 +625,7 @@ TSourcePtr TSqlSelect::NamedSingleSource(const TRule_named_single_source& node, 
             break;
         case TRule_named_single_source::TBlock4::kAlt2:
             {
+                sampleClause = ESampleClause::TableSample;
                 const auto& tableSampleClause = sampleBlock.GetAlt2().GetRule_tablesample_clause1();
                 const auto& modeToken = tableSampleClause.GetRule_sampling_mode2().GetToken1();
                 const TCiString& token = Token(modeToken);
@@ -603,7 +657,7 @@ TSourcePtr TSqlSelect::NamedSingleSource(const TRule_named_single_source& node, 
         case TRule_named_single_source::TBlock4::ALT_NOT_SET:
             Y_ABORT("SampleClause: does not corresond to grammar changes");
         }
-        if (!singleSource->SetSamplingOptions(Ctx, pos, mode, samplingRateNode, samplingSeedNode)) {
+        if (!singleSource->SetSamplingOptions(Ctx, pos, sampleClause, mode, samplingRateNode, samplingSeedNode)) {
             Ctx.IncrementMonCounter("sql_errors", "IncorrectSampleClause");
             return nullptr;
         }
@@ -631,8 +685,8 @@ bool TSqlSelect::ColumnName(TVector<TNodePtr>& keys, const TRule_without_column_
     TString columnName;
     switch (node.Alt_case()) {
         case TRule_without_column_name::kAltWithoutColumnName1:
-            sourceName = Id(node.GetAlt_without_column_name1().GetBlock1().GetRule_an_id1(), *this);
-            columnName = Id(node.GetAlt_without_column_name1().GetBlock1().GetRule_an_id3(), *this);
+            sourceName = Id(node.GetAlt_without_column_name1().GetRule_an_id1(), *this);
+            columnName = Id(node.GetAlt_without_column_name1().GetRule_an_id3(), *this);
             break;
         case TRule_without_column_name::kAltWithoutColumnName2:
             columnName = Id(node.GetAlt_without_column_name2().GetRule_an_id_without1(), *this);
@@ -1148,20 +1202,8 @@ bool TSqlSelect::ValidateLimitOrderByWithSelectOp(TMaybe<TSelectKindPlacement> p
         // not in select_op chain
         return true;
     }
-    if (!Ctx.AnsiOrderByLimitInUnionAll.Defined()) {
-        if (!placement->IsLastInSelectOp) {
-            Ctx.Warning(Ctx.Pos(), TIssuesIds::YQL_LIMIT_ORDER_BY_WITH_UNION)
-                << what << " will not be allowed here for ANSI compliant UNION ALL.\n"
-                << "For details please consult documentation on PRAGMA AnsiOrderByLimitInUnionAll";
-        } else {
-            Ctx.Warning(Ctx.Pos(), TIssuesIds::YQL_LIMIT_ORDER_BY_WITH_UNION)
-                << what << " will be applied to last subquery in UNION ALL, not to entire UNION ALL.\n"
-                << "For ANSI compliant behavior please use PRAGMA AnsiOrderByLimitInUnionAll";
-        }
-        return true;
-    }
 
-    if (*Ctx.AnsiOrderByLimitInUnionAll && !placement->IsLastInSelectOp) {
+    if (!placement->IsLastInSelectOp) {
         Ctx.Error() << what << " within UNION ALL is only allowed after last subquery";
         return false;
     }
@@ -1169,9 +1211,6 @@ bool TSqlSelect::ValidateLimitOrderByWithSelectOp(TMaybe<TSelectKindPlacement> p
 }
 
 bool TSqlSelect::NeedPassLimitOrderByToUnderlyingSelect(TMaybe<TSelectKindPlacement> placement) {
-    if (!Ctx.AnsiOrderByLimitInUnionAll.Defined() || !*Ctx.AnsiOrderByLimitInUnionAll) {
-        return true;
-    }
     return !placement.Defined() || !placement->IsLastInSelectOp;
 }
 
@@ -1262,24 +1301,16 @@ TSqlSelect::TSelectKindResult TSqlSelect::SelectKind(const TRule_select_kind& no
             res.Settings.Discard = settings.Discard;
         } else if (settings.Discard) {
             auto discardPos = Ctx.TokenPosition(node.GetBlock1().GetToken1());
-            if (Ctx.AnsiOrderByLimitInUnionAll.Defined() && *Ctx.AnsiOrderByLimitInUnionAll) {
-                Ctx.Error(discardPos) << "DISCARD within UNION ALL is only allowed before first subquery";
-                return {};
-            }
-            Ctx.Warning(discardPos, TIssuesIds::YQL_LIMIT_ORDER_BY_WITH_UNION)
-                << "DISCARD will be ignored here. Please use DISCARD before first subquery in UNION ALL if you want to discard entire UNION ALL result";
+            Ctx.Error(discardPos) << "DISCARD within UNION ALL is only allowed before first subquery";
+            return {};
         }
 
         if (placement->IsLastInSelectOp) {
             res.Settings.Label = settings.Label;
         } else if (!settings.Label.Empty()) {
             auto labelPos = Ctx.TokenPosition(node.GetBlock3().GetToken1());
-            if (Ctx.AnsiOrderByLimitInUnionAll.Defined() && *Ctx.AnsiOrderByLimitInUnionAll) {
-                Ctx.Error(labelPos) << "INTO RESULT within UNION ALL is only allowed after last subquery";
-                return {};
-            }
-            Ctx.Warning(labelPos, TIssuesIds::YQL_LIMIT_ORDER_BY_WITH_UNION)
-                << "INTO RESULT will be ignored here. Please use INTO RESULT after last subquery in UNION ALL if you want label entire UNION ALL result";
+            Ctx.Error(labelPos) << "INTO RESULT within UNION ALL is only allowed after last subquery";
+            return {};
         }
 
         settings = {};

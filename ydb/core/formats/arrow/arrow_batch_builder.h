@@ -2,6 +2,7 @@
 #include "arrow_helpers.h"
 #include <ydb/core/formats/factory.h>
 #include <ydb/core/scheme/scheme_tablecell.h>
+#include <ydb/library/conclusion/status.h>
 
 namespace NKikimr::NArrow {
 
@@ -155,12 +156,16 @@ public:
                ui64 maxRowsInBlock, ui64 maxBytesInBlock, TString& err) override {
         Y_UNUSED(maxRowsInBlock);
         Y_UNUSED(maxBytesInBlock);
-        Y_UNUSED(err);
-        return Start(columns);
+        const auto result = Start(columns);
+        if (!result.ok()) {
+            err = result.ToString();
+        }
+        return result.ok();
     }
 
     void AddRow(const NKikimr::TDbTupleRef& key, const NKikimr::TDbTupleRef& value) override;
     void AddRow(const TConstArrayRef<TCell>& key, const TConstArrayRef<TCell>& value);
+    void AddRow(const TConstArrayRef<TCell>& row);
 
     // You have to call it before Start()
     void Reserve(size_t numRows) {
@@ -174,7 +179,7 @@ public:
         return NumBytes;
     }
 
-    bool Start(const std::vector<std::pair<TString, NScheme::TTypeInfo>>& columns);
+    arrow::Status Start(const std::vector<std::pair<TString, NScheme::TTypeInfo>>& columns);
     std::shared_ptr<arrow::RecordBatch> FlushBatch(bool reinitialize);
     std::shared_ptr<arrow::RecordBatch> GetBatch() const { return Batch; }
 

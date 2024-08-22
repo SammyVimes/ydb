@@ -1,9 +1,8 @@
 #include "keyvalue_storage_read_request.h"
 
 #include <ydb/core/util/testactorsys.h>
-
+#include <ydb/core/base/blobstorage_common.h>
 #include <library/cpp/testing/unittest/registar.h>
-
 
 namespace NKikimr {
 
@@ -38,7 +37,7 @@ struct TBlobStorageMockState {
             groupId = *group.GroupId;
         }
         std::unique_ptr<TEvBlobStorage::TEvGetResult> getResult = std::make_unique<TEvBlobStorage::TEvGetResult>(
-                group.Status, get->QuerySize, groupId);
+                group.Status, get->QuerySize, TGroupId::FromValue(groupId));
         getResult->Responses.Reset(new TEvBlobStorage::TEvGetResult::TResponse[get->QuerySize]);
         for (ui32 queryIdx = 0; queryIdx < get->QuerySize; ++queryIdx) {
             auto &query = get->Queries[queryIdx];
@@ -186,7 +185,7 @@ struct TReadRequestBuilder {
     TBuilderResult Build(TActorId respondTo, TActorId keyValueActorId, ui32 channelGeneration = 1, ui32 channelStep = 1)
     {
         std::unique_ptr<TIntermediate> intermediate = std::make_unique<TIntermediate>(respondTo, keyValueActorId,
-                channelGeneration, channelStep, TRequestType::ReadOnly);
+                channelGeneration, channelStep, TRequestType::ReadOnly, NWilson::TTraceId());
         TStringBuilder valueBuilder;
         for (auto &[value, blobId, offset, size] : Items) {
                 valueBuilder << value;
@@ -231,7 +230,7 @@ struct TRangeReadRequestBuilder {
     TBuilderResult Build(TActorId respondTo, TActorId keyValueActorId, ui32 channelGeneration = 1, ui32 channelStep = 1)
     {
         std::unique_ptr<TIntermediate> intermediate = std::make_unique<TIntermediate>(respondTo, keyValueActorId,
-                channelGeneration, channelStep, TRequestType::ReadOnly);
+                channelGeneration, channelStep, TRequestType::ReadOnly, NWilson::TTraceId());
 
         TBuilderResult res;
         intermediate->ReadCommand = TIntermediate::TRangeRead();

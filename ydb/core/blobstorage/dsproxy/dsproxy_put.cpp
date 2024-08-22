@@ -26,7 +26,7 @@ struct TEvAccelerate : public TEventLocal<TEvAccelerate, TEvBlobStorage::EvAccel
 // PUT request
 ////////////////////////////////////////////////////////////////////////////////////////////////////////////////////////
 
-class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobStorageGroupPutRequest> {
+class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor {
     TPutImpl PutImpl;
     TRootCause RootCauseTrack;
 
@@ -45,13 +45,18 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
 
     bool IsManyPuts = false;
 
-    TInstant Deadline;
     ui64 RequestsSent = 0;
     ui64 ResponsesReceived = 0;
+    ui32 RequestsPendingBeforeAcceleration = 0;
     ui64 MaxSaneRequests = 0;
     ui64 ResponsesSent = 0;
 
-    TInstant StartTime;
+    ui32 StatusMsgsSent = 0;
+    ui32 StatusResultMsgsReceived = 0;
+
+    bool BootstrapInProgress = true;
+
+    TMonotonic StartTime;
     NKikimrBlobStorage::EPutHandleClass HandleClass;
 
     i64 ReportedBytes;
@@ -63,12 +68,20 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
 
     TDiskResponsivenessTracker::TPerDiskStatsPtr Stats;
 
-    bool IsAccelerated;
-    bool IsAccelerateScheduled;
+    TAccelerationParams AccelerationParams;
+    ui32 AccelerateRequestsSent = 0;
+    bool IsAccelerateScheduled = false;
 
-    const bool IsMultiPutMode;
+    bool Done = false;
 
-    bool RequireExtraBlockChecks = false;
+    struct TIncarnationRecord {
+        ui64 IncarnationGuid = 0;
+        TMonotonic ExpirationTimestamp = TMonotonic::Max();
+        TMonotonic StatusIssueTimestamp = TMonotonic::Zero(); // zero means no message in flight
+    };
+    std::vector<TIncarnationRecord> IncarnationRecords;
+
+    TBlobStorageGroupInfo::TGroupVDisks ExpiredVDiskSet;
 
     void SanityCheck() {
         if (RequestsSent <= MaxSaneRequests) {
@@ -84,149 +97,246 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
     }
 
     void Handle(TEvAccelerate::TPtr &ev) {
+        IsAccelerateScheduled = false;
         RootCauseTrack.OnAccelerate(ev->Get()->CauseIdx);
         Accelerate();
         SanityCheck(); // May Die
     }
 
+    bool Action(bool accelerate = false) {
+        UpdateExpiredVDiskSet();
+
+        TPutImpl::TPutResultVec putResults;
+        PutImpl.Step(LogCtx, putResults, ExpiredVDiskSet, accelerate);
+        if (ReplyAndDieWithLastResponse(putResults)) {
+            return true;
+        }
+
+        // Generate new VPut/VMultiPut events to disks.
+        auto events = PutImpl.GeneratePutRequests();
+
+        // Count them properly.
+        UpdatePengingVDiskResponseCount(events);
+        for (const auto& ev : events) {
+            CountPut(std::visit([](const auto& item) { return item->GetBufferBytes(); }, ev));
+        }
+
+        // Update metrics for acceleration.
+        if (accelerate) {
+            for (const auto& ev : events) {
+                auto getCounter = TOverloaded{
+                    [&](const std::unique_ptr<TEvBlobStorage::TEvVPut>&) { return Mon->NodeMon->AccelerateEvVPutCount; },
+                    [&](const std::unique_ptr<TEvBlobStorage::TEvVMultiPut>&) { return Mon->NodeMon->AccelerateEvVMultiPutCount; }
+                };
+                std::visit(getCounter, ev)->Inc();
+            }
+        }
+
+        // Send to VDisks.
+        for (auto& ev : events) {
+            std::visit([&](auto& ev) { SendToQueue(std::move(ev), 0, TimeStatsEnabled); }, ev);
+            ++RequestsSent;
+            if (AccelerateRequestsSent == 0) {
+                RequestsPendingBeforeAcceleration++;
+            }
+        }
+
+        return false;
+    }
+
     void Accelerate() {
-        if (IsAccelerated) {
+        if (AccelerateRequestsSent == 2) {
             return;
         }
-        IsAccelerated = true;
+        ++AccelerateRequestsSent;
+        Action(true);
+        TryToScheduleNextAcceleration();
+    }
 
-        if (IsMultiPutMode) {
-            TDeque<std::unique_ptr<TEvBlobStorage::TEvVMultiPut>> vMultiPuts;
-            PutImpl.Accelerate(LogCtx, vMultiPuts);
-            UpdatePengingVDiskResponseCount<TEvBlobStorage::TEvVMultiPut, TVMultiPutCookie>(vMultiPuts);
-            RequestsSent += vMultiPuts.size();
-            *Mon->NodeMon->AccelerateEvVMultiPutCount += vMultiPuts.size();
-            CountPuts(vMultiPuts);
-            SendToQueues(vMultiPuts, TimeStatsEnabled);
-        } else {
-            TDeque<std::unique_ptr<TEvBlobStorage::TEvVPut>> vPuts;
-            PutImpl.Accelerate(LogCtx, vPuts);
-            UpdatePengingVDiskResponseCount<TEvBlobStorage::TEvVPut, TBlobCookie>(vPuts);
-            RequestsSent += vPuts.size();
-            *Mon->NodeMon->AccelerateEvVPutCount += vPuts.size();
-            CountPuts(vPuts);
-            SendToQueues(vPuts, TimeStatsEnabled);
+    void HandleIncarnation(TMonotonic timestamp, ui32 orderNumber, ui64 incarnationGuid) {
+        timestamp += VDiskCooldownTimeoutOnProxy;
+
+        Y_ABORT_UNLESS(orderNumber < IncarnationRecords.size());
+        auto& record = IncarnationRecords[orderNumber];
+
+        if (record.IncarnationGuid == 0 && record.ExpirationTimestamp == TMonotonic::Max()) { // empty record
+            record.ExpirationTimestamp = TMonotonic::Zero();
+        } else if (record.IncarnationGuid != incarnationGuid) {
+            PutImpl.InvalidatePartStates(orderNumber);
+            ++*Mon->NodeMon->IncarnationChanges;
+        }
+
+        record.IncarnationGuid = incarnationGuid;
+        record.ExpirationTimestamp = Max(timestamp, record.ExpirationTimestamp);
+    }
+
+    void UpdateExpiredVDiskSet() {
+        const TMonotonic now = TActivationContext::Monotonic();
+
+        TBlobStorageGroupInfo::TGroupVDisks expired(&Info->GetTopology());
+        for (ui32 i = 0; i < IncarnationRecords.size(); ++i) {
+            if (IncarnationRecords[i].ExpirationTimestamp < now) {
+                expired |= {&Info->GetTopology(), Info->GetVDiskId(i)};
+            }
+        }
+        if (expired != ExpiredVDiskSet) { // expired set has changed
+            PutImpl.ChangeAll();
+        }
+        ExpiredVDiskSet = expired;
+    }
+
+    void IssueStatusForExpiredDisks() {
+        const TMonotonic now = TActivationContext::Monotonic();
+        for (ui32 i = 0; i < IncarnationRecords.size(); ++i) {
+            auto& record = IncarnationRecords[i];
+            if (now + TDuration::Seconds(5) < record.ExpirationTimestamp) {
+                continue; // not expired yet
+            }
+            if (record.StatusIssueTimestamp != TMonotonic()) {
+                continue; // TEvVStatus is already in flight
+            }
+
+            const TVDiskID vdiskId = Info->GetVDiskId(i);
+            A_LOG_INFO_S("BPP15", "sending TEvVStatus VDiskId# " << vdiskId);
+            SendToQueue(std::make_unique<TEvBlobStorage::TEvVStatus>(vdiskId), i);
+            ++StatusMsgsSent;
+            record.StatusIssueTimestamp = now;
+
+            ++*Mon->NodeMon->PutStatusQueries;
         }
     }
 
+    void Handle(TEvBlobStorage::TEvVStatusResult::TPtr& ev) {
+        A_LOG_INFO_S("BPP16", "received TEvVStatusResult " << ev->Get()->ToString());
+
+        ProcessReplyFromQueue(ev->Get());
+        ++StatusResultMsgsReceived;
+
+        auto& record = ev->Get()->Record;
+        const ui32 orderNumber = ev->Cookie;
+        auto& incarnationRecord = IncarnationRecords[orderNumber];
+        Y_ABORT_UNLESS(incarnationRecord.IncarnationGuid);
+        Y_ABORT_UNLESS(incarnationRecord.ExpirationTimestamp != TMonotonic::Max());
+        const TMonotonic issue = std::exchange(incarnationRecord.StatusIssueTimestamp, TMonotonic());
+        Y_ABORT_UNLESS(issue != TMonotonic());
+
+        if (record.HasIncarnationGuid()) {
+            HandleIncarnation(issue, orderNumber, record.GetIncarnationGuid());
+        } else if (record.GetStatus() != NKikimrProto::OK) { // we can't obtain status from the vdisk; assume it has not been written
+            Y_ABORT_UNLESS(orderNumber < IncarnationRecords.size());
+            IncarnationRecords[orderNumber] = {};
+            PutImpl.InvalidatePartStates(orderNumber);
+            ++*Mon->NodeMon->IncarnationChanges;
+        }
+
+        Action();
+    }
+
     void Handle(TEvBlobStorage::TEvVPutResult::TPtr &ev) {
-        A_LOG_LOG_S(false, ev->Get()->Record.GetStatus() == NKikimrProto::OK ? NLog::PRI_DEBUG : NLog::PRI_NOTICE,
+        A_LOG_LOG_S(false, ev->Get()->Record.GetStatus() == NKikimrProto::OK ? NLog::PRI_DEBUG : NLog::PRI_INFO,
             "BPP01", "received " << ev->Get()->ToString() << " from# " << VDiskIDFromVDiskID(ev->Get()->Record.GetVDiskID()));
 
-        ProcessReplyFromQueue(ev);
+        ProcessReplyFromQueue(ev->Get());
         ResponsesReceived++;
+        if (!AccelerateRequestsSent) {
+            Y_DEBUG_ABORT_UNLESS(RequestsPendingBeforeAcceleration > 0);
+            RequestsPendingBeforeAcceleration--;
+        }
 
         const ui64 cyclesPerUs = NHPTimer::GetCyclesPerSecond() / 1000000;
         ev->Get()->Record.MutableTimestamps()->SetReceivedByDSProxyUs(GetCycleCountFast() / cyclesPerUs);
         const NKikimrBlobStorage::TEvVPutResult &record = ev->Get()->Record;
-        const TLogoBlobID blob = LogoBlobIDFromLogoBlobID(record.GetBlobID());
-        const TLogoBlobID origBlobId = TLogoBlobID(blob, 0);
-        Y_ABORT_UNLESS(record.HasCookie());
-        TBlobCookie cookie(record.GetCookie());
-        const ui64 idx = cookie.GetBlobIdx();
-        const ui64 vdisk = cookie.GetVDiskOrderNumber();
+        const TLogoBlobID blobId = LogoBlobIDFromLogoBlobID(record.GetBlobID());
+        Y_ABORT_UNLESS(record.HasVDiskID());
+        TVDiskID vdiskId = VDiskIDFromVDiskID(record.GetVDiskID());
+        const TVDiskIdShort shortId(vdiskId);
+        const ui32 vdisk = Info->GetOrderNumber(shortId);
         const NKikimrProto::EReplyStatus status = record.GetStatus();
+        const size_t blobIdx = PutImpl.GetBlobIdx(blobId);
 
-        Y_ABORT_UNLESS(vdisk < WaitingVDiskResponseCount.size(), "blobIdx# %" PRIu64 " vdisk# %" PRIu64, idx, vdisk);
+        Y_ABORT_UNLESS(vdisk < WaitingVDiskResponseCount.size(), "blobIdx# %zu vdisk# %" PRIu32, blobIdx, vdisk);
         if (WaitingVDiskResponseCount[vdisk] == 1) {
             WaitingVDiskCount--;
         }
         WaitingVDiskResponseCount[vdisk]--;
 
-        Y_ABORT_UNLESS(idx < PutImpl.Blobs.size());
-        Y_ABORT_UNLESS(origBlobId == PutImpl.Blobs[idx].BlobId);
         if (TimeStatsEnabled && record.GetMsgQoS().HasExecTimeStats()) {
-            TimeStats.ApplyPut(PutImpl.Blobs[idx].BufferSize, record.GetMsgQoS().GetExecTimeStats());
+            TimeStats.ApplyPut(PutImpl.Blobs[blobIdx].BufferSize, record.GetMsgQoS().GetExecTimeStats());
         }
 
-        Y_ABORT_UNLESS(record.HasVDiskID());
-        TVDiskID vDiskId = VDiskIDFromVDiskID(record.GetVDiskID());
-        const TVDiskIdShort shortId(vDiskId);
+        if (record.HasIncarnationGuid()) {
+            // TODO: correct timestamp
+            HandleIncarnation(TActivationContext::Monotonic(), Info->GetOrderNumber(shortId), record.GetIncarnationGuid());
+        }
 
-        LWPROBE(DSProxyVDiskRequestDuration, TEvBlobStorage::EvVPut, blob.BlobSize(), blob.TabletID(),
-                Info->GroupID, blob.Channel(), Info->GetFailDomainOrderNumber(shortId),
+        LWPROBE(DSProxyVDiskRequestDuration, TEvBlobStorage::EvVPut, blobId.BlobSize(), blobId.TabletID(),
+                Info->GroupID.GetRawId(), blobId.Channel(), Info->GetFailDomainOrderNumber(shortId),
                 GetStartTime(record.GetTimestamps()),
                 GetTotalTimeMs(record.GetTimestamps()),
                 GetVDiskTimeMs(record.GetTimestamps()),
                 GetTotalTimeMs(record.GetTimestamps()) - GetVDiskTimeMs(record.GetTimestamps()),
                 NKikimrBlobStorage::EPutHandleClass_Name(PutImpl.GetPutHandleClass()),
                 NKikimrProto::EReplyStatus_Name(status));
-        if (RootCauseTrack.IsOn) {
-            RootCauseTrack.OnReply(cookie.GetCauseIdx(),
-                GetTotalTimeMs(record.GetTimestamps()) - GetVDiskTimeMs(record.GetTimestamps()),
-                GetVDiskTimeMs(record.GetTimestamps()));
-        }
+        //if (RootCauseTrack.IsOn) {
+        //    RootCauseTrack.OnReply(cookie.GetCauseIdx(),
+        //        GetTotalTimeMs(record.GetTimestamps()) - GetVDiskTimeMs(record.GetTimestamps()),
+        //        GetVDiskTimeMs(record.GetTimestamps()));
+        //}
 
-        TDeque<std::unique_ptr<TEvBlobStorage::TEvVPut>> vPuts;
-        TPutImpl::TPutResultVec putResults;
-        PutImpl.OnVPutEventResult(LogCtx, ev->Sender, *ev->Get(), vPuts, putResults);
-        UpdatePengingVDiskResponseCount<TEvBlobStorage::TEvVPut, TBlobCookie>(vPuts);
-        RequestsSent += vPuts.size();
-        CountPuts(vPuts);
-        SendToQueues(vPuts, TimeStatsEnabled);
-        if (ReplyAndDieWithLastResponse(putResults)) {
-            return;
-        }
-        Y_ABORT_UNLESS(RequestsSent > ResponsesReceived, "RequestsSent# %" PRIu64 " ResponsesReceived# %" PRIu64,
-                ui64(RequestsSent), ui64(ResponsesReceived));
-
-        if (!IsAccelerateScheduled && !IsAccelerated) {
-            if (WaitingVDiskCount == 1 && RequestsSent > 1) {
-                ui64 timeToAccelerateUs = PutImpl.GetTimeToAccelerateNs(LogCtx) / 1000;
-                TDuration timeSinceStart = TActivationContext::Now() - StartTime;
-                if (timeSinceStart.MicroSeconds() < timeToAccelerateUs) {
-                    ui64 causeIdx = RootCauseTrack.RegisterAccelerate();
-                    Schedule(TDuration::MicroSeconds(timeToAccelerateUs - timeSinceStart.MicroSeconds()),
-                            new TEvAccelerate(causeIdx));
-                    IsAccelerateScheduled = true;
-                } else {
-                    Accelerate();
-                }
+        if (status == NKikimrProto::BLOCKED || status == NKikimrProto::DEADLINE) {
+            TString error = TStringBuilder() << "Got VPutResult status# " << status << " from VDiskId# " << vdiskId;
+            TPutImpl::TPutResultVec putResults;
+            PutImpl.PrepareOneReply(status, blobIdx, LogCtx, std::move(error), putResults);
+            ReplyAndDieWithLastResponse(putResults);
+        } else {
+            PutImpl.ProcessResponse(*ev->Get());
+            if (Action()) {
+                return;
             }
+            TryToScheduleNextAcceleration();
+            SanityCheck(); // May Die
         }
-        SanityCheck(); // May Die
     }
 
-
     void Handle(TEvBlobStorage::TEvVMultiPutResult::TPtr &ev) {
-        ProcessReplyFromQueue(ev);
+        ProcessReplyFromQueue(ev->Get());
         ResponsesReceived++;
+        if (!AccelerateRequestsSent) {
+            Y_DEBUG_ABORT_UNLESS(RequestsPendingBeforeAcceleration > 0);
+            RequestsPendingBeforeAcceleration--;
+        }
 
         const ui64 cyclesPerUs = NHPTimer::GetCyclesPerSecond() / 1000000;
         ev->Get()->Record.MutableTimestamps()->SetReceivedByDSProxyUs(GetCycleCountFast() / cyclesPerUs);
         const NKikimrBlobStorage::TEvVMultiPutResult &record = ev->Get()->Record;
+        Y_ABORT_UNLESS(record.HasVDiskID());
+        const TVDiskID vdiskId = VDiskIDFromVDiskID(record.GetVDiskID());
+        const TVDiskIdShort shortId(vdiskId);
+        const ui32 vdisk = Info->GetOrderNumber(shortId);
+        const NKikimrProto::EReplyStatus status = record.GetStatus();
 
         if (TimeStatsEnabled && record.GetMsgQoS().HasExecTimeStats()) {
             TimeStats.ApplyPut(RequestBytes, record.GetMsgQoS().GetExecTimeStats());
         }
 
-        Y_ABORT_UNLESS(record.HasVDiskID());
-        TVDiskID vDiskId = VDiskIDFromVDiskID(record.GetVDiskID());
-        const TVDiskIdShort shortId(vDiskId);
-
-        Y_ABORT_UNLESS(record.HasCookie());
-        TVMultiPutCookie cookie(record.GetCookie());
-        const ui64 vdisk = cookie.GetVDiskOrderNumber();
-        const NKikimrProto::EReplyStatus status = record.GetStatus();
+        if (record.HasIncarnationGuid()) {
+            // TODO: correct timestamp
+            HandleIncarnation(TActivationContext::Monotonic(), vdisk, record.GetIncarnationGuid());
+        }
 
         auto prio = NLog::PRI_DEBUG;
         if (status != NKikimrProto::OK) {
             prio = NLog::PRI_INFO;
-        }
-        for (const auto& item : record.GetItems()) {
-            if (item.GetStatus() != NKikimrProto::OK) {
-                prio = NLog::PRI_INFO;
+        } else {
+            for (const auto& item : record.GetItems()) {
+                if (item.GetStatus() != NKikimrProto::OK) {
+                    prio = NLog::PRI_INFO;
+                }
             }
         }
-        A_LOG_LOG_S(false, prio, "BPP02", "received " << ev->Get()->ToString()
-                << " from# " << VDiskIDFromVDiskID(ev->Get()->Record.GetVDiskID()));
+        A_LOG_LOG_S(false, prio, "BPP02", "received " << ev->Get()->ToString() << " from# " << vdiskId);
 
-        Y_ABORT_UNLESS(vdisk < WaitingVDiskResponseCount.size(), " vdisk# %" PRIu64, vdisk);
+        Y_ABORT_UNLESS(vdisk < WaitingVDiskResponseCount.size(), " vdisk# %" PRIu32, vdisk);
         if (WaitingVDiskResponseCount[vdisk] == 1) {
             WaitingVDiskCount--;
         }
@@ -238,7 +348,7 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
                 TLogoBlobID blobId = LogoBlobIDFromLogoBlobID(item.GetBlobID());
                 NKikimrProto::EReplyStatus itemStatus = item.GetStatus();
                 LWPROBE(DSProxyVDiskRequestDuration, TEvBlobStorage::EvVMultiPut, blobId.BlobSize(), blobId.TabletID(),
-                        Info->GroupID, blobId.Channel(), Info->GetFailDomainOrderNumber(shortId),
+                        Info->GroupID.GetRawId(), blobId.Channel(), Info->GetFailDomainOrderNumber(shortId),
                         GetStartTime(record.GetTimestamps()),
                         GetTotalTimeMs(record.GetTimestamps()),
                         GetVDiskTimeMs(record.GetTimestamps()),
@@ -249,91 +359,87 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
         }
 
         // Handle put results
-        bool isCauseRegistered = !RootCauseTrack.IsOn;
+        //bool isCauseRegistered = !RootCauseTrack.IsOn;
         TPutImpl::TPutResultVec putResults;
         for (auto &item : record.GetItems()) {
-            if (!isCauseRegistered) {
-                isCauseRegistered = RootCauseTrack.OnReply(cookie.GetCauseIdx(),
-                    GetTotalTimeMs(record.GetTimestamps()) - GetVDiskTimeMs(record.GetTimestamps()),
-                    GetVDiskTimeMs(record.GetTimestamps()));
-            }
+            //if (!isCauseRegistered) {
+            //    isCauseRegistered = RootCauseTrack.OnReply(cookie.GetCauseIdx(),
+            //        GetTotalTimeMs(record.GetTimestamps()) - GetVDiskTimeMs(record.GetTimestamps()),
+            //        GetVDiskTimeMs(record.GetTimestamps()));
+            //}
 
             Y_ABORT_UNLESS(item.HasStatus());
             Y_ABORT_UNLESS(item.HasBlobID());
-            Y_ABORT_UNLESS(item.HasCookie());
-            ui64 blobIdx = TBlobCookie(item.GetCookie()).GetBlobIdx();
-            NKikimrProto::EReplyStatus itemStatus = item.GetStatus();
-            TLogoBlobID blobId = LogoBlobIDFromLogoBlobID(item.GetBlobID());
+            const TLogoBlobID blobId = LogoBlobIDFromLogoBlobID(item.GetBlobID());
+            size_t blobIdx = PutImpl.GetBlobIdx(blobId);
+            const NKikimrProto::EReplyStatus itemStatus = item.GetStatus();
             Y_ABORT_UNLESS(itemStatus != NKikimrProto::RACE); // we should get RACE for the whole request and handle it in CheckForTermErrors
             if (itemStatus == NKikimrProto::BLOCKED || itemStatus == NKikimrProto::DEADLINE) {
-                TStringStream errorReason;
-                errorReason << "Got VMultiPutResult itemStatus# " << itemStatus << " from VDiskId# " << vDiskId;
-                ErrorReason = errorReason.Str();
-                PutImpl.PrepareOneReply(itemStatus, TLogoBlobID(blobId, 0), blobIdx, LogCtx, ErrorReason, putResults);
+                ErrorReason = TStringBuilder() << "Got VMultiPutResult itemStatus# " << itemStatus << " from VDiskId# " << vdiskId;
+                PutImpl.PrepareOneReply(itemStatus, blobIdx, LogCtx, ErrorReason, putResults);
             }
         }
         if (ReplyAndDieWithLastResponse(putResults)) {
             return;
         }
-        putResults.clear();
 
-        TDeque<std::unique_ptr<TEvBlobStorage::TEvVMultiPut>> vMultiPuts;
-        PutImpl.OnVPutEventResult(LogCtx, ev->Sender, *ev->Get(), vMultiPuts, putResults);
-        UpdatePengingVDiskResponseCount<TEvBlobStorage::TEvVMultiPut, TVMultiPutCookie>(vMultiPuts);
-        RequestsSent += vMultiPuts.size();
-        CountPuts(vMultiPuts);
-        SendToQueues(vMultiPuts, TimeStatsEnabled);
-        if (ReplyAndDieWithLastResponse(putResults)) {
+        PutImpl.ProcessResponse(*ev->Get());
+        if (Action()) {
             return;
         }
-        Y_ABORT_UNLESS(RequestsSent > ResponsesReceived, "RequestsSent# %" PRIu64 " ResponsesReceived# %" PRIu64
-                " ResponsesSent# %" PRIu64 " BlobsCount# %" PRIu64 " TPutImpl# %s", ui64(RequestsSent), ui64(ResponsesReceived),
-                (ui64)ResponsesSent, (ui64)PutImpl.Blobs.size(), PutImpl.DumpFullState().data());
+        TryToScheduleNextAcceleration();
+        SanityCheck(); // May Die
+    }
 
-        if (!IsAccelerateScheduled && !IsAccelerated) {
-            if (WaitingVDiskCount == 1 && RequestsSent > 1) {
-                ui64 timeToAccelerateUs = PutImpl.GetTimeToAccelerateNs(LogCtx) / 1000;
-                TDuration timeSinceStart = TActivationContext::Now() - StartTime;
-                if (timeSinceStart.MicroSeconds() < timeToAccelerateUs) {
+    void TryToScheduleNextAcceleration() {
+        if (!IsAccelerateScheduled && AccelerateRequestsSent < 2) {
+            if (WaitingVDiskCount > 0 && WaitingVDiskCount <= 2 && RequestsSent > 1) {
+                ui64 timeToAccelerateUs = Max<ui64>(1, PutImpl.GetTimeToAccelerateNs(LogCtx) / 1000);
+                if (RequestsPendingBeforeAcceleration == 1 && AccelerateRequestsSent == 1) {
+                    // if there is only one request pending, but first accelerate is unsuccessful, make a pause
+                    timeToAccelerateUs *= 2;
+                }
+                TDuration timeToAccelerate = TDuration::MicroSeconds(timeToAccelerateUs);
+                TMonotonic now = TActivationContext::Monotonic();
+                TMonotonic nextAcceleration = StartTime + timeToAccelerate;
+                if (nextAcceleration > now) {
                     ui64 causeIdx = RootCauseTrack.RegisterAccelerate();
-                    Schedule(TDuration::MicroSeconds(timeToAccelerateUs - timeSinceStart.MicroSeconds()),
-                            new TEvAccelerate(causeIdx));
+                    Schedule(nextAcceleration - now, new TEvAccelerate(causeIdx));
                     IsAccelerateScheduled = true;
                 } else {
                     Accelerate();
                 }
             }
         }
-        SanityCheck(); // May Die
     }
 
-    friend class TBlobStorageGroupRequestActor<TBlobStorageGroupPutRequest>;
-
-    void ReplyAndDie(NKikimrProto::EReplyStatus status) {
+    void ReplyAndDie(NKikimrProto::EReplyStatus status) override {
         TPutImpl::TPutResultVec putResults;
         PutImpl.PrepareReply(status, LogCtx, ErrorReason, putResults);
-        Y_ABORT_UNLESS(ReplyAndDieWithLastResponse(putResults));
+        const bool done = ReplyAndDieWithLastResponse(putResults);
+        Y_ABORT_UNLESS(done);
     }
 
-    bool ReplyAndDieWithLastResponse(TPutImpl::TPutResultVec &putResults) {
+    bool ReplyAndDieWithLastResponse(TPutImpl::TPutResultVec& putResults) {
         for (auto& [blobIdx, result] : putResults) {
             Y_ABORT_UNLESS(ResponsesSent != PutImpl.Blobs.size());
-            SendReply(result, blobIdx);
+            SendReply(std::move(result), blobIdx);
         }
         if (ResponsesSent == PutImpl.Blobs.size()) {
             PassAway();
+            Done = true;
             return true;
         }
         return false;
     }
 
-    void SendReply(std::unique_ptr<TEvBlobStorage::TEvPutResult> &putResult, ui64 blobIdx) {
+    void SendReply(std::unique_ptr<TEvBlobStorage::TEvPutResult> putResult, size_t blobIdx) {
         NKikimrProto::EReplyStatus status = putResult->Status;
         A_LOG_LOG_S(false, status == NKikimrProto::OK ? NLog::PRI_INFO : NLog::PRI_NOTICE, "BPP21",
             "SendReply putResult# " << putResult->ToString() << " ResponsesSent# " << ResponsesSent
             << " PutImpl.Blobs.size# " << PutImpl.Blobs.size()
             << " Last# " << (ResponsesSent + 1 == PutImpl.Blobs.size() ? "true" : "false"));
-        const TDuration duration = TActivationContext::Now() - StartTime;
+        const TDuration duration = TActivationContext::Monotonic() - StartTime;
         TLogoBlobID blobId = putResult->Id;
         TLogoBlobID origBlobId = TLogoBlobID(blobId, 0);
         Mon->CountPutPesponseTime(Info->GetDeviceType(), HandleClass, PutImpl.Blobs[blobIdx].BufferSize, duration);
@@ -345,7 +451,7 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
         LWPROBE(DSProxyRequestDuration, TEvBlobStorage::EvPut,
                 blobId.BlobSize(),
                 duration.SecondsFloat() * 1000.0,
-                blobId.TabletID(), Info->GroupID, blobId.Channel(),
+                blobId.TabletID(), Info->GroupID.GetRawId(), blobId.Channel(),
                 NKikimrBlobStorage::EPutHandleClass_Name(HandleClass), success);
         ResponsesSent++;
         Y_ABORT_UNLESS(ResponsesSent <= PutImpl.Blobs.size());
@@ -371,7 +477,7 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
     TString BlobIdSequenceToString() const {
         TStringBuilder blobIdsStr;
         blobIdsStr << '[';
-        for (ui64 blobIdx = 0; blobIdx < PutImpl.Blobs.size(); ++blobIdx) {
+        for (size_t blobIdx = 0; blobIdx < PutImpl.Blobs.size(); ++blobIdx) {
             if (blobIdx) {
                 blobIdsStr << ' ';
             }
@@ -380,7 +486,7 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
         return blobIdsStr << ']';
     }
 
-    std::unique_ptr<IEventBase> RestartQuery(ui32 counter) {
+    std::unique_ptr<IEventBase> RestartQuery(ui32 counter) override {
         ++*Mon->NodeMon->RestartPut;
         auto ev = std::make_unique<TEvBlobStorage::TEvBunchOfEvents>();
         for (auto& item : PutImpl.Blobs) {
@@ -394,7 +500,7 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
             ev->Bunch.emplace_back(new IEventHandle(
                 TActorId() /*recipient*/,
                 item.Recipient,
-                put = new TEvBlobStorage::TEvPut(item.BlobId, TRcBuf(item.Buffer), Deadline, HandleClass, Tactic),
+                put = new TEvBlobStorage::TEvPut(item.BlobId, TRcBuf(item.Buffer), item.Deadline, HandleClass, Tactic),
                 0 /*flags*/,
                 item.Cookie,
                 nullptr /*forwardOnNondelivery*/,
@@ -407,95 +513,59 @@ class TBlobStorageGroupPutRequest : public TBlobStorageGroupRequestActor<TBlobSt
     }
 
 public:
-    static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
-        return NKikimrServices::TActivity::BS_PROXY_PUT_ACTOR;
+    ::NMonitoring::TDynamicCounters::TCounterPtr& GetActiveCounter() const override {
+        return Mon->ActivePut;
     }
 
-    static const auto& ActiveCounter(const TIntrusivePtr<TBlobStorageGroupProxyMon>& mon) {
-        return mon->ActivePut;
-    }
-
-    static constexpr ERequestType RequestType() {
+    ERequestType GetRequestType() const override {
         return ERequestType::Put;
     }
 
-    TBlobStorageGroupPutRequest(const TIntrusivePtr<TBlobStorageGroupInfo> &info,
-            const TIntrusivePtr<TGroupQueues> &state, const TActorId &source,
-            const TIntrusivePtr<TBlobStorageGroupProxyMon> &mon, TEvBlobStorage::TEvPut *ev,
-            ui64 cookie, NWilson::TTraceId traceId, bool timeStatsEnabled,
-            TDiskResponsivenessTracker::TPerDiskStatsPtr stats,
-            TMaybe<TGroupStat::EKind> latencyQueueKind, TInstant now,
-            TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters,
-            bool enableRequestMod3x3ForMinLatecy)
-        : TBlobStorageGroupRequestActor(info, state, mon, source, cookie, std::move(traceId),
-                NKikimrServices::BS_PROXY_PUT, false, latencyQueueKind, now, storagePoolCounters,
-                ev->RestartCounter, "DSProxy.Put", nullptr)
-        , PutImpl(info, state, ev, mon, enableRequestMod3x3ForMinLatecy, source, cookie, Span.GetTraceId())
-        , WaitingVDiskResponseCount(info->GetTotalVDisksNum())
-        , Deadline(ev->Deadline)
-        , StartTime(now)
-        , HandleClass(ev->HandleClass)
+    TBlobStorageGroupPutRequest(TBlobStorageGroupPutParameters& params)
+        : TBlobStorageGroupRequestActor(params)
+        , PutImpl(Info, GroupQueues, params.Common.Event, Mon,
+                params.EnableRequestMod3x3ForMinLatency, params.Common.Source,
+                params.Common.Cookie, Span.GetTraceId(), params.AccelerationParams)
+        , WaitingVDiskResponseCount(Info->GetTotalVDisksNum())
+        , HandleClass(params.Common.Event->HandleClass)
         , ReportedBytes(0)
-        , TimeStatsEnabled(timeStatsEnabled)
-        , Tactic(ev->Tactic)
-        , Stats(std::move(stats))
-        , IsAccelerated(false)
-        , IsAccelerateScheduled(false)
-        , IsMultiPutMode(false)
-        , RequireExtraBlockChecks(!ev->ExtraBlockChecks.empty())
+        , TimeStatsEnabled(params.TimeStatsEnabled)
+        , Tactic(params.Common.Event->Tactic)
+        , Stats(std::move(params.Stats))
+        , AccelerationParams(params.AccelerationParams)
+        , IncarnationRecords(Info->GetTotalVDisksNum())
+        , ExpiredVDiskSet(&Info->GetTopology())
     {
-        if (ev->Orbit.HasShuttles()) {
+        if (params.Common.Event->Orbit.HasShuttles()) {
             RootCauseTrack.IsOn = true;
         }
         ReportBytes(PutImpl.Blobs[0].Buffer.capacity() + sizeof(*this));
 
-        RequestBytes = ev->Buffer.size();
+        RequestBytes = params.Common.Event->Buffer.size();
         RequestHandleClass = HandleClassToHandleClass(HandleClass);
-        MaxSaneRequests = info->Type.TotalPartCount() * (1ull + info->Type.Handoff()) * 2;
+        MaxSaneRequests = Info->Type.TotalPartCount() * (1ull + Info->Type.Handoff()) * 2;
     }
 
-    ui32 MaxRestartCounter(const TBatchedVec<TEvBlobStorage::TEvPut::TPtr>& events) {
-        ui32 res = 0;
-        for (const auto& ev : events) {
-            res = Max(res, ev->Get()->RestartCounter);
-        }
-        return res;
-    }
-
-    TBlobStorageGroupPutRequest(const TIntrusivePtr<TBlobStorageGroupInfo> &info,
-            const TIntrusivePtr<TGroupQueues> &state,
-            const TIntrusivePtr<TBlobStorageGroupProxyMon> &mon, TBatchedVec<TEvBlobStorage::TEvPut::TPtr> &events,
-            bool timeStatsEnabled, TDiskResponsivenessTracker::TPerDiskStatsPtr stats,
-            TMaybe<TGroupStat::EKind> latencyQueueKind, TInstant now,
-            TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters,
-            NKikimrBlobStorage::EPutHandleClass handleClass, TEvBlobStorage::TEvPut::ETactic tactic,
-            bool enableRequestMod3x3ForMinLatecy)
-        : TBlobStorageGroupRequestActor(info, state, mon, TActorId(), 0, NWilson::TTraceId(),
-                NKikimrServices::BS_PROXY_PUT, false, latencyQueueKind, now, storagePoolCounters,
-                MaxRestartCounter(events), "DSProxy.Put", nullptr)
-        , PutImpl(info, state, events, mon, handleClass, tactic, enableRequestMod3x3ForMinLatecy)
-        , WaitingVDiskResponseCount(info->GetTotalVDisksNum())
+    TBlobStorageGroupPutRequest(TBlobStorageGroupMultiPutParameters& params)
+        : TBlobStorageGroupRequestActor(params)
+        , PutImpl(Info, GroupQueues, params.Events, Mon, params.HandleClass, params.Tactic,
+                params.EnableRequestMod3x3ForMinLatency, params.AccelerationParams)
+        , WaitingVDiskResponseCount(Info->GetTotalVDisksNum())
         , IsManyPuts(true)
-        , Deadline(TInstant::Zero())
-        , StartTime(now)
-        , HandleClass(handleClass)
+        , HandleClass(params.HandleClass)
         , ReportedBytes(0)
-        , TimeStatsEnabled(timeStatsEnabled)
-        , Tactic(tactic)
-        , Stats(std::move(stats))
-        , IsAccelerated(false)
-        , IsAccelerateScheduled(false)
-        , IsMultiPutMode(true)
+        , TimeStatsEnabled(params.TimeStatsEnabled)
+        , Tactic(params.Tactic)
+        , Stats(std::move(params.Stats))
+        , AccelerationParams(params.AccelerationParams)
+        , IncarnationRecords(Info->GetTotalVDisksNum())
+        , ExpiredVDiskSet(&Info->GetTopology())
     {
-        Y_DEBUG_ABORT_UNLESS(events.size() <= MaxBatchedPutRequests);
-        for (auto &ev : events) {
+        Y_DEBUG_ABORT_UNLESS(params.Events.size() <= MaxBatchedPutRequests);
+        for (auto &ev : params.Events) {
             auto& msg = *ev->Get();
-            Deadline = Max(Deadline, msg.Deadline);
             if (msg.Orbit.HasShuttles()) {
                 RootCauseTrack.IsOn = true;
-            }
-            if (!msg.ExtraBlockChecks.empty()) {
-                RequireExtraBlockChecks = true;
             }
         }
 
@@ -506,7 +576,7 @@ public:
         }
         ReportBytes(sizeof(*this));
         RequestHandleClass = HandleClassToHandleClass(HandleClass);
-        MaxSaneRequests = info->Type.TotalPartCount() * (1ull + info->Type.Handoff()) * 2;
+        MaxSaneRequests = Info->Type.TotalPartCount() * (1ull + Info->Type.Handoff()) * 2;
     }
 
     void ReportBytes(i64 bytes) {
@@ -514,7 +584,7 @@ public:
         ReportedBytes += bytes;
     }
 
-    void Bootstrap() {
+    void Bootstrap() override {
         A_LOG_INFO_S("BPP13", "bootstrap"
             << " ActorId# " << SelfId()
             << " Group# " << Info->GroupID
@@ -522,14 +592,15 @@ public:
             << " BlobIDs# " << BlobIdSequenceToString()
             << " HandleClass# " << NKikimrBlobStorage::EPutHandleClass_Name(HandleClass)
             << " Tactic# " << TEvBlobStorage::TEvPut::TacticName(Tactic)
-            << " Deadline# " << Deadline
             << " RestartCounter# " << RestartCounter);
 
-        for (ui64 blobIdx = 0; blobIdx < PutImpl.Blobs.size(); ++blobIdx) {
+        StartTime = TActivationContext::Monotonic();
+
+        for (size_t blobIdx = 0; blobIdx < PutImpl.Blobs.size(); ++blobIdx) {
             LWTRACK(DSProxyPutBootstrapStart, PutImpl.Blobs[blobIdx].Orbit);
         }
 
-        Become(&TThis::StateWait, TDuration::MilliSeconds(DsPutWakeupMs), new TKikimrEvents::TEvWakeup);
+        Become(&TBlobStorageGroupPutRequest::StateWait, TDuration::MilliSeconds(DsPutWakeupMs), new TKikimrEvents::TEvWakeup);
 
         PartSets.resize(PutImpl.Blobs.size());
         for (auto& partSet : PartSets) {
@@ -539,6 +610,7 @@ public:
             BlobsEncrypted = PartSets.size();
         }
         ResumeBootstrap();
+        CheckRequests(TEvents::TSystem::Bootstrap);
     }
 
     bool EncodeQuantum() {
@@ -572,103 +644,119 @@ public:
         return true;
     }
 
-    void Handle(TKikimrEvents::TEvWakeup::TPtr &ev) {
-        Y_UNUSED(ev);
+    void HandleWakeup() {
         A_LOG_WARN_S("BPP14", "Wakeup "
             << " ActorId# " << SelfId()
             << " Group# " << Info->GroupID
             << " BlobIDs# " << BlobIdSequenceToString()
             << " Not answered in "
-            << (TActivationContext::Now() - StartTime).Seconds() << " seconds");
-        if (TInstant::Now() > Deadline) {
-            ErrorReason = "Deadline exceeded";
-            ReplyAndDie(NKikimrProto::DEADLINE);
-            return;
+            << (TActivationContext::Monotonic() - StartTime) << " seconds");
+        const TInstant now = TActivationContext::Now();
+        TPutImpl::TPutResultVec putResults;
+        for (size_t blobIdx = 0; blobIdx < PutImpl.Blobs.size(); ++blobIdx) {
+            if (!PutImpl.Blobs[blobIdx].Replied && now > PutImpl.Blobs[blobIdx].Deadline) {
+                PutImpl.PrepareOneReply(NKikimrProto::DEADLINE, blobIdx, LogCtx, "Deadline timer hit", putResults);
+            }
         }
+        ReplyAndDieWithLastResponse(putResults);
         Schedule(TDuration::MilliSeconds(DsPutWakeupMs), new TKikimrEvents::TEvWakeup);
     }
 
-    template <typename TPutEvent, typename TCookie>
-    void UpdatePengingVDiskResponseCount(const TDeque<std::unique_ptr<TPutEvent>> &putEvents) {
-        for (auto &event : putEvents) {
-            Y_ABORT_UNLESS(event->Record.HasCookie());
-            TCookie cookie(event->Record.GetCookie());
-            if (RootCauseTrack.IsOn) {
-                cookie.SetCauseIdx(RootCauseTrack.RegisterCause());
-                event->Record.SetCookie(cookie);
-            }
-            ui64 vdisk = cookie.GetVDiskOrderNumber();
-            Y_ABORT_UNLESS(vdisk < WaitingVDiskResponseCount.size());
-            if (!WaitingVDiskResponseCount[vdisk]) {
-                WaitingVDiskCount++;
-            }
-            WaitingVDiskResponseCount[vdisk]++;
+    void UpdatePengingVDiskResponseCount(const TDeque<TPutImpl::TPutEvent>& putEvents) {
+        for (auto& event : putEvents) {
+            std::visit([&](auto& event) {
+                //Y_ABORT_UNLESS(event->Record.HasCookie());
+                //TCookie cookie(event->Record.GetCookie());
+                //if (RootCauseTrack.IsOn) {
+                //    cookie.SetCauseIdx(RootCauseTrack.RegisterCause());
+                //    event->Record.SetCookie(cookie);
+                //}
+                const ui32 orderNumber = Info->GetOrderNumber(VDiskIDFromVDiskID(event->Record.GetVDiskID()));
+                Y_ABORT_UNLESS(orderNumber < WaitingVDiskResponseCount.size());
+                WaitingVDiskCount += !WaitingVDiskResponseCount[orderNumber]++;
+            }, event);
         }
     }
 
-    template<typename TEvV, typename TCookie>
-    struct TIssue {
-        void operator ()(TThis& self) {
-            TDeque<std::unique_ptr<TEvV>> events;
-            self.PutImpl.GenerateInitialRequests(self.LogCtx, self.PartSets, events);
-            self.UpdatePengingVDiskResponseCount<TEvV, TCookie>(events);
-            self.RequestsSent += events.size();
-            self.CountPuts(events);
-            self.SendToQueues(events, self.TimeStatsEnabled);
-        }
-    };
-
     void ResumeBootstrap() {
         if (EncodeQuantum()) {
-            if (IsMultiPutMode) {
-                TIssue<TEvBlobStorage::TEvVMultiPut, TVMultiPutCookie>()(*this);
-            } else {
-                TIssue<TEvBlobStorage::TEvVPut, TBlobCookie>()(*this);
-            }
+            PutImpl.GenerateInitialRequests(LogCtx, PartSets);
+            Action();
+            BootstrapInProgress = false;
         } else {
             TActivationContext::Send(new IEventHandle(TEvBlobStorage::EvResume, 0, SelfId(), {}, nullptr, 0));
         }
         SanityCheck();
     }
 
+    void CheckRequests(ui32 type) {
+        auto dumpIncarnationRecords = [&] {
+            TStringStream s;
+            s << '{';
+            for (ui32 i = 0; i < IncarnationRecords.size(); ++i) {
+                if (i) {
+                    s << ' ';
+                }
+                s << i;
+                auto& r = IncarnationRecords[i];
+                s << '{' << r.IncarnationGuid
+                    << ' ' << (r.ExpirationTimestamp != TMonotonic::Max() ? TStringBuilder() << r.ExpirationTimestamp : "-"_sb)
+                    << ' ' << (r.StatusIssueTimestamp != TMonotonic::Zero() ? TStringBuilder() << r.StatusIssueTimestamp : "-"_sb)
+                    << '}';
+            }
+            s << '}';
+            return s.Str();
+        };
+        const TMonotonic now = TActivationContext::Monotonic();
+        Y_VERIFY_S(ResponsesSent == PutImpl.Blobs.size()
+            || BootstrapInProgress
+            || RequestsSent > ResponsesReceived
+            || StatusMsgsSent > StatusResultMsgsReceived,
+            "query stuck"
+            << " Type# 0x" << Sprintf("%08" PRIx32, type)
+            << " ResponsesSent# " << ResponsesSent
+            << " Blobs.size# " << PutImpl.Blobs.size()
+            << " BootstrapInProgress# " << BootstrapInProgress
+            << " RequestsSent# " << RequestsSent
+            << " ResponsesReceived# " << ResponsesReceived
+            << " StatusMsgsSent# " << StatusMsgsSent
+            << " StatusResultMsgsReceived# " << StatusResultMsgsReceived
+            << " Now# " << now
+            << " Passed# " << (now - StartTime)
+            << " ExpiredVDiskSet# " << ExpiredVDiskSet.ToString()
+            << " IncarnationRecords# " << dumpIncarnationRecords()
+            << " State# " << PutImpl.DumpFullState());
+    }
+
     STATEFN(StateWait) {
-        if (ProcessEvent(ev)) {
+        if (ProcessEvent(ev, true)) {
             return;
         }
-        switch (ev->GetTypeRewrite()) {
+        const ui32 type = ev->GetTypeRewrite();
+        switch (type) {
+            hFunc(TEvBlobStorage::TEvVStatusResult, Handle);
             hFunc(TEvBlobStorage::TEvVPutResult, Handle);
             hFunc(TEvBlobStorage::TEvVMultiPutResult, Handle);
             hFunc(TEvAccelerate, Handle);
             cFunc(TEvBlobStorage::EvResume, ResumeBootstrap);
-            hFunc(TKikimrEvents::TEvWakeup, Handle);
+            cFunc(TEvents::TSystem::Wakeup, HandleWakeup);
+
+            default:
+                Y_DEBUG_ABORT("unexpected event Type# 0x%08" PRIx32, type);
         }
+        if (!Done) {
+            IssueStatusForExpiredDisks();
+        }
+        CheckRequests(type);
     }
 };
 
-IActor* CreateBlobStorageGroupPutRequest(const TIntrusivePtr<TBlobStorageGroupInfo> &info,
-        const TIntrusivePtr<TGroupQueues> &state, const TActorId &source,
-        const TIntrusivePtr<TBlobStorageGroupProxyMon> &mon, TEvBlobStorage::TEvPut *ev,
-        ui64 cookie, NWilson::TTraceId traceId, bool timeStatsEnabled,
-        TDiskResponsivenessTracker::TPerDiskStatsPtr stats,
-        TMaybe<TGroupStat::EKind> latencyQueueKind, TInstant now,
-        TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters,
-        bool enableRequestMod3x3ForMinLatecy) {
-    return new TBlobStorageGroupPutRequest(info, state, source, mon, ev, cookie, std::move(traceId), timeStatsEnabled,
-            std::move(stats), latencyQueueKind, now, storagePoolCounters, enableRequestMod3x3ForMinLatecy);
+IActor* CreateBlobStorageGroupPutRequest(TBlobStorageGroupPutParameters params) {
+    return new TBlobStorageGroupPutRequest(params);
 }
 
-IActor* CreateBlobStorageGroupPutRequest(const TIntrusivePtr<TBlobStorageGroupInfo> &info,
-        const TIntrusivePtr<TGroupQueues> &state,
-        const TIntrusivePtr<TBlobStorageGroupProxyMon> &mon, TBatchedVec<TEvBlobStorage::TEvPut::TPtr> &ev,
-        bool timeStatsEnabled,
-        TDiskResponsivenessTracker::TPerDiskStatsPtr stats,
-        TMaybe<TGroupStat::EKind> latencyQueueKind, TInstant now,
-        TIntrusivePtr<TStoragePoolCounters> &storagePoolCounters,
-        NKikimrBlobStorage::EPutHandleClass handleClass, TEvBlobStorage::TEvPut::ETactic tactic,
-        bool enableRequestMod3x3ForMinLatecy) {
-    return new TBlobStorageGroupPutRequest(info, state, mon, ev, timeStatsEnabled,
-            std::move(stats), latencyQueueKind, now, storagePoolCounters, handleClass, tactic,
-            enableRequestMod3x3ForMinLatecy);
+IActor* CreateBlobStorageGroupPutRequest(TBlobStorageGroupMultiPutParameters params) {
+    return new TBlobStorageGroupPutRequest(params);
 }
 
 }//NKikimr

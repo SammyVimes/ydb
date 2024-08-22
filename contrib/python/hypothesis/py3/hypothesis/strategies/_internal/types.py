@@ -19,20 +19,25 @@ import inspect
 import io
 import ipaddress
 import numbers
+import operator
 import os
 import random
 import re
 import sys
 import typing
 import uuid
+import warnings
+from functools import partial
 from pathlib import PurePath
 from types import FunctionType
-from typing import get_args, get_origin
+from typing import TYPE_CHECKING, Any, Iterator, Tuple, get_args, get_origin
 
 from hypothesis import strategies as st
-from hypothesis.errors import InvalidArgument, ResolutionFailed
+from hypothesis.errors import HypothesisWarning, InvalidArgument, ResolutionFailed
 from hypothesis.internal.compat import PYPY, BaseExceptionGroup, ExceptionGroup
 from hypothesis.internal.conjecture.utils import many as conjecture_utils_many
+from hypothesis.internal.filtering import max_len, min_len
+from hypothesis.internal.reflection import get_pretty_function_description
 from hypothesis.strategies._internal.datetime import zoneinfo  # type: ignore
 from hypothesis.strategies._internal.ipaddress import (
     SPECIAL_IPv4_RANGES,
@@ -41,6 +46,9 @@ from hypothesis.strategies._internal.ipaddress import (
 )
 from hypothesis.strategies._internal.lazy import unwrap_strategies
 from hypothesis.strategies._internal.strategies import OneOfStrategy
+
+if TYPE_CHECKING:
+    import annotated_types as at
 
 GenericAlias: typing.Any
 UnionType: typing.Any
@@ -267,19 +275,94 @@ def is_annotated_type(thing):
     )
 
 
-def find_annotated_strategy(annotated_type):  # pragma: no cover
-    flattened_meta = []
+def get_constraints_filter_map():
+    if at := sys.modules.get("annotated_types"):
+        return {
+            # Due to the order of operator.gt/ge/lt/le arguments, order is inversed:
+            at.Gt: lambda constraint: partial(operator.lt, constraint.gt),
+            at.Ge: lambda constraint: partial(operator.le, constraint.ge),
+            at.Lt: lambda constraint: partial(operator.gt, constraint.lt),
+            at.Le: lambda constraint: partial(operator.ge, constraint.le),
+            at.MinLen: lambda constraint: partial(min_len, constraint.min_length),
+            at.MaxLen: lambda constraint: partial(max_len, constraint.max_length),
+            at.Predicate: lambda constraint: constraint.func,
+        }
+    return {}  # pragma: no cover
 
-    all_args = (
-        *getattr(annotated_type, "__args__", ()),
-        *getattr(annotated_type, "__metadata__", ()),
-    )
-    for arg in all_args:
-        if is_annotated_type(arg):
-            flattened_meta.append(find_annotated_strategy(arg))
+
+def _get_constraints(args: Tuple[Any, ...]) -> Iterator["at.BaseMetadata"]:
+    at = sys.modules.get("annotated_types")
+    for arg in args:
+        if at and isinstance(arg, at.BaseMetadata):
+            yield arg
+        elif getattr(arg, "__is_annotated_types_grouped_metadata__", False):
+            for subarg in arg:
+                if getattr(subarg, "__is_annotated_types_grouped_metadata__", False):
+                    yield from _get_constraints(tuple(subarg))
+                else:
+                    yield subarg
+        elif at and isinstance(arg, slice) and arg.step in (1, None):
+            yield from at.Len(arg.start or 0, arg.stop)
+
+
+def _flat_annotated_repr_parts(annotated_type):
+    # Helper to get a good error message in find_annotated_strategy() below.
+    type_reps = [
+        get_pretty_function_description(a)
+        for a in annotated_type.__args__
+        if not isinstance(a, typing.TypeVar)
+    ]
+    metadata_reps = []
+    for m in getattr(annotated_type, "__metadata__", ()):
+        if is_annotated_type(m):
+            ts, ms = _flat_annotated_repr_parts(m)
+            type_reps.extend(ts)
+            metadata_reps.extend(ms)
+        else:
+            metadata_reps.append(get_pretty_function_description(m))
+    return type_reps, metadata_reps
+
+
+def find_annotated_strategy(annotated_type):
+    metadata = getattr(annotated_type, "__metadata__", ())
+
+    if any(is_annotated_type(arg) for arg in metadata):
+        # Annotated[Annotated[T], ...] is perfectly acceptable, but it's all to easy
+        # to instead write Annotated[T1, Annotated[T2, ...]] - and nobody else checks
+        # for that at runtime.  Once you add generics this can be seriously confusing,
+        # so we go to some trouble to give a helpful error message.
+        # For details: https://github.com/HypothesisWorks/hypothesis/issues/3891
+        ty_rep = repr(annotated_type).replace("typing.Annotated", "Annotated")
+        ts, ms = _flat_annotated_repr_parts(annotated_type)
+        bits = ", ".join([" | ".join(dict.fromkeys(ts or "?")), *dict.fromkeys(ms)])
+        raise ResolutionFailed(
+            f"`{ty_rep}` is invalid because nesting Annotated is only allowed for "
+            f"the first (type) argument, not for later (metadata) arguments.  "
+            f"Did you mean `Annotated[{bits}]`?"
+        )
+    for arg in reversed(metadata):
         if isinstance(arg, st.SearchStrategy):
-            flattened_meta.append(arg)
-    return flattened_meta[-1] if flattened_meta else None
+            return arg
+
+    filter_conditions = []
+    unsupported = []
+    constraints_map = get_constraints_filter_map()
+    for constraint in _get_constraints(metadata):
+        if isinstance(constraint, st.SearchStrategy):
+            return constraint
+        if convert := constraints_map.get(type(constraint)):
+            filter_conditions.append(convert(constraint))
+        else:
+            unsupported.append(constraint)
+    if unsupported:
+        msg = f"Ignoring unsupported {', '.join(map(repr, unsupported))}"
+        warnings.warn(msg, HypothesisWarning, stacklevel=2)
+
+    base_strategy = st.from_type(annotated_type.__origin__)
+    for filter_condition in filter_conditions:
+        base_strategy = base_strategy.filter(filter_condition)
+
+    return base_strategy
 
 
 def has_type_arguments(type_):
@@ -305,7 +388,12 @@ def is_generic_type(type_):
     )
 
 
-def _try_import_forward_ref(thing, bound):  # pragma: no cover
+__EVAL_TYPE_TAKES_TYPE_PARAMS = (
+    "type_params" in inspect.signature(typing._eval_type).parameters  # type: ignore
+)
+
+
+def _try_import_forward_ref(thing, bound, *, type_params):  # pragma: no cover
     """
     Tries to import a real bound type from ``TypeVar`` bound to a ``ForwardRef``.
 
@@ -314,7 +402,10 @@ def _try_import_forward_ref(thing, bound):  # pragma: no cover
     because we can only cover each path in a separate python version.
     """
     try:
-        return typing._eval_type(bound, vars(sys.modules[thing.__module__]), None)
+        kw = {"globalns": vars(sys.modules[thing.__module__]), "localns": None}
+        if __EVAL_TYPE_TAKES_TYPE_PARAMS:
+            kw["type_params"] = type_params
+        return typing._eval_type(bound, **kw)
     except (KeyError, AttributeError, NameError):
         # We fallback to `ForwardRef` instance, you can register it as a type as well:
         # >>> from typing import ForwardRef
@@ -423,8 +514,9 @@ def from_typing_type(thing):
             for T in [*union_elems, elem_type]
         ):
             mapping.pop(bytes, None)
-            mapping.pop(collections.abc.ByteString, None)
-            mapping.pop(typing.ByteString, None)
+            if sys.version_info[:2] <= (3, 13):
+                mapping.pop(collections.abc.ByteString, None)
+                mapping.pop(typing.ByteString, None)
     elif (
         (not mapping)
         and isinstance(thing, typing.ForwardRef)
@@ -573,17 +665,18 @@ _global_type_lookup: typing.Dict[
     BaseExceptionGroup: st.builds(
         BaseExceptionGroup,
         st.text(),
-        st.lists(st.from_type(BaseException), min_size=1),
+        st.lists(st.from_type(BaseException), min_size=1, max_size=5),
     ),
     ExceptionGroup: st.builds(
         ExceptionGroup,
         st.text(),
-        st.lists(st.from_type(Exception), min_size=1),
+        st.lists(st.from_type(Exception), min_size=1, max_size=5),
     ),
     enumerate: st.builds(enumerate, st.just(())),
     filter: st.builds(filter, st.just(lambda _: None), st.just(())),
     map: st.builds(map, st.just(lambda _: None), st.just(())),
     reversed: st.builds(reversed, st.just(())),
+    zip: st.builds(zip),  # avoids warnings on PyPy 7.3.14+
     property: st.builds(property, st.just(lambda _: None)),
     classmethod: st.builds(classmethod, st.just(lambda self: self)),
     staticmethod: st.builds(staticmethod, st.just(lambda self: self)),
@@ -607,14 +700,16 @@ if sys.version_info[:2] >= (3, 9):
     # which includes this... but we don't actually ever want to build one.
     _global_type_lookup[os._Environ] = st.just(os.environ)
 
+if sys.version_info[:2] <= (3, 13):
+    # Note: while ByteString notionally also represents the bytearray and
+    # memoryview types, it is a subclass of Hashable and those types are not.
+    # We therefore only generate the bytes type. type-ignored due to deprecation.
+    _global_type_lookup[typing.ByteString] = st.binary()  # type: ignore
+    _global_type_lookup[collections.abc.ByteString] = st.binary()  # type: ignore
+
 
 _global_type_lookup.update(
     {
-        # Note: while ByteString notionally also represents the bytearray and
-        # memoryview types, it is a subclass of Hashable and those types are not.
-        # We therefore only generate the bytes type. type-ignored due to deprecation.
-        typing.ByteString: st.binary(),  # type: ignore
-        collections.abc.ByteString: st.binary(),  # type: ignore
         # TODO: SupportsAbs and SupportsRound should be covariant, ie have functions.
         typing.SupportsAbs: st.one_of(
             st.booleans(),
@@ -661,7 +756,7 @@ _global_type_lookup.update(
             st.binary(),
             st.integers(0, 255),
             # As with Reversible, we tuplize this for compatibility with Hashable.
-            st.lists(st.integers(0, 255)).map(tuple),  # type: ignore
+            st.lists(st.integers(0, 255)).map(tuple),
         ),
         typing.BinaryIO: st.builds(io.BytesIO, st.binary()),
         typing.TextIO: st.builds(io.StringIO, st.text()),
@@ -946,7 +1041,9 @@ def resolve_TypeVar(thing):
     if getattr(thing, "__bound__", None) is not None:
         bound = thing.__bound__
         if isinstance(bound, typing.ForwardRef):
-            bound = _try_import_forward_ref(thing, bound)
+            # TODO: on Python 3.13 and later, we should work out what type_params
+            #       could be part of this type, and pass them in here.
+            bound = _try_import_forward_ref(thing, bound, type_params=())
         strat = unwrap_strategies(st.from_type(bound))
         if not isinstance(strat, OneOfStrategy):
             return strat

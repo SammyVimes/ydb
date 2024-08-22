@@ -12,13 +12,11 @@ NYql::NDq::IDqOutputConsumer::TPtr KqpBuildOutputConsumer(const NYql::NDqProto::
     const NKikimr::NMiniKQL::THolderFactory& holderFactory,
     TVector<NYql::NDq::IDqOutput::TPtr>&& outputs);
 
-TIntrusivePtr<NYql::NDq::IDqTaskRunner> CreateKqpTaskRunner(const NYql::NDq::TDqTaskRunnerContext& execCtx,
-    const NYql::NDq::TDqTaskRunnerSettings& settings, const NYql::NDq::TLogFunc& logFunc);
-
 
 class TKqpTasksRunner : public TSimpleRefCount<TKqpTasksRunner>, private TNonCopyable {
 public:
     TKqpTasksRunner(google::protobuf::RepeatedPtrField<NYql::NDqProto::TDqTask>&& tasks,
+                    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc,
                     const NYql::NDq::TDqTaskRunnerContext& execCtx, const NYql::NDq::TDqTaskRunnerSettings& settings,
                     const NYql::NDq::TLogFunc& logFunc);
 
@@ -61,7 +59,7 @@ private:
     TMap<ui64, NYql::NDq::TDqTaskSettings> Tasks;
     TMap<ui64, const NYql::NDq::TDqTaskRunnerStats*> Stats;
     NYql::NDq::TLogFunc LogFunc;
-    NMiniKQL::TScopedAlloc* Alloc;
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> Alloc;
     NMiniKQL::TKqpComputeContextBase* ComputeCtx;
     NMiniKQL::TKqpDatashardApplyContext* ApplyCtx;
 
@@ -75,6 +73,7 @@ private:
 
 
 TIntrusivePtr<TKqpTasksRunner> CreateKqpTasksRunner(google::protobuf::RepeatedPtrField<NYql::NDqProto::TDqTask>&& tasks,
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc,
     const NYql::NDq::TDqTaskRunnerContext& execCtx, const NYql::NDq::TDqTaskRunnerSettings& settings,
     const NYql::NDq::TLogFunc& logFunc);
 

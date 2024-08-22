@@ -5,6 +5,7 @@
 #include <ydb/core/persqueue/cluster_tracker.h>
 #include <ydb/core/protos/flat_tx_scheme.pb.h>
 #include <ydb/core/mind/address_classification/net_classifier.h>
+#include <ydb/public/api/protos/draft/persqueue_error_codes.pb.h>
 #include <ydb/public/lib/deprecated/kicli/kicli.h>
 #include <ydb/public/sdk/cpp/client/ydb_driver/driver.h>
 #include <ydb/public/sdk/cpp/client/ydb_table/table.h>
@@ -28,6 +29,7 @@ const static ui32 PQ_DEFAULT_NODE_COUNT = 2;
 inline Tests::TServerSettings PQSettings(ui16 port = 0, ui32 nodesCount = PQ_DEFAULT_NODE_COUNT, const TString& yql_timeout = "10", const THolder<TTempFileHandle>& netDataFile = nullptr) {
     NKikimrPQ::TPQConfig pqConfig;
     NKikimrProto::TAuthConfig authConfig;
+    authConfig.SetUseBuiltinDomain(true);
     authConfig.SetUseBlackBox(false);
     authConfig.SetUseAccessService(false);
     authConfig.SetUseAccessServiceTLS(false);
@@ -498,9 +500,18 @@ private:
 public:
     void RunYqlSchemeQuery(TString query, bool expectSuccess = true) {
         auto tableClient = NYdb::NTable::TTableClient(*Driver);
-        auto result = tableClient.RetryOperationSync([&](NYdb::NTable::TSession session) {
-            return session.ExecuteSchemeQuery(query).GetValueSync();
-        });
+
+        NYdb::TStatus result(NYdb::EStatus::SUCCESS, NYql::TIssues());
+        for (size_t i = 0; i < 10; ++i) {
+            result = tableClient.RetryOperationSync([&](NYdb::NTable::TSession session) {
+                return session.ExecuteSchemeQuery(query).GetValueSync();
+            });
+            if (!expectSuccess || result.IsSuccess()) {
+                break;
+            }
+            Sleep(TDuration::Seconds(1));
+        }
+
         if (expectSuccess) {
             UNIT_ASSERT_C(result.IsSuccess(), result.GetIssues().ToString());
         } else {
@@ -542,7 +553,7 @@ public:
         auto driverConfig = NYdb::TDriverConfig()
             .SetEndpoint(endpoint)
             .SetLog(CreateLogBackend("cerr", ELogPriority::TLOG_DEBUG));
-        if (databaseName) 
+        if (databaseName)
             driverConfig.SetDatabase(*databaseName);
         Driver.Reset(MakeHolder<NYdb::TDriver>(driverConfig));
 
@@ -599,6 +610,7 @@ public:
            "Columns { Name: \"Partition\"        Type: \"Uint32\"}"
            "Columns { Name: \"CreateTime\"       Type: \"Uint64\"}"
            "Columns { Name: \"AccessTime\"       Type: \"Uint64\"}"
+           "Columns { Name: \"SeqNo\"            Type: \"Uint64\"}"
            "KeyColumnNames: [\"Hash\", \"SourceId\", \"Topic\"]"
         );
     }
@@ -790,7 +802,7 @@ public:
     {
         auto response = RequestTopicMetadata(name);
 
-        if (response.GetErrorCode() != (ui32)NPersQueue::NErrorCode::OK) 
+        if (response.GetErrorCode() != (ui32)NPersQueue::NErrorCode::OK)
             return 0;
 
         UNIT_ASSERT(response.HasMetaResponse());
@@ -877,8 +889,8 @@ public:
 
     void GrantConsumerAccess(const TString& oldName, const TString& subj) {
         NACLib::TDiffACL acl;
-        acl.AddAccess(NACLib::EAccessType::Allow, NACLib::ReadAttributes, subj);
-        acl.AddAccess(NACLib::EAccessType::Allow, NACLib::WriteAttributes, subj);
+        // in future use right UseConsumer
+        acl.AddAccess(NACLib::EAccessType::Allow, NACLib::SelectRow, subj);
         auto name = NPersQueue::ConvertOldConsumerName(oldName);
         auto pos = name.rfind("/");
         Y_ABORT_UNLESS(pos != TString::npos);
@@ -988,17 +1000,31 @@ public:
         THolder<NMsgBusProxy::TBusPersQueue> alterRequest = requestDescr.GetRequest();
 
         ui32 prevVersion = GetTopicVersionFromMetadata(name);
+        while (prevVersion == 0) {
+            Sleep(TDuration::MilliSeconds(500));
 
+            prevVersion = GetTopicVersionFromMetadata(name);
+        }
         CallPersQueueGRPC(alterRequest->Record);
+        Cerr << "Alter got " << prevVersion << "\n";
 
         const TInstant start = TInstant::Now();
         AlterTopic();
-        while (GetTopicVersionFromMetadata(name, cacheSize) != prevVersion + 1) {
+        auto ver = GetTopicVersionFromMetadata(name, cacheSize);
+        while (ver != prevVersion + 1) {
+            Cerr << "Alter1 got " << ver << "\n";
+
             Sleep(TDuration::MilliSeconds(500));
+            ver = GetTopicVersionFromMetadata(name, cacheSize);
             UNIT_ASSERT(TInstant::Now() - start < ::DEFAULT_DISPATCH_TIMEOUT);
         }
-        while (GetTopicVersionFromPath(name) != prevVersion + 1) {
+        auto ver2 = GetTopicVersionFromPath(name);
+        while (ver2 != prevVersion + 1) {
+            Cerr << "Alter2 got " << ver << "\n";
+
             Sleep(TDuration::MilliSeconds(500));
+            ver2 = GetTopicVersionFromPath(name);
+
             UNIT_ASSERT(TInstant::Now() - start < ::DEFAULT_DISPATCH_TIMEOUT);
         }
 
@@ -1066,7 +1092,7 @@ public:
         Cerr << "ChooseProxy response:\n" << PrintToString(response) << Endl;
 
         UNIT_ASSERT_C(status.ok(), status.error_message());
- 
+
         UNIT_ASSERT_VALUES_EQUAL_C((NMsgBusProxy::EResponseStatus)response.GetStatus(), NMsgBusProxy::MSTATUS_OK, "proxy failure");
     }
 
@@ -1081,7 +1107,7 @@ public:
         TString cookie = GetOwnership({writeRequest.Topic, writeRequest.Partition}, expectedOwnerStatus);
 
         THolder<NMsgBusProxy::TBusPersQueue> request = writeRequest.GetRequest(data, cookie);
-        if (!ticket.empty()) 
+        if (!ticket.empty())
             request.Get()->Record.SetTicket(ticket);
 
         auto response = CallPersQueueGRPC(request->Record);
@@ -1412,6 +1438,8 @@ public:
         auto settings = NYdb::NPersQueue::TCreateTopicSettings().PartitionsCount(params.PartsCount).ClientWriteDisabled(!params.CanWrite);
         settings.FederationAccount(params.Account);
         settings.SupportedCodecs(params.Codecs);
+        //settings.MaxPartitionWriteSpeed(50_MB);
+        //settings.MaxPartitionWriteBurst(50_MB);
         TVector<NYdb::NPersQueue::TReadRuleSettings> rrSettings;
         for (auto &user : params.ReadRules) {
             rrSettings.push_back({NYdb::NPersQueue::TReadRuleSettings{}.ConsumerName(user)});

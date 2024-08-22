@@ -115,6 +115,20 @@ DEFINE_REFCOUNTED_TYPE(IReconfigurableThroughputThrottler)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+//! An interface for unit test purpose.
+/*!
+ *  Thread affinity: any
+ */
+struct ITestableReconfigurableThroughputThrottler
+    : public IReconfigurableThroughputThrottler
+{
+    virtual void SetLastUpdated(TInstant lastUpdated) = 0;
+};
+
+DEFINE_REFCOUNTED_TYPE(ITestableReconfigurableThroughputThrottler)
+
+////////////////////////////////////////////////////////////////////////////////
+
 //! Constructs a throttler from #config.
 IReconfigurableThroughputThrottlerPtr CreateReconfigurableThroughputThrottler(
     TThroughputThrottlerConfigPtr config,
@@ -129,10 +143,10 @@ IReconfigurableThroughputThrottlerPtr CreateNamedReconfigurableThroughputThrottl
     NProfiling::TProfiler profiler = {});
 
 //! Returns a throttler that imposes no throughput limit.
-IThroughputThrottlerPtr GetUnlimitedThrottler();
+IReconfigurableThroughputThrottlerPtr GetUnlimitedThrottler();
 
 //! Returns a throttler that imposes no throughput limit and profiles throughput.
-IThroughputThrottlerPtr CreateNamedUnlimitedThroughputThrottler(
+IReconfigurableThroughputThrottlerPtr CreateNamedUnlimitedThroughputThrottler(
     const TString& name,
     NProfiling::TProfiler profiler = {});
 

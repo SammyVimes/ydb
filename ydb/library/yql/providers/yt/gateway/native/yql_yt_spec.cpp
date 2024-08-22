@@ -187,8 +187,39 @@ void FillSpec(NYT::TNode& spec,
         }
     }
 
+    NYT::TNode annotations;
     if (auto val = settings->Annotations.Get(cluster)) {
-        spec["annotations"] = *val;
+        annotations = NYT::TNode::CreateMap(val.Get()->AsMap());
+    } else {
+        annotations = NYT::TNode::CreateMap();
+    }
+
+    // merge annotations from attributes
+    if (auto attrs = execCtx.Session_->OperationOptions_.AttrsYson.GetOrElse(TString())) {
+        NYT::TNode node = NYT::NodeFromYsonString(attrs);
+        if (auto attrAnnotations = node.AsMap().FindPtr("yt_annotations")) {
+            if (!attrAnnotations->IsMap()) {
+                throw yexception() << "Operation attribute \"yt_annotations\" should be a map";
+            }
+            for (const auto& [k, v] : attrAnnotations->AsMap()) {
+                auto it = annotations.AsMap().find(k);
+                if (it == annotations.AsMap().end()) {
+                    annotations[k] = v;
+                }
+            }
+        }
+    }
+
+    if (!annotations.Empty()) {
+        spec["annotations"] = std::move(annotations);
+    }
+
+    if (auto val = settings->StartedBy.Get(cluster)) {
+        spec["started_by"] = *val;
+    }
+
+    if (auto val = settings->Description.Get(cluster)) {
+        spec["description"] = *val;
     }
 
     if (!opProps.HasFlags(EYtOpProp::IntermediateData)) {
@@ -447,6 +478,15 @@ void FillSpec(NYT::TNode& spec,
         }
     }
 
+    if (auto val = settings->DockerImage.Get(cluster)) {
+        if (opProps.HasFlags(EYtOpProp::WithMapper)) {
+            spec["mapper"]["docker_image"] = *val;
+        }
+        if (opProps.HasFlags(EYtOpProp::WithReducer)) {
+            spec["reducer"]["docker_image"] = *val;
+        }
+    }
+
     if (auto val = settings->MaxSpeculativeJobCountPerTask.Get(cluster)) {
         spec["max_speculative_job_count_per_task"] = i64(*val);
     }
@@ -463,6 +503,14 @@ void FillSpec(NYT::TNode& spec,
         if (auto val = settings->_ForceJobSizeAdjuster.Get(cluster)) {
             spec["force_job_size_adjuster"] = *val;
         }
+    }
+
+    if (opProps.HasFlags(EYtOpProp::WithMapper)) {
+        spec["mapper"]["environment"]["TMPDIR"] = ".";
+    }
+
+    if (opProps.HasFlags(EYtOpProp::WithReducer)) {
+        spec["reducer"]["environment"]["TMPDIR"] = ".";
     }
 }
 

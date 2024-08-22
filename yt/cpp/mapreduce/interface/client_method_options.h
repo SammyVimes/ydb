@@ -37,6 +37,7 @@ enum ENodeType : int
     NT_LINK                 /* "link" */,
     NT_GROUP                /* "group" */,
     NT_PORTAL               /* "portal_entrance" */,
+    NT_CHAOS_TABLE_REPLICA  /* "chaos_table_replica" */,
 };
 
 ///
@@ -538,13 +539,24 @@ struct TFileWriterOptions
     FLUENT_FIELD_OPTION(bool, ComputeMD5);
 
     ///
+    /// @brief Wheter to call Finish automatically in writer destructor.
+    ///
+    /// If set to true (default) Finish() is called automatically in the destructor of writer.
+    /// It is convenient for simple usecases but might be error-prone if writing exception safe code
+    /// (In case of exceptions it's common to abort writer and not commit partial data).
+    ///
+    /// If set to false Finish() has to be called explicitly.
+    FLUENT_FIELD_DEFAULT(bool, AutoFinish, true);
+
+    ///
     /// @brief Options to control how YT server side writes data.
     ///
     /// @see NYT::TWriterOptions
     FLUENT_FIELD_OPTION(TWriterOptions, WriterOptions);
 };
 
-class TSkiffRowHints {
+class TSkiffRowHints
+{
 public:
     /// @cond Doxygen_Suppress
     using TSelf = TSkiffRowHints;
@@ -555,6 +567,12 @@ public:
     ///
     /// You can set something in it to pass necessary information to CreateSkiffParser<...>() and GetSkiffSchema<...>() functions.
     FLUENT_FIELD_OPTION(TNode, Attributes);
+
+    ///
+    /// @brief Index of table in parallel table reader.
+    ///
+    /// For internal usage only. If you set it, it will be overriden by parallel table reader.
+    FLUENT_FIELD_OPTION(int, TableIndex);
 };
 
 /// Options that control how C++ objects represent table rows when reading or writing a table.
@@ -687,6 +705,16 @@ struct TTableWriterOptions
     /// @note Default values for this option may differ depending on the row type.
     /// For protobuf it's currently false by default.
     FLUENT_FIELD_OPTION(bool, InferSchema);
+
+    ///
+    /// @brief Wheter to call Finish automatically in writer destructor.
+    ///
+    /// If set to true (default) Finish() is called automatically in the destructor of writer.
+    /// It is convenient for simple usecases but might be error-prone if writing exception safe code
+    /// (In case of exceptions it's common to abort writer and not commit partial data).
+    ///
+    /// If set to false Finish() has to be called explicitly.
+    FLUENT_FIELD_DEFAULT(bool, AutoFinish, true);
 
     ///
     /// @brief Options to control how YT server side writes data.

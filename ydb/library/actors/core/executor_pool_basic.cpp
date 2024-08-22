@@ -1,8 +1,15 @@
 #include "executor_pool_basic.h"
 #include "executor_pool_basic_feature_flags.h"
+#include "executor_pool_basic_sanitizer.h"
+#include "executor_pool_jail.h"
 #include "actor.h"
+#include "config.h"
+#include "executor_thread_ctx.h"
 #include "probes.h"
 #include "mailbox.h"
+#include "thread_context.h"
+#include <atomic>
+#include <memory>
 #include <ydb/library/actors/util/affinity.h>
 #include <ydb/library/actors/util/datetime.h>
 
@@ -11,6 +18,15 @@
 #endif
 
 namespace NActors {
+
+#ifndef NDEBUG
+    constexpr bool DebugMode = true;
+#else
+    constexpr bool DebugMode = false;
+#endif
+
+
+
     LWTRACE_USING(ACTORLIB_PROVIDER);
 
 
@@ -18,6 +34,13 @@ namespace NActors {
     const ui64 TWaitingStatsConstants::HistogramResolution = NHPTimer::GetCyclesPerSecond() * 0.000001 * HistogramResolutionUs;
 
     constexpr TDuration TBasicExecutorPool::DEFAULT_TIME_PER_MAILBOX;
+
+    TString GetCurrentThreadKind() { 
+        if (TlsThreadContext) {
+            return TlsThreadContext->WorkerId >= 0 ? "[common]" : "[shared]";
+        }
+        return "[outsider]";
+    }
 
     TBasicExecutorPool::TBasicExecutorPool(
         ui32 poolId,
@@ -29,32 +52,67 @@ namespace NActors {
         TDuration timePerMailbox,
         ui32 eventsPerMailbox,
         int realtimePriority,
-        ui32 maxActivityType,
+        ui32 /*maxActivityType*/,
         i16 minThreadCount,
         i16 maxThreadCount,
         i16 defaultThreadCount,
-        i16 priority)
-        : TExecutorPoolBase(poolId, threads, affinity)
-        , DefaultSpinThresholdCycles(spinThreshold * NHPTimer::GetCyclesPerSecond() * 0.000001) // convert microseconds to cycles
-        , SpinThresholdCycles(DefaultSpinThresholdCycles)
-        , SpinThresholdCyclesPerThread(new NThreading::TPadded<std::atomic<ui64>>[threads])
-        , Threads(new NThreading::TPadded<TThreadCtx>[threads])
-        , WaitingStats(new TWaitingStats<ui64>[threads])
-        , PoolName(poolName)
-        , TimePerMailbox(timePerMailbox)
-        , EventsPerMailbox(eventsPerMailbox)
-        , RealtimePriority(realtimePriority)
-        , ThreadUtilization(0)
-        , MaxUtilizationCounter(0)
-        , MaxUtilizationAccumulator(0)
-        , WrongWakenedThreadCount(0)
-        , ThreadCount(threads)
-        , MinThreadCount(minThreadCount)
-        , MaxThreadCount(maxThreadCount)
-        , DefaultThreadCount(defaultThreadCount)
-        , Harmonizer(harmonizer)
-        , Priority(priority)
+        i16 priority,
+        bool hasOwnSharedThread,
+        TExecutorPoolJail *jail
+    )
+        : TBasicExecutorPool(TBasicExecutorPoolConfig{
+            .PoolId = poolId,
+            .PoolName = poolName,
+            .Threads = threads,
+            .SpinThreshold = spinThreshold,
+            .Affinity = (affinity ? static_cast<TCpuMask>(*affinity) : TCpuMask{}),
+            .TimePerMailbox = timePerMailbox,
+            .EventsPerMailbox = eventsPerMailbox,
+            .RealtimePriority = realtimePriority,
+            .MinThreadCount = minThreadCount,
+            .MaxThreadCount = maxThreadCount,
+            .DefaultThreadCount = defaultThreadCount,
+            .Priority = priority,
+            .HasSharedThread = hasOwnSharedThread,
+        }, harmonizer, jail)
     {
+        if (affinity != nullptr) {
+            delete affinity;
+        }
+    }
+
+    TBasicExecutorPool::TBasicExecutorPool(const TBasicExecutorPoolConfig& cfg, IHarmonizer *harmonizer, TExecutorPoolJail *jail)
+        : TExecutorPoolBase(cfg.PoolId, cfg.Threads, new TAffinity(cfg.Affinity), cfg.UseRingQueue)
+        , DefaultSpinThresholdCycles(cfg.SpinThreshold * NHPTimer::GetCyclesPerSecond() * 0.000001) // convert microseconds to cycles
+        , SpinThresholdCycles(DefaultSpinThresholdCycles)
+        , SpinThresholdCyclesPerThread(new NThreading::TPadded<std::atomic<ui64>>[cfg.Threads])
+        , Threads(new NThreading::TPadded<TExecutorThreadCtx>[cfg.Threads])
+        , WaitingStats(new TWaitingStats<ui64>[cfg.Threads])
+        , PoolName(cfg.PoolName)
+        , TimePerMailbox(cfg.TimePerMailbox)
+        , EventsPerMailbox(cfg.EventsPerMailbox)
+        , RealtimePriority(cfg.RealtimePriority)
+        , ThreadCount(cfg.Threads)
+        , MinFullThreadCount(cfg.MinThreadCount)
+        , MaxFullThreadCount(cfg.MaxThreadCount)
+        , DefaultFullThreadCount(cfg.DefaultThreadCount)
+        , Harmonizer(harmonizer)
+        , SoftProcessingDurationTs(cfg.SoftProcessingDurationTs)
+        , HasOwnSharedThread(cfg.HasSharedThread)
+        , Priority(cfg.Priority)
+        , Jail(jail)
+        , ActorSystemProfile(cfg.ActorSystemProfile)
+    {
+        Y_UNUSED(Jail, SoftProcessingDurationTs);
+        for (ui32 idx = 0; idx < MaxSharedThreadsForPool; ++idx) {
+            SharedThreads[idx].store(nullptr, std::memory_order_release);
+        }
+
+        ui32 threads = ThreadCount;
+        if (HasOwnSharedThread && threads) {
+            threads = threads - 1;
+        }
+
         if constexpr (NFeatures::IsLocalQueues()) {
             LocalQueues.Reset(new NThreading::TPadded<std::queue<ui32>>[threads]);
             if constexpr (NFeatures::TLocalQueuesFeatureFlags::FIXED_LOCAL_QUEUE_SIZE) {
@@ -72,177 +130,37 @@ namespace NActors {
             MovingWaitingStats.Reset(new TWaitingStats<double>[threads]);
         }
 
-        Y_UNUSED(maxActivityType);
         i16 limit = Min(threads, (ui32)Max<i16>());
-        if (DefaultThreadCount) {
-            DefaultThreadCount = Min(DefaultThreadCount, limit);
+        if (DefaultFullThreadCount) {
+            DefaultFullThreadCount = Min<i16>(DefaultFullThreadCount - HasOwnSharedThread, limit);
         } else {
-            DefaultThreadCount = limit;
+            DefaultFullThreadCount = limit;
         }
 
-        MaxThreadCount = Min(Max(MaxThreadCount, DefaultThreadCount), limit);
+        MaxFullThreadCount = Min(Max<i16>(MaxFullThreadCount - HasOwnSharedThread, DefaultFullThreadCount), limit);
 
-        if (MinThreadCount) {
-            MinThreadCount = Max((i16)1, Min(MinThreadCount, DefaultThreadCount));
+        if (MinFullThreadCount) {
+            MinFullThreadCount = Min<i16>(MinFullThreadCount - HasOwnSharedThread, DefaultFullThreadCount);
         } else {
-            MinThreadCount = DefaultThreadCount;
+            MinFullThreadCount = DefaultFullThreadCount;
         }
-        ThreadCount = MaxThreadCount;
+
+        ThreadCount = static_cast<i16>(MaxFullThreadCount);
         auto semaphore = TSemaphore();
         semaphore.CurrentThreadCount = ThreadCount;
-        Semaphore = semaphore.ConverToI64();
-    }
+        Semaphore = semaphore.ConvertToI64();
 
-    TBasicExecutorPool::TBasicExecutorPool(const TBasicExecutorPoolConfig& cfg, IHarmonizer *harmonizer)
-        : TBasicExecutorPool(
-            cfg.PoolId,
-            cfg.Threads,
-            cfg.SpinThreshold,
-            cfg.PoolName,
-            harmonizer,
-            new TAffinity(cfg.Affinity),
-            cfg.TimePerMailbox,
-            cfg.EventsPerMailbox,
-            cfg.RealtimePriority,
-            0,
-            cfg.MinThreadCount,
-            cfg.MaxThreadCount,
-            cfg.DefaultThreadCount,
-            cfg.Priority
-        )
-    {
-        SetSharedExecutorsCount(cfg.SharedExecutorsCount);
-        SoftProcessingDurationTs = cfg.SoftProcessingDurationTs;
-        ActorSystemProfile = cfg.ActorSystemProfile;
+        DefaultThreadCount = DefaultFullThreadCount + HasOwnSharedThread;
+        MinThreadCount = MinFullThreadCount + HasOwnSharedThread;
+        MaxThreadCount = MaxFullThreadCount + HasOwnSharedThread;
+
+        if constexpr (DebugMode) {
+            Sanitizer.reset(new TBasicExecutorPoolSanitizer(this));
+        }
     }
 
     TBasicExecutorPool::~TBasicExecutorPool() {
         Threads.Destroy();
-    }
-
-    bool TBasicExecutorPool::GoToSleep(TThreadCtx& threadCtx, TTimers &timers) {
-        do {
-            timers.HPNow = GetCycleCountFast();
-            timers.Elapsed += timers.HPNow - timers.HPStart;
-            if (threadCtx.WaitingPad.Park()) // interrupted
-                return true;
-            timers.HPStart = GetCycleCountFast();
-            timers.Parked += timers.HPStart - timers.HPNow;
-        } while (AtomicLoad(&threadCtx.WaitingFlag) == TThreadCtx::WS_BLOCKED && !RelaxedLoad(&StopFlag));
-        return false;
-    }
-
-    ui32 TBasicExecutorPool::GoToSpin(TThreadCtx& threadCtx, i64 start, i64 &end) {
-        ui32 spinPauseCount = 0;
-        i64 spinThresholdCycles = 0;
-        if constexpr (NFeatures::TSpinFeatureFlags::CalcPerThread) {
-            spinThresholdCycles = SpinThresholdCyclesPerThread[TlsThreadContext->WorkerId].load();
-        } else {
-            spinThresholdCycles = SpinThresholdCycles.load();
-        }
-        do {
-            end = GetCycleCountFast();
-            if (end >= (start + spinThresholdCycles) || AtomicLoad(&threadCtx.WaitingFlag) != TThreadCtx::WS_ACTIVE) {
-                return spinPauseCount;
-            }
-
-            SpinLockPause();
-            spinPauseCount++;
-        } while (!RelaxedLoad(&StopFlag));
-
-        return spinPauseCount;
-    }
-
-    bool TBasicExecutorPool::GoToWaiting(TThreadCtx& threadCtx, TTimers &timers, bool needToBlock) {
-#if defined ACTORSLIB_COLLECT_EXEC_STATS
-        if (AtomicGetAndIncrement(ThreadUtilization) == 0) {
-            // Initially counter contains -t0, the pool start timestamp
-            // When the first thread goes to sleep we add t1, so the counter
-            // becomes t1-t0 >= 0, or the duration of max utilization so far.
-            // If the counter was negative and becomes positive, that means
-            // counter just turned into a duration and we should store that
-            // duration. Otherwise another thread raced with us and
-            // subtracted some other timestamp t2.
-            const i64 t = GetCycleCountFast();
-            const i64 x = AtomicGetAndAdd(MaxUtilizationCounter, t);
-            if (x < 0 && x + t > 0)
-                AtomicStore(&MaxUtilizationAccumulator, x + t);
-        }
-#endif
-
-        i64 startWaiting = GetCycleCountFast();
-        i64 endSpinning = 0;
-        TAtomic state = AtomicLoad(&threadCtx.WaitingFlag);
-        bool wasSleeping = false;
-        Y_ABORT_UNLESS(state == TThreadCtx::WS_NONE, "WaitingFlag# %d", int(state));
-
-        if (SpinThresholdCycles > 0 && !needToBlock) {
-            // spin configured period
-            AtomicSet(threadCtx.WaitingFlag, TThreadCtx::WS_ACTIVE);
-            ui32 spinPauseCount = GoToSpin(threadCtx, startWaiting, endSpinning);
-            SpinningTimeUs += endSpinning - startWaiting;
-            // then - sleep
-            if (AtomicLoad(&threadCtx.WaitingFlag) == TThreadCtx::WS_ACTIVE) {
-                if (AtomicCas(&threadCtx.WaitingFlag, TThreadCtx::WS_BLOCKED, TThreadCtx::WS_ACTIVE)) {
-                    if (NFeatures::TCommonFeatureFlags::ProbeSpinCycles) {
-                            LWPROBE(SpinCycles, PoolId, PoolName, spinPauseCount, true);
-                    }
-
-                    wasSleeping = true;
-                    if (GoToSleep(threadCtx, timers)) {  // interrupted
-                        return true;
-                    }
-                    AllThreadsSleep.store(false);
-                }
-            }
-            if (NFeatures::TCommonFeatureFlags::ProbeSpinCycles && !wasSleeping) {
-                LWPROBE(SpinCycles, PoolId, PoolName, spinPauseCount, false);
-            }
-        } else {
-            AtomicSet(threadCtx.WaitingFlag, TThreadCtx::WS_BLOCKED);
-            wasSleeping = true;
-            if (GoToSleep(threadCtx, timers)) {  // interrupted
-                return true;
-            }
-            AllThreadsSleep.store(false);
-        }
-
-        i64 needTimeTs = threadCtx.StartWakingTs.exchange(0);
-        if (wasSleeping && needTimeTs) {
-            ui64 waitingDuration = std::max<i64>(0, needTimeTs - startWaiting);
-            ui64 awakingDuration = std::max<i64>(0, GetCycleCountFast() - needTimeTs);
-            WaitingStats[TlsThreadContext->WorkerId].AddAwakening(waitingDuration, awakingDuration);
-        } else {
-            ui64 waitingDuration = std::max<i64>(0, endSpinning - startWaiting);
-            if (wasSleeping) {
-                WaitingStats[TlsThreadContext->WorkerId].AddFastAwakening(waitingDuration);
-            } else {
-                WaitingStats[TlsThreadContext->WorkerId].Add(waitingDuration);
-            }
-        }
-
-        Y_DEBUG_ABORT_UNLESS(AtomicLoad(&StopFlag) || AtomicLoad(&threadCtx.WaitingFlag) == TThreadCtx::WS_NONE);
-
-#if defined ACTORSLIB_COLLECT_EXEC_STATS
-        if (AtomicDecrement(ThreadUtilization) == 0) {
-            // When we started sleeping counter contained t1-t0, or the
-            // last duration of max utilization. Now we subtract t2 >= t1,
-            // which turns counter negative again, and the next sleep cycle
-            // at timestamp t3 would be adding some new duration t3-t2.
-            // If the counter was positive and becomes negative that means
-            // there are no current races with other threads and we should
-            // store the last positive duration we observed. Multiple
-            // threads may be adding and subtracting values in potentially
-            // arbitrary order, which would cause counter to oscillate
-            // around zero. When it crosses zero is a good indication of a
-            // correct value.
-            const i64 t = GetCycleCountFast();
-            const i64 x = AtomicGetAndAdd(MaxUtilizationCounter, -t);
-            if (x > 0 && x - t < 0)
-                AtomicStore(&MaxUtilizationAccumulator, x);
-        }
-#endif
-        return false;
     }
 
     void TBasicExecutorPool::AskToGoToSleep(bool *needToWait, bool *needToBlock) {
@@ -252,7 +170,7 @@ namespace NActors {
             TSemaphore semaphore = TSemaphore::GetSemaphore(x);;
             if (semaphore.CurrentSleepThreadCount < 0) {
                 semaphore.CurrentSleepThreadCount++;
-                x = AtomicGetAndCas(&Semaphore, semaphore.ConverToI64(), x);
+                x = AtomicGetAndCas(&Semaphore, semaphore.ConvertToI64(), x);
                 if (x == oldX) {
                     *needToWait = true;
                     *needToBlock = true;
@@ -266,7 +184,7 @@ namespace NActors {
                 if (semaphore.CurrentSleepThreadCount == AtomicLoad(&ThreadCount)) {
                     AllThreadsSleep.store(true);
                 }
-                x = AtomicGetAndCas(&Semaphore, semaphore.ConverToI64(), x);
+                x = AtomicGetAndCas(&Semaphore, semaphore.ConvertToI64(), x);
                 if (x == oldX) {
                     *needToWait = true;
                     *needToBlock = false;
@@ -282,27 +200,28 @@ namespace NActors {
     }
 
     ui32 TBasicExecutorPool::GetReadyActivationCommon(TWorkerContext& wctx, ui64 revolvingCounter) {
+        NHPTimer::STime hpnow = GetCycleCountFast();
+        TInternalActorTypeGuard<EInternalActorSystemActivity::ACTOR_SYSTEM_GET_ACTIVATION, false> activityGuard(hpnow);
+
         TWorkerId workerId = wctx.WorkerId;
-        Y_DEBUG_ABORT_UNLESS(workerId < PoolThreads);
-
-        TTimers timers;
-
-        if (Harmonizer) {
-            LWPROBE(TryToHarmonize, PoolId, PoolName);
-            Harmonizer->Harmonize(timers.HPStart);
-        }
+        Y_DEBUG_ABORT_UNLESS(workerId < MaxFullThreadCount);
 
         if (workerId >= 0) {
-            AtomicSet(Threads[workerId].WaitingFlag, TThreadCtx::WS_NONE);
+            Threads[workerId].UnsetWork();
+        } else {
+            Y_ABORT_UNLESS(wctx.SharedThread);
+            wctx.SharedThread->UnsetWork();
+        }
+        if (Harmonizer) {
+            LWPROBE(TryToHarmonize, PoolId, PoolName);
+            Harmonizer->Harmonize(hpnow);
         }
 
         TAtomic x = AtomicGet(Semaphore);
         TSemaphore semaphore = TSemaphore::GetSemaphore(x);
-        while (!RelaxedLoad(&StopFlag)) {
-            if (!semaphore.OldSemaphore || semaphore.CurrentSleepThreadCount < 0) {
+        while (!StopFlag.load(std::memory_order_acquire)) {
+            if (!semaphore.OldSemaphore || workerId >= 0 && semaphore.CurrentSleepThreadCount < 0) {
                 if (workerId < 0 || !wctx.IsNeededToWaitNextActivation) {
-                    timers.HPNow = GetCycleCountFast();
-                    wctx.AddElapsedCycles(ActorSystemIndex, timers.HPNow - timers.HPStart);
                     return 0;
                 }
 
@@ -310,26 +229,22 @@ namespace NActors {
                 bool needToBlock = false;
                 AskToGoToSleep(&needToWait, &needToBlock);
                 if (needToWait) {
-                    if (GoToWaiting(Threads[workerId], timers, needToBlock)) { // interrupted
+                    if (Threads[workerId].Wait(SpinThresholdCycles, &StopFlag)) {
                         return 0;
                     }
                 }
             } else {
-                if (const ui32 activation = Activations.Pop(++revolvingCounter)) {
+                TInternalActorTypeGuard<EInternalActorSystemActivity::ACTOR_SYSTEM_GET_ACTIVATION_FROM_QUEUE, false> activityGuard;
+                if (const ui32 activation = std::visit([&revolvingCounter](auto &x) {return x.Pop(++revolvingCounter);}, Activations)) {
                     if (workerId >= 0) {
-                        AtomicSet(Threads[workerId].WaitingFlag, TThreadCtx::WS_RUNNING);
+                        Threads[workerId].SetWork();
+                    } else {
+                        Y_ABORT_UNLESS(wctx.SharedThread);
+                        wctx.SharedThread->SetWork();
                     }
                     AtomicDecrement(Semaphore);
-                    timers.HPNow = GetCycleCountFast();
-                    timers.Elapsed += timers.HPNow - timers.HPStart;
-                    wctx.AddElapsedCycles(ActorSystemIndex, timers.Elapsed);
-                    if (timers.Parked > 0) {
-                        wctx.AddParkedCycles(timers.Parked);
-                    }
-
                     return activation;
                 }
-                semaphore.CurrentSleepThreadCount++;
             }
 
             SpinLockPause();
@@ -342,7 +257,7 @@ namespace NActors {
 
     ui32 TBasicExecutorPool::GetReadyActivationLocalQueue(TWorkerContext& wctx, ui64 revolvingCounter) {
         TWorkerId workerId = wctx.WorkerId;
-        Y_DEBUG_ABORT_UNLESS(workerId < static_cast<i32>(PoolThreads));
+        Y_DEBUG_ABORT_UNLESS(workerId < static_cast<i32>(MaxFullThreadCount));
 
         if (workerId >= 0 && LocalQueues[workerId].size()) {
             ui32 activation = LocalQueues[workerId].front();
@@ -357,9 +272,6 @@ namespace NActors {
 
     ui32 TBasicExecutorPool::GetReadyActivation(TWorkerContext& wctx, ui64 revolvingCounter) {
         if constexpr (NFeatures::IsLocalQueues()) {
-            if (SharedExecutorsCount) {
-                return GetReadyActivationCommon(wctx, revolvingCounter);
-            }
             return GetReadyActivationLocalQueue(wctx, revolvingCounter);
         } else {
             return GetReadyActivationCommon(wctx, revolvingCounter);
@@ -368,74 +280,62 @@ namespace NActors {
     }
 
     inline void TBasicExecutorPool::WakeUpLoop(i16 currentThreadCount) {
-        if (AllThreadsSleep) {
-            TThreadCtx& hotThreadCtx = Threads[0];
-            if (AtomicCas(&hotThreadCtx.WaitingFlag, TThreadCtx::WS_NONE, TThreadCtx::WS_ACTIVE)) {
-                return;
-            }
-
-            TThreadCtx& coldThreadCtx = Threads[AtomicLoad(&ThreadCount) - 1];
-            if (AtomicCas(&coldThreadCtx.WaitingFlag, TThreadCtx::WS_NONE, TThreadCtx::WS_BLOCKED)) {
-                if (TlsThreadContext && TlsThreadContext->WaitingStats) {
-                    ui64 beforeUnpark = GetCycleCountFast();
-                    coldThreadCtx.StartWakingTs = beforeUnpark;
-                    coldThreadCtx.WaitingPad.Unpark();
-                    TlsThreadContext->WaitingStats->AddWakingUp(GetCycleCountFast() - beforeUnpark);
-                } else {
-                    coldThreadCtx.WaitingPad.Unpark();
+        for (i16 i = 0;;) {
+            if (Threads[i].WakeUp()) {
+                if (i >= currentThreadCount) {
+                    AtomicIncrement(WrongWakenedThreadCount);
                 }
                 return;
             }
-        }
-        for (i16 i = 0;;) {
-            TThreadCtx& threadCtx = Threads[i];
-            TThreadCtx::EWaitState state = static_cast<TThreadCtx::EWaitState>(AtomicLoad(&threadCtx.WaitingFlag));
-            switch (state) {
-                case TThreadCtx::WS_NONE:
-                case TThreadCtx::WS_RUNNING:
-                    if (++i >= MaxThreadCount - SharedExecutorsCount) {
-                        i = 0;
-                    }
-                    break;
-                case TThreadCtx::WS_ACTIVE:
-                case TThreadCtx::WS_BLOCKED:
-                    if (AtomicCas(&threadCtx.WaitingFlag, TThreadCtx::WS_NONE, state)) {
-                        if (state  == TThreadCtx::WS_BLOCKED) {
-                            ui64 beforeUnpark = GetCycleCountFast();
-                            threadCtx.StartWakingTs = beforeUnpark;
-                            if (TlsThreadContext && TlsThreadContext->WaitingStats) {
-                                threadCtx.WaitingPad.Unpark();
-                                TlsThreadContext->WaitingStats->AddWakingUp(GetCycleCountFast() - beforeUnpark);
-                            } else {
-                                threadCtx.WaitingPad.Unpark();
-                            }
-                        }
-                        if (i >= currentThreadCount) {
-                            AtomicIncrement(WrongWakenedThreadCount);
-                        }
-                        return;
-                    }
-                    break;
-                default:
-                    Y_ABORT();
+            if (++i >= MaxFullThreadCount) {
+                i = 0;
             }
         }
     }
 
+    bool TBasicExecutorPool::WakeUpLoopShared() {
+        for (ui32 idx = 0; idx < MaxSharedThreadsForPool; ++idx) {
+            TSharedExecutorThreadCtx *thread = SharedThreads[idx].load(std::memory_order_acquire);
+            if (!thread) {
+                return false;
+            }
+            if (thread->WakeUp()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     void TBasicExecutorPool::ScheduleActivationExCommon(ui32 activation, ui64 revolvingCounter, TAtomic x) {
         TSemaphore semaphore = TSemaphore::GetSemaphore(x);
-
-        Activations.Push(activation, revolvingCounter);
+        std::visit([activation, revolvingCounter](auto &x) {
+            x.Push(activation, revolvingCounter);
+        }, Activations);
         bool needToWakeUp = false;
+        bool needToChangeOldSemaphore = true;
 
-        do {
-            needToWakeUp = semaphore.CurrentSleepThreadCount > SharedExecutorsCount;
-            i64 oldX = semaphore.ConverToI64();
-            semaphore.OldSemaphore++;
-            if (needToWakeUp) {
-                semaphore.CurrentSleepThreadCount--;
+        i16 sharedThreads = SharedThreadsCount.load(std::memory_order_acquire); // this value changing once in second
+
+        if (sharedThreads) {
+            needToChangeOldSemaphore = false;
+            x = AtomicIncrement(Semaphore);
+            if (WakeUpLoopShared()) {
+                return;
             }
-            x = AtomicGetAndCas(&Semaphore, semaphore.ConverToI64(), oldX);
+        }
+
+        i16 sleepThreads = 0;
+        Y_UNUSED(sleepThreads);
+        do {
+            needToWakeUp = semaphore.CurrentSleepThreadCount > 0;
+            i64 oldX = semaphore.ConvertToI64();
+            if (needToChangeOldSemaphore) {
+                semaphore.OldSemaphore++;
+            }
+            if (needToWakeUp) {
+                sleepThreads = semaphore.CurrentSleepThreadCount--;
+            }
+            x = AtomicGetAndCas(&Semaphore, semaphore.ConvertToI64(), oldX);
             if (x == oldX) {
                 break;
             }
@@ -492,9 +392,9 @@ namespace NActors {
     void TBasicExecutorPool::GetCurrentStats(TExecutorPoolStats& poolStats, TVector<TExecutorThreadStats>& statsCopy) const {
         poolStats.MaxUtilizationTime = RelaxedLoad(&MaxUtilizationAccumulator) / (i64)(NHPTimer::GetCyclesPerSecond() / 1000);
         poolStats.WrongWakenedThreadCount = RelaxedLoad(&WrongWakenedThreadCount);
-        poolStats.CurrentThreadCount = RelaxedLoad(&ThreadCount);
-        poolStats.DefaultThreadCount = DefaultThreadCount;
-        poolStats.MaxThreadCount = MaxThreadCount;
+        poolStats.CurrentThreadCount = GetThreadCount();
+        poolStats.DefaultThreadCount = GetDefaultThreadCount();
+        poolStats.MaxThreadCount = GetMaxThreadCount();
         poolStats.SpinningTimeUs = Ts2Us(SpinningTimeUs);
         poolStats.SpinThresholdUs = Ts2Us(SpinThresholdCycles);
         if (Harmonizer) {
@@ -514,7 +414,7 @@ namespace NActors {
             poolStats.MinBookedCpuUs = stats.MinBookedCpu;
         }
 
-        statsCopy.resize(PoolThreads + 1);
+        statsCopy.resize(MaxFullThreadCount + 1);
         // Save counters from the pool object
         statsCopy[0] = TExecutorThreadStats();
         statsCopy[0].Aggregate(Stats);
@@ -522,9 +422,22 @@ namespace NActors {
         RecalculateStuckActors(statsCopy[0]);
 #endif
         // Per-thread stats
-        for (i16 i = 0; i < PoolThreads; ++i) {
+        for (i16 i = 0; i < MaxFullThreadCount; ++i) {
             Threads[i].Thread->GetCurrentStats(statsCopy[i + 1]);
         }
+    }
+
+    void TBasicExecutorPool::GetExecutorPoolState(TExecutorPoolState &poolState) const {
+        if (Harmonizer) {
+            TPoolHarmonizerStats stats = Harmonizer->GetPoolStats(PoolId);
+            poolState.UsedCpu = stats.AvgConsumedCpu;
+            poolState.PossibleMaxLimit = stats.PotentialMaxThreadCount;
+        } else {
+            poolState.PossibleMaxLimit = poolState.MaxLimit;
+        }
+        poolState.CurrentLimit = GetThreadCount();
+        poolState.MaxLimit = GetMaxThreadCount();
+        poolState.MinLimit = GetDefaultThreadCount();
     }
 
     void TBasicExecutorPool::Prepare(TActorSystem* actorSystem, NSchedulerQueue::TReader** scheduleReaders, ui32* scheduleSz) {
@@ -532,37 +445,29 @@ namespace NActors {
 
         ActorSystem = actorSystem;
 
-        ScheduleReaders.Reset(new NSchedulerQueue::TReader[PoolThreads]);
-        ScheduleWriters.Reset(new NSchedulerQueue::TWriter[PoolThreads]);
+        ScheduleReaders.Reset(new NSchedulerQueue::TReader[MaxFullThreadCount + 2]);
+        ScheduleWriters.Reset(new NSchedulerQueue::TWriter[MaxFullThreadCount + 2]);
 
-        for (i16 i = 0; i != PoolThreads; ++i) {
-            if (i < MaxThreadCount - SharedExecutorsCount) {
-                Threads[i].Thread.Reset(
-                    new TExecutorThread(
-                        i,
-                        0, // CpuId is not used in BASIC pool
-                        actorSystem,
-                        this,
-                        MailboxTable.Get(),
-                        PoolName,
-                        TimePerMailbox,
-                        EventsPerMailbox));
-            } else {
-                Threads[i].Thread.Reset(
-                    new TExecutorThread(
-                        i,
-                        actorSystem,
-                        actorSystem->GetBasicExecutorPools(),
-                        PoolName,
-                        SoftProcessingDurationTs,
-                        TimePerMailbox,
-                        EventsPerMailbox));
-            }
+
+        for (i16 i = 0; i != MaxFullThreadCount; ++i) {
+            Threads[i].Thread.reset(
+                new TExecutorThread(
+                    i,
+                    0, // CpuId is not used in BASIC pool
+                    actorSystem,
+                    this,
+                    MailboxTable.Get(),
+                    PoolName,
+                    TimePerMailbox,
+                    EventsPerMailbox));
             ScheduleWriters[i].Init(ScheduleReaders[i]);
         }
 
+        ScheduleWriters[MaxFullThreadCount].Init(ScheduleReaders[MaxFullThreadCount]);
+        ScheduleWriters[MaxFullThreadCount + 1].Init(ScheduleReaders[MaxFullThreadCount + 1]);
+
         *scheduleReaders = ScheduleReaders.Get();
-        *scheduleSz = PoolThreads;
+        *scheduleSz = MaxFullThreadCount + 2;
     }
 
     void TBasicExecutorPool::Start() {
@@ -571,45 +476,63 @@ namespace NActors {
         ThreadUtilization = 0;
         AtomicAdd(MaxUtilizationCounter, -(i64)GetCycleCountFast());
 
-        for (i16 i = 0; i != PoolThreads; ++i) {
+        for (i16 i = 0; i != MaxFullThreadCount; ++i) {
             Threads[i].Thread->Start();
+        }
+
+        if constexpr (DebugMode) {
+            Sanitizer->Start();
         }
     }
 
     void TBasicExecutorPool::PrepareStop() {
-        AtomicStore(&StopFlag, true);
-        for (i16 i = 0; i != PoolThreads; ++i) {
-            Threads[i].Thread->StopFlag = true;
-            Threads[i].WaitingPad.Interrupt();
+        StopFlag.store(true, std::memory_order_release);
+        for (i16 i = 0; i != MaxFullThreadCount; ++i) {
+            Threads[i].Thread->StopFlag.store(true, std::memory_order_release);
+            Threads[i].Interrupt();
+        }
+        if constexpr (DebugMode) {
+            Sanitizer->Stop();
         }
     }
 
     void TBasicExecutorPool::Shutdown() {
-        for (i16 i = 0; i != PoolThreads; ++i)
+        for (i16 i = 0; i != MaxFullThreadCount; ++i)
             Threads[i].Thread->Join();
+        if constexpr (DebugMode) {
+            Sanitizer->Join();
+        }
     }
 
     void TBasicExecutorPool::Schedule(TInstant deadline, TAutoPtr<IEventHandle> ev, ISchedulerCookie* cookie, TWorkerId workerId) {
-        Y_DEBUG_ABORT_UNLESS(workerId < PoolThreads);
+        Y_DEBUG_ABORT_UNLESS(workerId < MaxFullThreadCount);
 
         Schedule(deadline - ActorSystem->Timestamp(), ev, cookie, workerId);
     }
 
     void TBasicExecutorPool::Schedule(TMonotonic deadline, TAutoPtr<IEventHandle> ev, ISchedulerCookie* cookie, TWorkerId workerId) {
-        Y_DEBUG_ABORT_UNLESS(workerId < PoolThreads);
+        Y_DEBUG_ABORT_UNLESS(workerId < MaxFullThreadCount);
 
         const auto current = ActorSystem->Monotonic();
         if (deadline < current)
             deadline = current;
 
-        ScheduleWriters[workerId].Push(deadline.MicroSeconds(), ev.Release(), cookie);
+        if (workerId >= 0) {
+            ScheduleWriters[workerId].Push(deadline.MicroSeconds(), ev.Release(), cookie);
+        } else {
+            ScheduleWriters[MaxFullThreadCount + 2 + workerId].Push(deadline.MicroSeconds(), ev.Release(), cookie);
+        }
     }
 
     void TBasicExecutorPool::Schedule(TDuration delta, TAutoPtr<IEventHandle> ev, ISchedulerCookie* cookie, TWorkerId workerId) {
-        Y_DEBUG_ABORT_UNLESS(workerId < PoolThreads);
+        Y_DEBUG_ABORT_UNLESS(workerId < MaxFullThreadCount);
 
         const auto deadline = ActorSystem->Monotonic() + delta;
-        ScheduleWriters[workerId].Push(deadline.MicroSeconds(), ev.Release(), cookie);
+        if (workerId >= 0) {
+            ScheduleWriters[workerId].Push(deadline.MicroSeconds(), ev.Release(), cookie);
+        } else {
+            ScheduleWriters[MaxFullThreadCount + 2 + workerId].Push(deadline.MicroSeconds(), ev.Release(), cookie);
+        }
     }
 
     void TBasicExecutorPool::SetRealTimeMode() const {
@@ -628,47 +551,81 @@ namespace NActors {
 #endif
     }
 
-    i16 TBasicExecutorPool::GetThreadCount() const {
+    float TBasicExecutorPool::GetThreadCount() const {
+        float extraThreads = 0;
+        for (ui32 sharedIdx = 0; sharedIdx < 2; ++sharedIdx) {
+            auto *sharedThread = SharedThreads[sharedIdx].load(std::memory_order_acquire);
+            if (!sharedThread) {
+                break;
+            }
+            i16 poolsInThread = 0;
+            for (ui32 poolIdx = 0; poolIdx < MaxPoolsForSharedThreads; ++poolIdx) {
+                if (sharedThread->ExecutorPools[poolIdx].load(std::memory_order_acquire)) {
+                    poolsInThread++;
+                }
+            }
+            extraThreads += 1.0 / poolsInThread;
+        }
+        return GetFullThreadCount() + extraThreads;
+    }
+
+    i16 TBasicExecutorPool::GetFullThreadCount() const {
         return AtomicGet(ThreadCount);
     }
 
-    void TBasicExecutorPool::SetThreadCount(i16 threads) {
-        threads = Max(i16(1), Min(PoolThreads, threads));
+    void TBasicExecutorPool::SetFullThreadCount(i16 threads) {
+        threads = Max<i16>(0, Min(MaxFullThreadCount, threads));
         with_lock (ChangeThreadsLock) {
-            i16 prevCount = GetThreadCount();
+            i16 prevCount = GetFullThreadCount();
             AtomicSet(ThreadCount, threads);
             TSemaphore semaphore = TSemaphore::GetSemaphore(AtomicGet(Semaphore));
-            i64 oldX = semaphore.ConverToI64();
+            i64 oldX = semaphore.ConvertToI64();
             semaphore.CurrentThreadCount = threads;
             if (threads > prevCount) {
                 semaphore.CurrentSleepThreadCount += (i64)threads - prevCount;
             } else {
                 semaphore.CurrentSleepThreadCount -= (i64)prevCount - threads;
             }
-            AtomicAdd(Semaphore, semaphore.ConverToI64() - oldX);
+            AtomicAdd(Semaphore, semaphore.ConvertToI64() - oldX);
             LWPROBE(ThreadCount, PoolId, PoolName, threads, MinThreadCount, MaxThreadCount, DefaultThreadCount);
         }
     }
 
-    i16 TBasicExecutorPool::GetDefaultThreadCount() const {
+    float TBasicExecutorPool::GetDefaultThreadCount() const {
         return DefaultThreadCount;
     }
 
-    i16 TBasicExecutorPool::GetMinThreadCount() const {
+    i16 TBasicExecutorPool::GetDefaultFullThreadCount() const {
+        return DefaultFullThreadCount;
+    }
+
+    float TBasicExecutorPool::GetMinThreadCount() const {
         return MinThreadCount;
     }
 
-    i16 TBasicExecutorPool::GetMaxThreadCount() const {
+    i16 TBasicExecutorPool::GetMinFullThreadCount() const {
+        return MinFullThreadCount;
+    }
+
+    float TBasicExecutorPool::GetMaxThreadCount() const {
         return MaxThreadCount;
     }
 
+    i16 TBasicExecutorPool::GetMaxFullThreadCount() const {
+        return MaxFullThreadCount;
+    }
+    
+    ui32 TBasicExecutorPool::GetThreads() const {
+        return MaxFullThreadCount;
+    }
+
     TCpuConsumption TBasicExecutorPool::GetThreadCpuConsumption(i16 threadIdx) {
-        if (threadIdx >= PoolThreads) {
+        if (threadIdx >= MaxFullThreadCount) {
             return {0.0, 0.0};
         }
-        TThreadCtx& threadCtx = Threads[threadIdx];
+        TExecutorThreadCtx& threadCtx = Threads[threadIdx];
         TExecutorThreadStats stats;
-        threadCtx.Thread->GetCurrentStats(stats);
+        threadCtx.Thread->GetCurrentStatsForHarmonizer(stats);
         return {Ts2Us(stats.SafeElapsedTicks), static_cast<double>(stats.CpuUs), stats.NotEnoughCpuExecutions};
     }
 
@@ -680,10 +637,6 @@ namespace NActors {
 
     i16 TBasicExecutorPool::GetPriority() const {
         return Priority;
-    }
-
-    void TBasicExecutorPool::SetSharedExecutorsCount(i16 count) {
-        SharedExecutorsCount = count;
     }
 
     void TBasicExecutorPool::SetLocalQueueSize(ui16 size) {
@@ -731,7 +684,10 @@ namespace NActors {
     }
 
     void TBasicExecutorPool::CalcSpinPerThread(ui64 wakingUpConsumption) {
-        for (i16 threadIdx = 0; threadIdx < PoolThreads; ++threadIdx) {
+        if (ActorSystemProfile == EASProfile::Default) {
+            return;
+        }
+        for (i16 threadIdx = 0; threadIdx < MaxFullThreadCount; ++threadIdx) {
             ui64 newSpinThreshold = 0;
             if constexpr (NFeatures::TSpinFeatureFlags::UsePseudoMovingWindow) {
                 MovingWaitingStats[threadIdx].Add(WaitingStats[threadIdx], 0.8, 0.2);
@@ -739,11 +695,125 @@ namespace NActors {
             } else {
                 newSpinThreshold = WaitingStats[threadIdx].CalculateGoodSpinThresholdCycles(wakingUpConsumption);
             }
-            SpinThresholdCyclesPerThread[threadIdx].store(newSpinThreshold);
+
+            if (ActorSystemProfile == EASProfile::LowCpuConsumption) {
+                SpinThresholdCyclesPerThread[threadIdx].store(newSpinThreshold, std::memory_order_release);
+            } else {
+                auto oldSpinThreshold = SpinThresholdCyclesPerThread[threadIdx].load(std::memory_order_acquire);
+                if (oldSpinThreshold < newSpinThreshold) {
+                    SpinThresholdCyclesPerThread[threadIdx].store(newSpinThreshold, std::memory_order_release);
+                }
+            }
 
             double resolutionUs = TWaitingStatsConstants::HistogramResolutionUs;
             ui32 bucketIdx = newSpinThreshold / TWaitingStatsConstants::HistogramResolution;
             LWPROBE(ChangeSpinThresholdPerThread, PoolId, PoolName, threadIdx, newSpinThreshold, resolutionUs * bucketIdx, bucketIdx);
         }
     }
+
+    bool TExecutorThreadCtx::Wait(ui64 spinThresholdCycles, std::atomic<bool> *stopFlag) {
+        EThreadState state = ExchangeState<EThreadState>(EThreadState::Spin);
+        Y_ABORT_UNLESS(state == EThreadState::None, "WaitingFlag# %d", int(state));
+        if (spinThresholdCycles > 0) {
+            // spin configured period
+            Spin(spinThresholdCycles, stopFlag);
+        }
+        return Sleep(stopFlag);
+    }
+
+    bool TSharedExecutorThreadCtx::Wait(ui64 spinThresholdCycles, std::atomic<bool> *stopFlag) {
+        i64 requestsForWakeUp = RequestsForWakeUp.fetch_sub(1, std::memory_order_acq_rel);
+        if (requestsForWakeUp > 1) {
+            RequestsForWakeUp.store(1, std::memory_order_release);
+        }
+        if (requestsForWakeUp) {
+            return false;
+        }
+        TWaitState state = ExchangeState<TWaitState>(EThreadState::Spin);
+        Y_ABORT_UNLESS(state.Flag == EThreadState::None, "WaitingFlag# %d", int(state.Flag));
+        if (spinThresholdCycles > 0) {
+            // spin configured period
+            Spin(spinThresholdCycles, stopFlag);
+        }
+        return Sleep(stopFlag);
+    }
+
+    bool TExecutorThreadCtx::WakeUp() {
+        TInternalActorTypeGuard<EInternalActorSystemActivity::ACTOR_SYSTEM_WAKE_UP, false> activityGuard;
+        for (ui32 i = 0; i < 2; ++i) {
+            EThreadState state = GetState<EThreadState>();
+            switch (state) {
+                case EThreadState::None:
+                case EThreadState::Work:
+                    return false;
+                case EThreadState::Spin:
+                case EThreadState::Sleep:
+                    if (ReplaceState<EThreadState>(state, EThreadState::None)) {
+                        if (state == EThreadState::Sleep) {
+                            ui64 beforeUnpark = GetCycleCountFast();
+                            StartWakingTs = beforeUnpark;
+                            WaitingPad.Unpark();
+                            if (TlsThreadContext && TlsThreadContext->WaitingStats) {
+                                TlsThreadContext->WaitingStats->AddWakingUp(GetCycleCountFast() - beforeUnpark);
+                            }
+                        }
+                        return true;
+                    }
+                    break;
+                default:
+                    Y_ABORT();
+            }
+        }
+        return false;
+    }
+
+    bool TSharedExecutorThreadCtx::WakeUp() {
+        TInternalActorTypeGuard<EInternalActorSystemActivity::ACTOR_SYSTEM_GET_ACTIVATION_FROM_QUEUE, false> activityGuard;
+        i64 requestsForWakeUp = RequestsForWakeUp.fetch_add(1, std::memory_order_acq_rel);
+        if (requestsForWakeUp >= 0) {
+            return false;
+        }
+
+        for (;;) {
+            TWaitState state = GetState<TWaitState>();
+            switch (state.Flag) {
+                case EThreadState::None:
+                case EThreadState::Work:
+                    continue;
+                case EThreadState::Spin:
+                case EThreadState::Sleep:
+                    if (ReplaceState<TWaitState>(state, {EThreadState::None})) {
+                        if (state.Flag == EThreadState::Sleep) {
+                            ui64 beforeUnpark = GetCycleCountFast();
+                            StartWakingTs = beforeUnpark;
+                            WaitingPad.Unpark();
+                            if (TlsThreadContext && TlsThreadContext->WaitingStats) {
+                                TlsThreadContext->WaitingStats->AddWakingUp(GetCycleCountFast() - beforeUnpark);
+                            }
+                        }
+                        return true;
+                    }
+                    break;
+                default:
+                    Y_ABORT();
+            }
+        }
+        return false;
+    }
+
+    TSharedExecutorThreadCtx* TBasicExecutorPool::ReleaseSharedThread() {
+        ui64 count = SharedThreadsCount.fetch_sub(1, std::memory_order_acq_rel);
+        Y_ABORT_UNLESS(count);
+        auto *thread = SharedThreads[count - 1].exchange(nullptr);
+        Y_ABORT_UNLESS(thread);
+        return thread;
+    }
+
+    void TBasicExecutorPool::AddSharedThread(TSharedExecutorThreadCtx* thread) {
+        ui64 count = SharedThreadsCount.fetch_add(1, std::memory_order_acq_rel);
+        Y_ABORT_UNLESS(count < MaxSharedThreadsForPool);
+        thread = SharedThreads[count].exchange(thread);
+        Y_ABORT_UNLESS(!thread);
+    }
+
 }

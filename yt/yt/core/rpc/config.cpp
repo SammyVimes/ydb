@@ -10,16 +10,20 @@ using namespace NConcurrency;
 
 void THistogramExponentialBounds::Register(TRegistrar registrar)
 {
-    registrar.Parameter("min", &TThis::Min).Default(TDuration::Zero());
-    registrar.Parameter("max", &TThis::Max).Default(TDuration::Seconds(2));
+    registrar.Parameter("min", &TThis::Min)
+        .Default(TDuration::Zero());
+    registrar.Parameter("max", &TThis::Max)
+        .Default(TDuration::Seconds(2));
 }
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void THistogramConfig::Register(TRegistrar registrar)
+void TTimeHistogramConfig::Register(TRegistrar registrar)
 {
-    registrar.Parameter("exponential_bounds", &TThis::ExponentialBounds).Optional();
-    registrar.Parameter("custom_bounds", &TThis::CustomBounds).Optional();
+    registrar.Parameter("exponential_bounds", &TThis::ExponentialBounds)
+        .Optional();
+    registrar.Parameter("custom_bounds", &TThis::CustomBounds)
+        .Optional();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -28,12 +32,30 @@ void TServiceCommonConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("enable_per_user_profiling", &TThis::EnablePerUserProfiling)
         .Default(false);
-    registrar.Parameter("histogram_timer_profiling", &TThis::HistogramTimerProfiling)
+    registrar.Parameter("timing_histogram", &TThis::TimeHistogram)
+        .Alias("histogram_timer_profiling")
         .Default();
-    registrar.Parameter("code_counting", &TThis::EnableErrorCodeCounting)
+    registrar.Parameter("enable_error_code_counter", &TThis::EnableErrorCodeCounter)
+        .Alias("code_counting")
         .Default(false);
     registrar.Parameter("tracing_mode", &TThis::TracingMode)
         .Default(ERequestTracingMode::Enable);
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void TServiceCommonDynamicConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("enable_per_user_profiling", &TThis::EnablePerUserProfiling)
+        .Default();
+    registrar.Parameter("time_histogram", &TThis::TimeHistogram)
+        .Alias("histogram_timer_profiling")
+        .Default();
+    registrar.Parameter("enable_error_code_counter", &TThis::EnableErrorCodeCounter)
+        .Alias("code_counting")
+        .Default(false);
+    registrar.Parameter("tracing_mode", &TThis::TracingMode)
+        .Default();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -46,13 +68,22 @@ void TServerConfig::Register(TRegistrar registrar)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+void TServerDynamicConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("services", &TThis::Services)
+        .Default();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
 void TServiceConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("enable_per_user_profiling", &TThis::EnablePerUserProfiling)
         .Optional();
-    registrar.Parameter("code_counting", &TThis::EnableErrorCodeCounting)
+    registrar.Parameter("enable_error_code_counter", &TThis::EnableErrorCodeCounter)
+        .Alias("code_counting")
         .Optional();
-    registrar.Parameter("histogram_timer_profiling", &TThis::HistogramTimerProfiling)
+    registrar.Parameter("histogram_timer_profiling", &TThis::TimeHistogram)
         .Default();
     registrar.Parameter("tracing_mode", &TThis::TracingMode)
         .Optional();
@@ -76,8 +107,14 @@ void TMethodConfig::Register(TRegistrar registrar)
     registrar.Parameter("queue_size_limit", &TThis::QueueSizeLimit)
         .Alias("max_queue_size")
         .Optional();
+    registrar.Parameter("queue_byte_size_limit", &TThis::QueueByteSizeLimit)
+        .Alias("max_queue_byte_size")
+        .Optional();
     registrar.Parameter("concurrency_limit", &TThis::ConcurrencyLimit)
         .Alias("max_concurrency")
+        .Optional();
+    registrar.Parameter("concurrency_byte_limit", &TThis::ConcurrencyByteLimit)
+        .Alias("max_concurrency_byte")
         .Optional();
     registrar.Parameter("log_level", &TThis::LogLevel)
         .Optional();
@@ -221,6 +258,7 @@ void TBalancingChannelConfig::Register(TRegistrar registrar)
         int endpointConfigCount = 0;
         if (config->Addresses) {
             ++endpointConfigCount;
+            SortUnique(*config->Addresses);
         }
         if (config->Endpoints) {
             ++endpointConfigCount;
@@ -255,8 +293,12 @@ void TResponseKeeperConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("expiration_time", &TThis::ExpirationTime)
         .Default(TDuration::Minutes(5));
-    registrar.Parameter("max_eviction_busy_time", &TThis::MaxEvictionTickTime)
+    registrar.Parameter("eviction_period", &TThis::EvictionPeriod)
+        .Default(TDuration::Seconds(1));
+    registrar.Parameter("max_eviction_tick_time", &TThis::MaxEvictionTickTime)
         .Default(TDuration::MilliSeconds(10));
+    registrar.Parameter("eviction_tick_time_check_period", &TThis::EvictionTickTimeCheckPeriod)
+        .Default(1024);
     registrar.Parameter("enable_warmup", &TThis::EnableWarmup)
         .Default(true);
     registrar.Parameter("warmup_time", &TThis::WarmupTime)
@@ -278,6 +320,8 @@ void TDispatcherConfig::Register(TRegistrar registrar)
     registrar.Parameter("compression_pool_size", &TThis::CompressionPoolSize)
         .Default(DefaultCompressionPoolSize)
         .GreaterThan(0);
+    registrar.Parameter("heavy_pool_polling_period", &TThis::HeavyPoolPollingPeriod)
+        .Default(TDuration::MilliSeconds(10));
     registrar.Parameter("alert_on_missing_request_info", &TThis::AlertOnMissingRequestInfo)
         .Default(false);
 }
@@ -287,6 +331,7 @@ TDispatcherConfigPtr TDispatcherConfig::ApplyDynamic(const TDispatcherDynamicCon
     auto mergedConfig = CloneYsonStruct(MakeStrong(this));
     UpdateYsonStructField(mergedConfig->HeavyPoolSize, dynamicConfig->HeavyPoolSize);
     UpdateYsonStructField(mergedConfig->CompressionPoolSize, dynamicConfig->CompressionPoolSize);
+    UpdateYsonStructField(mergedConfig->HeavyPoolPollingPeriod, dynamicConfig->HeavyPoolPollingPeriod);
     UpdateYsonStructField(mergedConfig->AlertOnMissingRequestInfo, dynamicConfig->AlertOnMissingRequestInfo);
     mergedConfig->Postprocess();
     return mergedConfig;
@@ -302,6 +347,8 @@ void TDispatcherDynamicConfig::Register(TRegistrar registrar)
     registrar.Parameter("compression_pool_size", &TThis::CompressionPoolSize)
         .Optional()
         .GreaterThan(0);
+    registrar.Parameter("heavy_pool_polling_period", &TThis::HeavyPoolPollingPeriod)
+        .Optional();
     registrar.Parameter("alert_on_missing_request_info", &TThis::AlertOnMissingRequestInfo)
         .Optional();
 }

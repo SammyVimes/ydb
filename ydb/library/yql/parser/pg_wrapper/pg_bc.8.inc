@@ -53,6 +53,8 @@ LLVM_BC(
     arrow_json_array_element
     arrow_json_array_element_text
     arrow_json_array_length
+    arrow_json_extract_path
+    arrow_json_extract_path_text
     arrow_json_object_field
     arrow_json_object_field_text
     arrow_json_populate_record
@@ -63,8 +65,11 @@ LLVM_BC(
     arrow_jsonb_array_length
     arrow_jsonb_concat
     arrow_jsonb_delete
+    arrow_jsonb_delete_array
     arrow_jsonb_delete_idx
     arrow_jsonb_delete_path
+    arrow_jsonb_extract_path
+    arrow_jsonb_extract_path_text
     arrow_jsonb_insert
     arrow_jsonb_object_field
     arrow_jsonb_object_field_text
@@ -106,11 +111,28 @@ LLVM_BC(
     arrow_pg_replication_origin_session_setup
     arrow_pg_replication_origin_xact_reset
     arrow_pg_replication_origin_xact_setup
+    arrow_pg_stop_making_pinned_objects
     arrow_pgsql_version
+    arrow_regexp_count
+    arrow_regexp_count_no_flags
+    arrow_regexp_count_no_start
+    arrow_regexp_instr
+    arrow_regexp_instr_no_endoption
+    arrow_regexp_instr_no_flags
+    arrow_regexp_instr_no_n
+    arrow_regexp_instr_no_start
+    arrow_regexp_instr_no_subexpr
+    arrow_regexp_like
+    arrow_regexp_like_no_flags
     arrow_regexp_match
     arrow_regexp_match_no_flags
     arrow_regexp_split_to_array
     arrow_regexp_split_to_array_no_flags
+    arrow_regexp_substr
+    arrow_regexp_substr_no_flags
+    arrow_regexp_substr_no_n
+    arrow_regexp_substr_no_start
+    arrow_regexp_substr_no_subexpr
     arrow_repeat
     arrow_rpad
     arrow_rtrim
@@ -127,6 +149,9 @@ LLVM_BC(
     arrow_textregexeq
     arrow_textregexne
     arrow_textregexreplace
+    arrow_textregexreplace_extended
+    arrow_textregexreplace_extended_no_flags
+    arrow_textregexreplace_extended_no_n
     arrow_textregexreplace_noopt
     arrow_textregexsubstr
     arrow_translate

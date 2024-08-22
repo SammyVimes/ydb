@@ -105,6 +105,7 @@ namespace {
 
             future = MakeFuture(345);
             UNIT_ASSERT(future.HasValue());
+            UNIT_ASSERT(future.IsReady());
             UNIT_ASSERT_EQUAL(future.GetValue(), 345);
         }
 
@@ -115,6 +116,7 @@ namespace {
 
             TFuture<void> future = promise.GetFuture();
             UNIT_ASSERT(future.HasValue());
+            UNIT_ASSERT(future.IsReady());
 
             future = MakeFuture();
             UNIT_ASSERT(future.HasValue());
@@ -523,6 +525,7 @@ namespace {
         {
             auto future1 = MakeErrorFuture<void>(std::make_exception_ptr(TFutureException()));
             UNIT_ASSERT(future1.HasException());
+            UNIT_ASSERT(future1.IsReady());
             UNIT_CHECK_GENERATED_EXCEPTION(future1.GetValue(), TFutureException);
 
             auto future2 = MakeErrorFuture<int>(std::make_exception_ptr(TFutureException()));
@@ -563,6 +566,7 @@ namespace {
             promise2.SetException("foo-exception");
             wait.Wait();
             UNIT_ASSERT(future2.HasException());
+            UNIT_ASSERT(!future1.IsReady());
             UNIT_ASSERT(!future1.HasValue() && !future1.HasException());
         }
 
@@ -634,6 +638,28 @@ namespace {
         Y_UNIT_TEST(ApplyLvalueCopy) {
             TestApplyLvalueCopyImpl<void>();
             TestApplyLvalueCopyImpl<int>();
+        }
+
+        Y_UNIT_TEST(ReturnForwardingTypeDeduction) {
+            const TString e = TString(80, 'a');
+            TString l = TString(80, 'a');
+
+            TFuture<TString> futureL = MakeFuture().Return(l);
+            UNIT_ASSERT_VALUES_EQUAL(futureL.GetValue(), e);
+            UNIT_ASSERT_VALUES_EQUAL(l, e);
+
+            TFuture<TString> futureR = MakeFuture().Return(std::move(l));
+            UNIT_ASSERT_VALUES_EQUAL(futureR.GetValue(), e);
+        }
+
+        Y_UNIT_TEST(ReturnForwardingCopiesCount) {
+            size_t numCopies = 0;
+            TCopyCounter copyCounter(&numCopies);
+
+            auto returnedCounter = MakeFuture().Return(std::move(copyCounter)).ExtractValueSync();
+            Y_DO_NOT_OPTIMIZE_AWAY(returnedCounter);
+
+            UNIT_ASSERT_VALUES_EQUAL(numCopies, 0);
         }
     }
 

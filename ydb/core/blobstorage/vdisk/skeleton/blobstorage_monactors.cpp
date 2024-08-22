@@ -105,11 +105,6 @@ namespace NKikimr {
                 Counter++;
             }
 
-            if (bool(Db->Handoff->GetMonActorID())) {
-                ctx.Send(Db->Handoff->GetMonActorID(), new NMon::TEvHttpInfo(Ev->Get()->Request, TDbMon::HandoffMonId));
-                Counter++;
-            }
-
             if (bool(TActorId(Db->DskSpaceTrackerID))) {
                 ctx.Send(Db->DskSpaceTrackerID, new NMon::TEvHttpInfo(Ev->Get()->Request, TDbMon::DskSpaceTrackerId));
                 Counter++;
@@ -1160,7 +1155,7 @@ namespace NKikimr {
                     cfg->BaseInfo.PDiskId, selfVDiskId, MakeBlobStorageNodeWardenID(skeletonFrontID.NodeId()), notifyId, ev->Sender
                 );
             } else {
-                return new TMonErrorActor(notifyId, ev, 
+                return new TMonErrorActor(notifyId, ev,
                     "VDisk restart in the normal state is not allowed <br>\n"
                     "<a class=\"btn btn-default\" href=\"?\">Go back to the main VDisk page</a>"
                 );

@@ -5,12 +5,13 @@
 #include "mpl.h"
 #include "property.h"
 #include "serialize_dump.h"
-
 #include "maybe_inf.h"
 
 #include <library/cpp/yt/assert/assert.h>
 
 #include <library/cpp/yt/memory/ref.h>
+
+#include <library/cpp/yt/misc/strong_typedef.h>
 
 #include <util/stream/buffered.h>
 #include <util/stream/file.h>
@@ -170,7 +171,6 @@ class TStreamLoadContext
 public:
     DEFINE_BYVAL_RW_PROPERTY(int, Version);
     DEFINE_BYREF_RW_PROPERTY(TSerializationDumper, Dumper);
-    DEFINE_BYVAL_RW_PROPERTY(bool, EnableTotalWriteCountReport);
 
 public:
     explicit TStreamLoadContext(IInputStream* input);
@@ -212,21 +212,8 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
-struct TEntitySerializationKey
-{
-    constexpr TEntitySerializationKey();
-    constexpr explicit TEntitySerializationKey(int index);
-
-    constexpr bool operator == (TEntitySerializationKey rhs) const;
-    constexpr bool operator != (TEntitySerializationKey rhs) const;
-
-    constexpr explicit operator bool() const;
-
-    void Save(TEntityStreamSaveContext& context) const;
-    void Load(TEntityStreamLoadContext& context);
-
-    int Index;
-};
+YT_DEFINE_STRONG_TYPEDEF(TEntitySerializationKey, i32);
+constexpr auto NullEntitySerializationKey = TEntitySerializationKey(-1);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -242,7 +229,7 @@ public:
 
     TEntitySerializationKey GenerateSerializationKey();
 
-    static inline const TEntitySerializationKey InlineKey = TEntitySerializationKey(-3);
+    static constexpr TEntitySerializationKey InlineKey = TEntitySerializationKey(-3);
 
     template <class T>
     TEntitySerializationKey RegisterRawEntity(T* entity);

@@ -26,11 +26,13 @@ SRCS(
     scheme_printers.cpp
     sys.cpp
     tabbed_table.cpp
+    waiting_bar.cpp
     ydb_updater.cpp
     yt.cpp
 )
 
 PEERDIR(
+    contrib/libs/aws-sdk-cpp/aws-cpp-sdk-s3
     library/cpp/config
     library/cpp/getopt
     library/cpp/json/writer
@@ -46,6 +48,8 @@ PEERDIR(
     ydb/public/sdk/cpp/client/ydb_topic
     ydb/public/sdk/cpp/client/ydb_types
     ydb/public/sdk/cpp/client/ydb_types/credentials
+    ydb/public/sdk/cpp/client/ydb_types/credentials/oauth2_token_exchange
+    ydb/library/arrow_parquet
 )
 
 GENERATE_ENUM_SERIALIZATION(formats.h)

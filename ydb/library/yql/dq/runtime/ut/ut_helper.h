@@ -12,15 +12,15 @@ public:
     TMockChannelStorage(ui64 capacity)
         : Capacity(capacity) {}
 
-    bool IsEmpty() const override {
+    bool IsEmpty() override {
         return Blobs.empty();
     }
 
-    bool IsFull() const override {
+    bool IsFull() override {
         return Capacity <= UsedSpace;
     }
 
-    void Put(ui64 blobId, TRope&& blob) override {
+    void Put(ui64 blobId, TRope&& blob, ui64 /* cookie = 0 */) override {
         if (UsedSpace + blob.size() > Capacity) {
             ythrow yexception() << "Space limit exceeded";
         }
@@ -30,7 +30,7 @@ public:
         UsedSpace += result.first->second.size();
     }
 
-    bool Get(ui64 blobId, TBuffer& data) override {
+    bool Get(ui64 blobId, TBuffer& data, ui64 /* cookie = 0 */) override {
         if (!Blobs.contains(blobId)) {
             ythrow yexception() << "Not found";
         }

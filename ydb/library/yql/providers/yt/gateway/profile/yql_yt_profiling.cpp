@@ -21,14 +21,14 @@ public:
         Slave_->OpenSession(std::move(options));
     }
 
-    void CloseSession(TCloseSessionOptions&& options) final {
+    TFuture<void> CloseSession(TCloseSessionOptions&& options) final {
         YQL_PROFILE_FUNC(TRACE);
-        Slave_->CloseSession(std::move(options));
+        return Slave_->CloseSession(std::move(options));
     }
 
-    void CleanupSession(TCleanupSessionOptions&& options) final {
+    TFuture<void> CleanupSession(TCleanupSessionOptions&& options) final {
         YQL_PROFILE_FUNC(TRACE);
-        Slave_->CleanupSession(std::move(options));
+        return Slave_->CleanupSession(std::move(options));
     }
 
     TFuture<TFinalizeResult> Finalize(TFinalizeOptions&& options) final {
@@ -169,6 +169,9 @@ public:
     TGetTablePartitionsResult GetTablePartitions(TGetTablePartitionsOptions&& options) override {
         YQL_PROFILE_FUNC(TRACE);
         return Slave_->GetTablePartitions(std::move(options));
+    }
+
+    void AddCluster(const TYtClusterConfig&) override {
     }
 
 private:

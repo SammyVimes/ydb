@@ -3,16 +3,22 @@ TExecFunc arrow_dsynonym_lexize() { return MakeIndirectExec<true, true>(&dsynony
 TExecFunc arrow_elem_contained_by_multirange() { return MakeIndirectExec<true, true>(&elem_contained_by_multirange); }
 TExecFunc arrow_hash_multirange() { return MakeIndirectExec<true, true>(&hash_multirange); }
 TExecFunc arrow_hash_multirange_extended() { return MakeIndirectExec<true, true>(&hash_multirange_extended); }
+TExecFunc arrow_hypothetical_cume_dist_final() { return MakeIndirectExec<false, true>(&hypothetical_cume_dist_final); }
+TExecFunc arrow_hypothetical_dense_rank_final() { return MakeIndirectExec<false, true>(&hypothetical_dense_rank_final); }
+TExecFunc arrow_hypothetical_percent_rank_final() { return MakeIndirectExec<false, true>(&hypothetical_percent_rank_final); }
+TExecFunc arrow_hypothetical_rank_final() { return MakeIndirectExec<false, true>(&hypothetical_rank_final); }
 TExecFunc arrow_mode_final() { return MakeIndirectExec<false, true>(&mode_final); }
 TExecFunc arrow_multirange_adjacent_multirange() { return MakeIndirectExec<true, true>(&multirange_adjacent_multirange); }
 TExecFunc arrow_multirange_adjacent_range() { return MakeIndirectExec<true, true>(&multirange_adjacent_range); }
 TExecFunc arrow_multirange_after_multirange() { return MakeIndirectExec<true, true>(&multirange_after_multirange); }
 TExecFunc arrow_multirange_after_range() { return MakeIndirectExec<true, true>(&multirange_after_range); }
+TExecFunc arrow_multirange_agg_transfn() { return MakeIndirectExec<false, true>(&multirange_agg_transfn); }
 TExecFunc arrow_multirange_before_multirange() { return MakeIndirectExec<true, true>(&multirange_before_multirange); }
 TExecFunc arrow_multirange_before_range() { return MakeIndirectExec<true, true>(&multirange_before_range); }
 TExecFunc arrow_multirange_cmp() { return MakeIndirectExec<true, true>(&multirange_cmp); }
 TExecFunc arrow_multirange_constructor0() { return MakeIndirectExec<true, false>(&multirange_constructor0); }
 TExecFunc arrow_multirange_constructor1() { return MakeIndirectExec<true, false>(&multirange_constructor1); }
+TExecFunc arrow_multirange_constructor2() { return MakeIndirectExec<true, false>(&multirange_constructor2); }
 TExecFunc arrow_multirange_contained_by_multirange() { return MakeIndirectExec<true, true>(&multirange_contained_by_multirange); }
 TExecFunc arrow_multirange_contained_by_range() { return MakeIndirectExec<true, true>(&multirange_contained_by_range); }
 TExecFunc arrow_multirange_contains_elem() { return MakeIndirectExec<true, true>(&multirange_contains_elem); }
@@ -47,6 +53,7 @@ TExecFunc arrow_multirange_upper_inc() { return MakeIndirectExec<true, true>(&mu
 TExecFunc arrow_multirange_upper_inf() { return MakeIndirectExec<true, true>(&multirange_upper_inf); }
 TExecFunc arrow_multirangesel() { return MakeIndirectExec<true, true>(&multirangesel); }
 TExecFunc arrow_ordered_set_transition() { return MakeIndirectExec<false, true>(&ordered_set_transition); }
+TExecFunc arrow_ordered_set_transition_multi() { return MakeIndirectExec<false, true>(&ordered_set_transition_multi); }
 TExecFunc arrow_percentile_cont_float8_final() { return MakeIndirectExec<false, true>(&percentile_cont_float8_final); }
 TExecFunc arrow_percentile_cont_float8_multi_final() { return MakeIndirectExec<false, false>(&percentile_cont_float8_multi_final); }
 TExecFunc arrow_percentile_cont_interval_final() { return MakeIndirectExec<false, false>(&percentile_cont_interval_final); }
@@ -117,3 +124,4 @@ TExecFunc arrow_spg_quad_inner_consistent() { return MakeIndirectExec<true, true
 TExecFunc arrow_spg_quad_leaf_consistent() { return MakeIndirectExec<true, true>(&spg_quad_leaf_consistent); }
 TExecFunc arrow_spg_quad_picksplit() { return MakeIndirectExec<true, true>(&spg_quad_picksplit); }
 TExecFunc arrow_spghandler() { return MakeIndirectExec<true, true>(&spghandler); }
+TExecFunc arrow_system_user() { return MakeIndirectExec<true, false>(&system_user); }

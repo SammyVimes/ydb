@@ -11,20 +11,25 @@
 
 namespace NKikimr::NKqp {
 
+// only exposed to be unit-tested
+NExternalSource::TAuth MakeAuth(const NYql::TExternalSource& metadata);
+std::shared_ptr<NExternalSource::TMetadata> ConvertToExternalSourceMetadata(const NYql::TKikimrTableMetadata& tableMetadata);
+bool EnrichMetadata(NYql::TKikimrTableMetadata& tableMetadata, const NExternalSource::TMetadata& dynamicMetadata);
+
 class TKqpTableMetadataLoader : public NYql::IKikimrGateway::IKqpTableMetadataLoader {
 public:
 
-    explicit TKqpTableMetadataLoader(TActorSystem* actorSystem, 
-        NYql::TKikimrConfiguration::TPtr config, 
-        bool needCollectSchemeData = false, 
-        TKqpTempTablesState::TConstPtr tempTablesState = nullptr,
-        TDuration maximalSecretsSnapshotWaitTime = TDuration::Seconds(20))
-        : NeedCollectSchemeData(needCollectSchemeData)
+    explicit TKqpTableMetadataLoader(const TString& cluster,
+        TActorSystem* actorSystem,
+        NYql::TKikimrConfiguration::TPtr config,
+        bool needCollectSchemeData = false,
+        TKqpTempTablesState::TConstPtr tempTablesState = nullptr)
+        : Cluster(cluster)
+        , NeedCollectSchemeData(needCollectSchemeData)
         , ActorSystem(actorSystem)
         , Config(config)
         , TempTablesState(std::move(tempTablesState))
-        , MaximalSecretsSnapshotWaitTime(maximalSecretsSnapshotWaitTime)
-    {};
+    {}
 
     NThreading::TFuture<NYql::IKikimrGateway::TTableMetadataResult> LoadTableMetadata(
         const TString& cluster, const TString& table, const NYql::IKikimrGateway::TLoadTableMetadataSettings& settings, const TString& database,
@@ -56,13 +61,13 @@ private:
 
     void OnLoadedTableMetadata(NYql::IKikimrGateway::TTableMetadataResult& loadTableMetadataResult);
 
+    const TString Cluster;
     TVector<NKikimrKqp::TKqpTableMetadataProto> CollectedSchemeData;
     TMutex Lock;
     bool NeedCollectSchemeData;
     TActorSystem* ActorSystem;
     NYql::TKikimrConfiguration::TPtr Config;
     TKqpTempTablesState::TConstPtr TempTablesState;
-    TDuration MaximalSecretsSnapshotWaitTime;
 };
 
 } // namespace NKikimr::NKqp

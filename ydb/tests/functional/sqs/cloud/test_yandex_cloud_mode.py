@@ -487,13 +487,18 @@ class TestSqsYandexCloudMode(get_test_with_sqs_tenant_installation(KikimrSqsTest
             delete_result, not_none()
         )
 
-        # shouldn't get any error
-        result_list = self._read_single_message_no_wait(queue1_url)
-        assert len(result_list) == 0 or result_list[0]['Body'] == msg_body
+        # waiting until the message appears in queue1 again
+        result_list = self._read_while_not_empty(
+            queue_url=queue1_url,
+            messages_count=1,
+            visibility_timeout=0,
+            wait_timeout=10
+        )
+        assert_that(result_list[0]['Body'], equal_to(msg_body))
 
-        # ok, getting the message again
+        # getting the message until it's moved to dlq
         for i in range(max_receive_count):
-            assert_that(self._read_single_message_no_wait(queue1_url)[0]['Body'], equal_to(msg_body))
+            self._read_single_message_no_wait(queue1_url)
 
         # check moved messages counter
         counters = self._get_sqs_counters(counters_format='text')
@@ -833,3 +838,47 @@ class TestSqsYandexCloudMode(get_test_with_sqs_tenant_installation(KikimrSqsTest
         time.sleep(1)
         queue_url2 = self._sqs_api.create_queue(self.queue_name, is_fifo=is_fifo)
         assert queue_url1 == queue_url2, f'{queue_url1} vs {queue_url2}'
+
+    @pytest.mark.parametrize(**TABLES_FORMAT_PARAMS)
+    @pytest.mark.parametrize(**IS_FIFO_PARAMS)
+    def test_not_throttling_with_custom_queue_name(self, is_fifo, tables_format):
+        self._init_with_params(is_fifo, tables_format)
+
+        self._sqs_api = self._create_api_for_user(
+            user_name='ignored',
+            raise_on_error=True,
+            force_private=True,
+            iam_token=self.iam_token,
+            folder_id=self.folder_id,
+        )
+
+        custom_queue_name = 'MyCustomQueue'
+        queue_url = self._sqs_api.create_queue(
+            queue_name=self.queue_name,
+            private_api=True,
+            custom_name=custom_queue_name,
+        )
+
+        nonexistent_queue_url = queue_url.replace(self.queue_name, self.queue_name + '_nonex')
+
+        def get_attributes_of_nonexistent_queue():
+            self._sqs_api.get_queue_attributes(nonexistent_queue_url)
+
+        # Draining budget
+        for _ in range(16):
+            try:
+                get_attributes_of_nonexistent_queue()
+            except Exception:
+                pass
+
+        # Check that there is no more budget
+        assert_that(
+            get_attributes_of_nonexistent_queue,
+            raises(
+                RuntimeError,
+                pattern=".*<Code>ThrottlingException</Code>.*"
+            )
+        )
+
+        received_queue_url = self._sqs_api.get_queue_url(custom_queue_name)
+        assert received_queue_url == queue_url

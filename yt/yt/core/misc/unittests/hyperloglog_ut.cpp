@@ -34,7 +34,7 @@ std::pair<THyperLogLog<8>, int> GenerateHyperLogLog(
         hll.Add(FarmFingerprint(n));
     }
 
-    return std::make_pair(hll, cardinality);
+    return std::pair(hll, cardinality);
 }
 
 TEST_P(THyperLogLogTest, Random)
@@ -53,6 +53,10 @@ TEST_P(THyperLogLogTest, Random)
             rng,
             size,
             targetCardinality);
+
+        THyperLogLog<8> hllClone(hll.first.Data());
+        EXPECT_EQ(hll.first.EstimateCardinality(), hllClone.EstimateCardinality());
+
         auto err = ((double)hll.first.EstimateCardinality() - hll.second) / hll.second;
         error += err;
     }

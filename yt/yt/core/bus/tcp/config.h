@@ -35,12 +35,14 @@ class TTcpDispatcherConfig
 public:
     int ThreadPoolSize;
 
+    TDuration ThreadPoolPollingPeriod;
+
     //! Used for profiling export and alerts.
     std::optional<i64> NetworkBandwidth;
 
     THashMap<TString, std::vector<NNet::TIP6Network>> Networks;
 
-    TEnumIndexedVector<EMultiplexingBand, TMultiplexingBandConfigPtr> MultiplexingBands;
+    TEnumIndexedArray<EMultiplexingBand, TMultiplexingBandConfigPtr> MultiplexingBands;
 
     TTcpDispatcherConfigPtr ApplyDynamic(const TTcpDispatcherDynamicConfigPtr& dynamicConfig) const;
 
@@ -62,13 +64,15 @@ class TTcpDispatcherDynamicConfig
 public:
     std::optional<int> ThreadPoolSize;
 
+    std::optional<TDuration> ThreadPoolPollingPeriod;
+
     std::optional<i64> NetworkBandwidth;
 
     std::optional<THashMap<TString, std::vector<NNet::TIP6Network>>> Networks;
 
-    std::optional<TEnumIndexedVector<EMultiplexingBand, TMultiplexingBandConfigPtr>> MultiplexingBands;
+    std::optional<TEnumIndexedArray<EMultiplexingBand, TMultiplexingBandConfigPtr>> MultiplexingBands;
 
-     //! Used to store TLS/SSL certificate files.
+    //! Used to store TLS/SSL certificate files.
     std::optional<TString> BusCertsDirectoryPath;
 
     REGISTER_YSON_STRUCT(TTcpDispatcherDynamicConfig);
@@ -91,6 +95,9 @@ public:
 
     TDuration ReadStallTimeout;
     TDuration WriteStallTimeout;
+
+    std::optional<TDuration> ConnectionStartDelay;
+    std::optional<TDuration> PacketDecoderDelay;
 
     bool VerifyChecksums;
     bool GenerateChecksums;

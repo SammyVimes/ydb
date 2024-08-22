@@ -31,19 +31,21 @@ public:
     }
 
     EStrategyOutcome Process(TLogContext &logCtx, TBlobState &state, const TBlobStorageGroupInfo &info,
-            TBlackboard& blackboard, TGroupDiskRequests &groupDiskRequests) override {
+            TBlackboard& blackboard, TGroupDiskRequests &groupDiskRequests,
+            const TAccelerationParams& accelerationParams) override {
         TBlobStorageGroupType::TPartPlacement partPlacement;
         bool degraded = false;
         bool isDone = false;
-        i32 slowDiskSubgroupIdx = MarkSlowSubgroupDisk(state, info, blackboard, true);
+        ui32 slowDiskSubgroupMask = MakeSlowSubgroupDiskMask(state, info, blackboard, true, accelerationParams);
         do {
-            if (slowDiskSubgroupIdx < 0) {
+            if (slowDiskSubgroupMask == 0) {
                 break; // ignore this case
             }
             TBlobStorageGroupInfo::TSubgroupVDisks success(&info.GetTopology());
             TBlobStorageGroupInfo::TSubgroupVDisks error(&info.GetTopology());
             Evaluate3dcSituation(state, NumFailRealms, NumFailDomainsPerFailRealm, info, true, success, error, degraded);
-            TBlobStorageGroupInfo::TSubgroupVDisks slow(&info.GetTopology(), slowDiskSubgroupIdx);
+            TBlobStorageGroupInfo::TSubgroupVDisks slow = TBlobStorageGroupInfo::TSubgroupVDisks::CreateFromMask(
+                    &info.GetTopology(), slowDiskSubgroupMask);
             if ((success | error) & slow) {
                 break; // slow disk is already marked as successful or erroneous
             }

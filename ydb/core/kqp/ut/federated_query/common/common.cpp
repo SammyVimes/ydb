@@ -17,29 +17,48 @@ namespace NKikimr::NKqp::NFederatedQueryTest {
     }
 
     std::shared_ptr<TKikimrRunner> MakeKikimrRunner(
-        NYql::IHTTPGateway::TPtr httpGateway,
+        bool initializeHttpGateway,
         NYql::NConnector::IClient::TPtr connectorClient,
         NYql::IDatabaseAsyncResolver::TPtr databaseAsyncResolver,
-        std::optional<NKikimrConfig::TAppConfig> appConfig)
+        std::optional<NKikimrConfig::TAppConfig> appConfig,
+        std::shared_ptr<NYql::NDq::IS3ActorsFactory> s3ActorsFactory,
+        const TString& domainRoot)
     {
         NKikimrConfig::TFeatureFlags featureFlags;
         featureFlags.SetEnableExternalDataSources(true);
         featureFlags.SetEnableScriptExecutionOperations(true);
+        if (!appConfig) {
+            appConfig.emplace();
+        }
+        appConfig->MutableTableServiceConfig()->SetEnablePreparedDdl(true);
+
+        auto settings = TKikimrSettings();
+
+        NYql::IHTTPGateway::TPtr httpGateway;
+        if (initializeHttpGateway) {
+            httpGateway = MakeHttpGateway(appConfig->GetQueryServiceConfig().GetHttpGateway(), settings.CountersRoot);
+        }
 
         auto federatedQuerySetupFactory = std::make_shared<TKqpFederatedQuerySetupFactoryMock>(
             httpGateway,
             connectorClient,
             nullptr,
             databaseAsyncResolver,
-            appConfig ? appConfig->GetQueryServiceConfig().GetS3() : NYql::TS3GatewayConfig(),
-            appConfig ? appConfig->GetQueryServiceConfig().GetGeneric() : NYql::TGenericGatewayConfig());
+            appConfig->GetQueryServiceConfig().GetS3(),
+            appConfig->GetQueryServiceConfig().GetGeneric(),
+            appConfig->GetQueryServiceConfig().GetYt(),
+            nullptr,
+            nullptr);
 
-        auto settings = TKikimrSettings()
-                            .SetFeatureFlags(featureFlags)
-                            .SetFederatedQuerySetupFactory(federatedQuerySetupFactory)
-                            .SetKqpSettings({});
+        settings
+            .SetFeatureFlags(featureFlags)
+            .SetFederatedQuerySetupFactory(federatedQuerySetupFactory)
+            .SetKqpSettings({})
+            .SetS3ActorsFactory(std::move(s3ActorsFactory))
+            .SetWithSampleTables(false)
+            .SetDomainRoot(domainRoot);
 
-        settings = appConfig ? settings.SetAppConfig(appConfig.value()) : settings.SetAppConfig({});
+        settings = settings.SetAppConfig(appConfig.value());
 
         return std::make_shared<TKikimrRunner>(settings);
     }

@@ -1,6 +1,7 @@
 #pragma once
 
 #include <util/generic/hash_set.h>
+#include <util/generic/strbuf.h>
 #include <util/network/ip.h>
 #include <util/stream/input.h>
 
@@ -69,6 +70,10 @@ public:
 
     constexpr bool IsValid() const noexcept {
         return Ip != 0 && (Type_ == Ipv6 || Type_ == Ipv4);
+    }
+
+    constexpr bool IsIpv6() const noexcept {
+        return Type_ == Ipv6;
     }
 
     explicit constexpr operator bool() const noexcept {
@@ -163,6 +168,10 @@ constexpr TIpv6Address Get1() noexcept {
     return {1, TIpv6Address::Ipv6};
 }
 
+struct THostAddressAndPortPrintOptions {
+    bool PrintScopeId = false;
+};
+
 struct THostAddressAndPort {
     constexpr THostAddressAndPort() noexcept = default;
     constexpr THostAddressAndPort(const TIpv6Address& i, TIpPort p) noexcept {
@@ -181,11 +190,11 @@ struct THostAddressAndPort {
     }
 
     TString ToString() const noexcept;
+    TString ToString(THostAddressAndPortPrintOptions options) const noexcept;
 
     TIpv6Address Ip {};
     TIpPort Port {0};
 };
-IOutputStream& operator<<(IOutputStream& Out, const THostAddressAndPort& HostAddressAndPort) noexcept;
 
 ///
 /// Returns
@@ -200,7 +209,7 @@ IOutputStream& operator<<(IOutputStream& Out, const THostAddressAndPort& HostAdd
 ///   2001::7348       // port wil be equal to DefaultPort
 ///   [2001::7348]:80
 ///
-std::tuple<THostAddressAndPort, TString, TIpPort> ParseHostAndMayBePortFromString(const TString& RawStr,
+std::tuple<THostAddressAndPort, TString, TIpPort> ParseHostAndMayBePortFromString(const TStringBuf RawStr,
                                                                                   TIpPort DefaultPort,
                                                                                   bool& Ok) noexcept;
 

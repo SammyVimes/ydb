@@ -11,15 +11,18 @@ SRCS(
 )
 
 PEERDIR(
+    contrib/libs/fmt
     ydb/library/actors/core
     library/cpp/lwtrace/mon
     library/cpp/monlib/service/pages
     ydb/core/base
     ydb/core/metering
     ydb/core/fq/libs/common
+    ydb/core/fq/libs/compute/common
     ydb/core/fq/libs/config
     ydb/core/fq/libs/control_plane_storage/proto
     ydb/core/fq/libs/exceptions
+    ydb/core/fq/libs/metrics
     ydb/core/fq/libs/quota_manager
     ydb/core/fq/libs/quota_manager/events
     ydb/core/fq/libs/rate_limiter/events
@@ -36,3 +39,7 @@ PEERDIR(
 YQL_LAST_ABI_VERSION()
 
 END()
+
+RECURSE_FOR_TESTS(
+    ut
+)

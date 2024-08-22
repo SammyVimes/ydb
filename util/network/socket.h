@@ -136,11 +136,6 @@ ESocketReadStatus HasSocketDataToRead(SOCKET s);
  **/
 bool HasLocalAddress(SOCKET socket);
 
-/**
- * Runtime check if current kernel supports SO_REUSEPORT option.
- **/
-extern "C" bool IsReusePortAvailable();
-
 bool IsNonBlock(SOCKET fd);
 void SetNonBlock(SOCKET fd, bool nonBlock = true);
 
@@ -428,5 +423,5 @@ private:
     TSocket S_;
 };
 
-//return -(error code) if error occured, or number of ready fds
+// return -(error code) if error occured, or number of ready fds
 ssize_t PollD(struct pollfd fds[], nfds_t nfds, const TInstant& deadLine) noexcept;

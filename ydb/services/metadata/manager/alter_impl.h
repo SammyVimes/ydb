@@ -66,7 +66,7 @@ protected:
 public:
     TModificationActorImpl(NInternal::TTableRecord&& patch,
         IAlterController::TPtr controller,
-        typename IObjectOperationsManager<TObject>::TPtr manager,
+        const typename IObjectOperationsManager<TObject>::TPtr& manager,
         const IOperationsManager::TInternalModificationContext& context)
         : ExternalController(controller)
         , Manager(manager)
@@ -75,7 +75,7 @@ public:
     }
 
     TModificationActorImpl(const NInternal::TTableRecord& patch, IAlterController::TPtr controller,
-        typename IObjectOperationsManager<TObject>::TPtr manager,
+        const typename IObjectOperationsManager<TObject>::TPtr& manager,
         const IOperationsManager::TInternalModificationContext& context)
         : ExternalController(controller)
         , Manager(manager)
@@ -84,7 +84,7 @@ public:
     }
 
     TModificationActorImpl(std::vector<NInternal::TTableRecord>&& patches, IAlterController::TPtr controller,
-        typename IObjectOperationsManager<TObject>::TPtr manager,
+        const typename IObjectOperationsManager<TObject>::TPtr& manager,
         const IOperationsManager::TInternalModificationContext& context)
         : ExternalController(controller)
         , Manager(manager)
@@ -94,7 +94,7 @@ public:
     }
 
     TModificationActorImpl(const std::vector<NInternal::TTableRecord>& patches, IAlterController::TPtr controller,
-        typename IObjectOperationsManager<TObject>::TPtr manager,
+        const typename IObjectOperationsManager<TObject>::TPtr& manager,
         const IOperationsManager::TInternalModificationContext& context)
         : ExternalController(controller)
         , Manager(manager)
@@ -148,7 +148,7 @@ public:
         if (!PrepareRestoredObjects(objects)) {
             TBase::PassAway();
         } else {
-            Manager->PrepareObjectsBeforeModification(std::move(objects), InternalController, Context);
+            Manager->PrepareObjectsBeforeModification(std::move(objects), InternalController, Context, TAlterOperationContext(SessionId, TransactionId, RestoreObjectIds));
         }
     }
 
@@ -235,8 +235,8 @@ public:
             if (!trPatch) {
                 TBase::ExternalController->OnAlteringProblem("cannot found patch for object");
                 return false;
-            } else if (!trObject.TakeValuesFrom(*trPatch)) {
-                TBase::ExternalController->OnAlteringProblem("cannot patch object");
+            } else if (const TConclusionStatus& status = objectPatched.MergeRecords(trObject, *trPatch); status.IsFail()) {
+                TBase::ExternalController->OnAlteringProblem(status.GetErrorMessage());
                 return false;
             } else if (!TObject::TDecoder::DeserializeFromRecord(objectPatched, trObject)) {
                 TBase::ExternalController->OnAlteringProblem("cannot parse object after patch");

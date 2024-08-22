@@ -172,7 +172,7 @@ class egg_info(InfoCommon, Command):
             'egg-base=',
             'e',
             "directory containing .egg-info directories"
-            " (default: top of the source tree)",
+            " [default: top of the source tree]",
         ),
         ('tag-date', 'd', "Add date stamp (e.g. 20050528) to version number"),
         ('tag-build=', 'b', "Specify explicit tag to add to version number"),
@@ -363,16 +363,16 @@ class FileList(_FileList):
         }
         log_map = {
             'include': "warning: no files found matching '%s'",
-            'exclude': ("warning: no previously-included files found " "matching '%s'"),
+            'exclude': ("warning: no previously-included files found matching '%s'"),
             'global-include': (
-                "warning: no files found matching '%s' " "anywhere in distribution"
+                "warning: no files found matching '%s' anywhere in distribution"
             ),
             'global-exclude': (
                 "warning: no previously-included files matching "
                 "'%s' found anywhere in distribution"
             ),
             'recursive-include': (
-                "warning: no files found matching '%s' " "under directory '%s'"
+                "warning: no files found matching '%s' under directory '%s'"
             ),
             'recursive-exclude': (
                 "warning: no previously-included files matching "
@@ -385,9 +385,8 @@ class FileList(_FileList):
         try:
             process_action = action_map[action]
         except KeyError:
-            raise DistutilsInternalError(
-                "this cannot happen: invalid action '{action!s}'".format(action=action),
-            )
+            msg = f"Invalid MANIFEST.in: unknown action {action!r} in {line!r}"
+            raise DistutilsInternalError(msg) from None
 
         # OK, now we know that the action is valid and we have the
         # right number of words on the line for that action -- so we
@@ -535,10 +534,10 @@ class manifest_maker(sdist):
     template = "MANIFEST.in"
 
     def initialize_options(self):
-        self.use_defaults = 1
-        self.prune = 1
-        self.manifest_only = 1
-        self.force_manifest = 1
+        self.use_defaults = True
+        self.prune = True
+        self.manifest_only = True
+        self.force_manifest = True
         self.ignore_egg_info_dir = False
 
     def finalize_options(self):
@@ -624,7 +623,7 @@ class manifest_maker(sdist):
         self.filelist.prune(base_dir)
         sep = re.escape(os.sep)
         self.filelist.exclude_pattern(
-            r'(^|' + sep + r')(RCS|CVS|\.svn)' + sep, is_regex=1
+            r'(^|' + sep + r')(RCS|CVS|\.svn)' + sep, is_regex=True
         )
 
     def _safe_data_files(self, build_py):
@@ -700,9 +699,9 @@ write_setup_requirements = _requirestxt.write_setup_requirements
 
 
 def write_toplevel_names(cmd, basename, filename):
-    pkgs = dict.fromkeys(
-        [k.split('.', 1)[0] for k in cmd.distribution.iter_distribution_names()]
-    )
+    pkgs = dict.fromkeys([
+        k.split('.', 1)[0] for k in cmd.distribution.iter_distribution_names()
+    ])
     cmd.write_file("top-level names", filename, '\n'.join(sorted(pkgs)) + '\n')
 
 

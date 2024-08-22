@@ -11,30 +11,43 @@
 #include <string.h>
 
 #include <roaring/bitset_util.h>
+#include <roaring/containers/array.h>
 #include <roaring/containers/bitset.h>
-#include <roaring/portability.h>
 #include <roaring/memory.h>
+#include <roaring/portability.h>
 #include <roaring/utilasm.h>
 
 #if CROARING_IS_X64
 #ifndef CROARING_COMPILER_SUPPORTS_AVX512
 #error "CROARING_COMPILER_SUPPORTS_AVX512 needs to be defined."
-#endif // CROARING_COMPILER_SUPPORTS_AVX512
+#endif  // CROARING_COMPILER_SUPPORTS_AVX512
 #endif
 
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic push
+#pragma GCC diagnostic ignored "-Wuninitialized"
+#pragma GCC diagnostic ignored "-Wmaybe-uninitialized"
+#endif
 #ifdef __cplusplus
-extern "C" { namespace roaring { namespace internal {
+extern "C" {
+namespace roaring {
+namespace internal {
 #endif
 
-extern inline int bitset_container_cardinality(const bitset_container_t *bitset);
-extern inline void bitset_container_set(bitset_container_t *bitset, uint16_t pos);
+extern inline int bitset_container_cardinality(
+    const bitset_container_t *bitset);
+extern inline void bitset_container_set(bitset_container_t *bitset,
+                                        uint16_t pos);
 // unused at this time:
-//extern inline void bitset_container_unset(bitset_container_t *bitset, uint16_t pos);
+// extern inline void bitset_container_unset(bitset_container_t *bitset,
+// uint16_t pos);
 extern inline bool bitset_container_get(const bitset_container_t *bitset,
                                         uint16_t pos);
 extern inline int32_t bitset_container_serialized_size_in_bytes(void);
-extern inline bool bitset_container_add(bitset_container_t *bitset, uint16_t pos);
-extern inline bool bitset_container_remove(bitset_container_t *bitset, uint16_t pos);
+extern inline bool bitset_container_add(bitset_container_t *bitset,
+                                        uint16_t pos);
+extern inline bool bitset_container_remove(bitset_container_t *bitset,
+                                           uint16_t pos);
 extern inline bool bitset_container_contains(const bitset_container_t *bitset,
                                              uint16_t pos);
 
@@ -49,8 +62,6 @@ void bitset_container_set_all(bitset_container_t *bitset) {
     bitset->cardinality = (1 << 16);
 }
 
-
-
 /* Create a new bitset. Return NULL in case of failure. */
 bitset_container_t *bitset_container_create(void) {
     bitset_container_t *bitset =
@@ -63,13 +74,12 @@ bitset_container_t *bitset_container_create(void) {
     size_t align_size = 32;
 #if CROARING_IS_X64
     int support = croaring_hardware_support();
-    if ( support & ROARING_SUPPORTS_AVX512 ) {
-	    // sizeof(__m512i) == 64
-	    align_size = 64;
-    }
-    else {
-      // sizeof(__m256i) == 32
-	    align_size = 32;
+    if (support & ROARING_SUPPORTS_AVX512) {
+        // sizeof(__m512i) == 64
+        align_size = 64;
+    } else {
+        // sizeof(__m256i) == 32
+        align_size = 32;
     }
 #endif
     bitset->words = (uint64_t *)roaring_aligned_malloc(
@@ -120,14 +130,13 @@ void bitset_container_add_from_range(bitset_container_t *bitset, uint32_t min,
 
 /* Free memory. */
 void bitset_container_free(bitset_container_t *bitset) {
-    if(bitset->words != NULL) {// Jon Strabala reports that some tools complain otherwise
-      roaring_aligned_free(bitset->words);
-      bitset->words = NULL; // pedantic
-    }
+    if (bitset == NULL) return;
+    roaring_aligned_free(bitset->words);
     roaring_free(bitset);
 }
 
 /* duplicate container. */
+ALLOW_UNALIGNED
 bitset_container_t *bitset_container_clone(const bitset_container_t *src) {
     bitset_container_t *bitset =
         (bitset_container_t *)roaring_malloc(sizeof(bitset_container_t));
@@ -138,13 +147,12 @@ bitset_container_t *bitset_container_clone(const bitset_container_t *src) {
 
     size_t align_size = 32;
 #if CROARING_IS_X64
-    if ( croaring_hardware_support() & ROARING_SUPPORTS_AVX512 ) {
-	    // sizeof(__m512i) == 64
-	    align_size = 64;
-    }
-    else {
-      // sizeof(__m256i) == 32
-	    align_size = 32;
+    if (croaring_hardware_support() & ROARING_SUPPORTS_AVX512) {
+        // sizeof(__m512i) == 64
+        align_size = 64;
+    } else {
+        // sizeof(__m256i) == 32
+        align_size = 32;
     }
 #endif
     bitset->words = (uint64_t *)roaring_aligned_malloc(
@@ -159,9 +167,8 @@ bitset_container_t *bitset_container_clone(const bitset_container_t *src) {
     return bitset;
 }
 
-void bitset_container_offset(const bitset_container_t *c,
-                             container_t **loc, container_t **hic,
-                             uint16_t offset) {
+void bitset_container_offset(const bitset_container_t *c, container_t **loc,
+                             container_t **hic, uint16_t offset) {
     bitset_container_t *bc = NULL;
     uint64_t val;
     uint16_t b, i, end;
@@ -173,13 +180,13 @@ void bitset_container_offset(const bitset_container_t *c,
     if (loc != NULL) {
         bc = bitset_container_create();
         if (i == 0) {
-            memcpy(bc->words+b, c->words, 8*end);
+            memcpy(bc->words + b, c->words, 8 * end);
         } else {
             bc->words[b] = c->words[0] << i;
             for (uint32_t k = 1; k < end; ++k) {
                 val = c->words[k] << i;
-                val |= c->words[k-1] >> (64 - i);
-                bc->words[b+k] = val;
+                val |= c->words[k - 1] >> (64 - i);
+                bc->words[b + k] = val;
             }
         }
 
@@ -196,7 +203,7 @@ void bitset_container_offset(const bitset_container_t *c,
         // Both hic and loc can't be NULL, so bc is never NULL here
         if (bc->cardinality == 0) {
             bitset_container_free(bc);
-	}
+        }
         return;
     }
 
@@ -205,20 +212,20 @@ void bitset_container_offset(const bitset_container_t *c,
     }
 
     if (i == 0) {
-        memcpy(bc->words, c->words+end, 8*b);
+        memcpy(bc->words, c->words + end, 8 * b);
     } else {
         for (uint32_t k = end; k < 1024; ++k) {
             val = c->words[k] << i;
-	    val |= c->words[k-1] >> (64 - i);
-	    bc->words[k-end] = val;
+            val |= c->words[k - 1] >> (64 - i);
+            bc->words[k - end] = val;
         }
         bc->words[b] = c->words[1023] >> (64 - i);
     }
 
     bc->cardinality = bitset_container_compute_cardinality(bc);
     if (bc->cardinality == 0) {
-	    bitset_container_free(bc);
-	    return;
+        bitset_container_free(bc);
+        return;
     }
     *hic = bc;
 }
@@ -230,56 +237,54 @@ void bitset_container_set_range(bitset_container_t *bitset, uint32_t begin,
         bitset_container_compute_cardinality(bitset);  // could be smarter
 }
 
-
 bool bitset_container_intersect(const bitset_container_t *src_1,
-                                  const bitset_container_t *src_2) {
-	// could vectorize, but this is probably already quite fast in practice
-    const uint64_t * __restrict__ words_1 = src_1->words;
-    const uint64_t * __restrict__ words_2 = src_2->words;
-	for (int i = 0; i < BITSET_CONTAINER_SIZE_IN_WORDS; i ++) {
-        if((words_1[i] & words_2[i]) != 0) return true;
+                                const bitset_container_t *src_2) {
+    // could vectorize, but this is probably already quite fast in practice
+    const uint64_t *__restrict__ words_1 = src_1->words;
+    const uint64_t *__restrict__ words_2 = src_2->words;
+    for (int i = 0; i < BITSET_CONTAINER_SIZE_IN_WORDS; i++) {
+        if ((words_1[i] & words_2[i]) != 0) return true;
     }
     return false;
 }
 
-
 #if CROARING_IS_X64
-#ifndef WORDS_IN_AVX2_REG
-#define WORDS_IN_AVX2_REG sizeof(__m256i) / sizeof(uint64_t)
+#ifndef CROARING_WORDS_IN_AVX2_REG
+#define CROARING_WORDS_IN_AVX2_REG sizeof(__m256i) / sizeof(uint64_t)
 #endif
 #ifndef WORDS_IN_AVX512_REG
 #define WORDS_IN_AVX512_REG sizeof(__m512i) / sizeof(uint64_t)
 #endif
 /* Get the number of bits set (force computation) */
-static inline int _scalar_bitset_container_compute_cardinality(const bitset_container_t *bitset) {
-  const uint64_t *words = bitset->words;
-  int32_t sum = 0;
-  for (int i = 0; i < BITSET_CONTAINER_SIZE_IN_WORDS; i += 4) {
-          sum += roaring_hamming(words[i]);
-          sum += roaring_hamming(words[i + 1]);
-          sum += roaring_hamming(words[i + 2]);
-          sum += roaring_hamming(words[i + 3]);
-  }
-  return sum;
+static inline int _scalar_bitset_container_compute_cardinality(
+    const bitset_container_t *bitset) {
+    const uint64_t *words = bitset->words;
+    int32_t sum = 0;
+    for (int i = 0; i < BITSET_CONTAINER_SIZE_IN_WORDS; i += 4) {
+        sum += roaring_hamming(words[i]);
+        sum += roaring_hamming(words[i + 1]);
+        sum += roaring_hamming(words[i + 2]);
+        sum += roaring_hamming(words[i + 3]);
+    }
+    return sum;
 }
 /* Get the number of bits set (force computation) */
 int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     int support = croaring_hardware_support();
 #if CROARING_COMPILER_SUPPORTS_AVX512
-    if( support & ROARING_SUPPORTS_AVX512 ) {
-      return (int) avx512_vpopcount(
-        (const __m512i *)bitset->words,
-        BITSET_CONTAINER_SIZE_IN_WORDS / (WORDS_IN_AVX512_REG));
+    if (support & ROARING_SUPPORTS_AVX512) {
+        return (int)avx512_vpopcount(
+            (const __m512i *)bitset->words,
+            BITSET_CONTAINER_SIZE_IN_WORDS / (WORDS_IN_AVX512_REG));
     } else
-#endif // CROARING_COMPILER_SUPPORTS_AVX512
-    if( support & ROARING_SUPPORTS_AVX2 ) {
-      return (int) avx2_harley_seal_popcount256(
-        (const __m256i *)bitset->words,
-        BITSET_CONTAINER_SIZE_IN_WORDS / (WORDS_IN_AVX2_REG));
-    } else {
-      return _scalar_bitset_container_compute_cardinality(bitset);
-
-    }
+#endif  // CROARING_COMPILER_SUPPORTS_AVX512
+        if (support & ROARING_SUPPORTS_AVX2) {
+            return (int)avx2_harley_seal_popcount256(
+                (const __m256i *)bitset->words,
+                BITSET_CONTAINER_SIZE_IN_WORDS / (CROARING_WORDS_IN_AVX2_REG));
+        } else {
+            return _scalar_bitset_container_compute_cardinality(bitset);
+        }
 }
 
 #elif defined(CROARING_USENEON)
@@ -306,7 +311,7 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     return vgetq_lane_u64(n, 0) + vgetq_lane_u64(n, 1);
 }
 
-#else // CROARING_IS_X64
+#else  // CROARING_IS_X64
 
 /* Get the number of bits set (force computation) */
 int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
@@ -321,19 +326,19 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     return sum;
 }
 
-#endif // CROARING_IS_X64
+#endif  // CROARING_IS_X64
 
 #if CROARING_IS_X64
 
-#define BITSET_CONTAINER_FN_REPEAT 8
+#define CROARING_BITSET_CONTAINER_FN_REPEAT 8
 #ifndef WORDS_IN_AVX512_REG
 #define WORDS_IN_AVX512_REG sizeof(__m512i) / sizeof(uint64_t)
-#endif // WORDS_IN_AVX512_REG
+#endif  // WORDS_IN_AVX512_REG
 
 /* Computes a binary operation (eg union) on bitset1 and bitset2 and write the
    result to bitsetout */
 // clang-format off
-#define AVX512_BITSET_CONTAINER_FN1(before, opname, opsymbol, avx_intrinsic,   \
+#define CROARING_AVX512_BITSET_CONTAINER_FN1(before, opname, opsymbol, avx_intrinsic,   \
                                 neon_intrinsic, after)                         \
   static inline int _avx512_bitset_container_##opname##_nocard(                \
       const bitset_container_t *src_1, const bitset_container_t *src_2,        \
@@ -387,7 +392,7 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     return dst->cardinality;                                            \
   }
 
-#define AVX512_BITSET_CONTAINER_FN2(before, opname, opsymbol, avx_intrinsic,           \
+#define CROARING_AVX512_BITSET_CONTAINER_FN2(before, opname, opsymbol, avx_intrinsic,           \
                                 neon_intrinsic, after)                                 \
   /* next, a version that updates cardinality*/                                        \
   static inline int _avx512_bitset_container_##opname(const bitset_container_t *src_1, \
@@ -401,7 +406,7 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
     return dst->cardinality;                                                            \
   }
 
-#define AVX512_BITSET_CONTAINER_FN3(before, opname, opsymbol, avx_intrinsic,            \
+#define CROARING_AVX512_BITSET_CONTAINER_FN3(before, opname, opsymbol, avx_intrinsic,            \
                                 neon_intrinsic, after)                                  \
   /* next, a version that just computes the cardinality*/                               \
   static inline int _avx512_bitset_container_##opname##_justcard(                       \
@@ -416,85 +421,85 @@ int bitset_container_compute_cardinality(const bitset_container_t *bitset) {
 // we duplicate the function because other containers use the "or" term, makes API more consistent
 #if CROARING_COMPILER_SUPPORTS_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, or,    |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, or,    |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, union, |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, union, |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, and,          &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, and,          &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, intersection, &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, intersection, &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, xor,    ^,  _mm512_xor_si512,    veorq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, xor,    ^,  _mm512_xor_si512,    veorq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, andnot, &~, _mm512_andnot_si512, vbicq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX512, andnot, &~, _mm512_andnot_si512, vbicq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 
 // we duplicate the function because other containers use the "or" term, makes API more consistent
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, or,    |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, or,    |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, union, |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, union, |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, and,          &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, and,          &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, intersection, &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, intersection, &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, xor,    ^,  _mm512_xor_si512,    veorq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, xor,    ^,  _mm512_xor_si512,    veorq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, andnot, &~, _mm512_andnot_si512, vbicq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX512, andnot, &~, _mm512_andnot_si512, vbicq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 
 // we duplicate the function because other containers use the "or" term, makes API more consistent
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, or,    |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, or,    |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, union, |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, union, |, _mm512_or_si512, vorrq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, and,          &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, and,          &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, intersection, &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, intersection, &, _mm512_and_si512, vandq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, xor,    ^,  _mm512_xor_si512,    veorq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, xor,    ^,  _mm512_xor_si512,    veorq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 CROARING_TARGET_AVX512
-AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, andnot, &~, _mm512_andnot_si512, vbicq_u64, CROARING_UNTARGET_AVX512)
+CROARING_AVX512_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX512, andnot, &~, _mm512_andnot_si512, vbicq_u64, CROARING_UNTARGET_AVX512)
 CROARING_UNTARGET_AVX512
 #endif // CROARING_COMPILER_SUPPORTS_AVX512
 
-#ifndef WORDS_IN_AVX2_REG
-#define WORDS_IN_AVX2_REG sizeof(__m256i) / sizeof(uint64_t)
-#endif // WORDS_IN_AVX2_REG
-#define LOOP_SIZE                    \
+#ifndef CROARING_WORDS_IN_AVX2_REG
+#define CROARING_WORDS_IN_AVX2_REG sizeof(__m256i) / sizeof(uint64_t)
+#endif // CROARING_WORDS_IN_AVX2_REG
+#define CROARING_LOOP_SIZE                    \
     BITSET_CONTAINER_SIZE_IN_WORDS / \
-        ((WORDS_IN_AVX2_REG)*BITSET_CONTAINER_FN_REPEAT)
+        ((CROARING_WORDS_IN_AVX2_REG)*CROARING_BITSET_CONTAINER_FN_REPEAT)
 
 /* Computes a binary operation (eg union) on bitset1 and bitset2 and write the
    result to bitsetout */
 // clang-format off
-#define AVX_BITSET_CONTAINER_FN1(before, opname, opsymbol, avx_intrinsic,               \
+#define CROARING_AVX_BITSET_CONTAINER_FN1(before, opname, opsymbol, avx_intrinsic,               \
                                 neon_intrinsic, after)                                \
   static inline int _avx2_bitset_container_##opname##_nocard(                                \
       const bitset_container_t *src_1, const bitset_container_t *src_2,        \
@@ -505,7 +510,7 @@ CROARING_UNTARGET_AVX512
     uint8_t *out = (uint8_t *)dst->words;                                      \
     const int innerloop = 8;                                                   \
     for (size_t i = 0;                                                         \
-         i < BITSET_CONTAINER_SIZE_IN_WORDS / (WORDS_IN_AVX2_REG);             \
+         i < BITSET_CONTAINER_SIZE_IN_WORDS / (CROARING_WORDS_IN_AVX2_REG);             \
          i += innerloop) {                                                     \
       __m256i A1, A2, AO;                                                      \
       A1 = _mm256_lddqu_si256((const __m256i *)(words_1));                     \
@@ -548,7 +553,7 @@ CROARING_UNTARGET_AVX512
     return dst->cardinality;                                                   \
   }
 
-#define AVX_BITSET_CONTAINER_FN2(before, opname, opsymbol, avx_intrinsic,               \
+#define CROARING_AVX_BITSET_CONTAINER_FN2(before, opname, opsymbol, avx_intrinsic,               \
                                 neon_intrinsic, after)                                \
   /* next, a version that updates cardinality*/                                \
   static inline int _avx2_bitset_container_##opname(const bitset_container_t *src_1,         \
@@ -559,11 +564,11 @@ CROARING_UNTARGET_AVX512
     __m256i *out = (__m256i *)dst->words;                                      \
     dst->cardinality = (int32_t)avx2_harley_seal_popcount256andstore_##opname( \
         words_2, words_1, out,                                                 \
-        BITSET_CONTAINER_SIZE_IN_WORDS / (WORDS_IN_AVX2_REG));                 \
+        BITSET_CONTAINER_SIZE_IN_WORDS / (CROARING_WORDS_IN_AVX2_REG));                 \
     return dst->cardinality;                                                   \
   }                                                                            \
 
-#define AVX_BITSET_CONTAINER_FN3(before, opname, opsymbol, avx_intrinsic,               \
+#define CROARING_AVX_BITSET_CONTAINER_FN3(before, opname, opsymbol, avx_intrinsic,               \
                                 neon_intrinsic, after)                                \
   /* next, a version that just computes the cardinality*/                      \
   static inline int _avx2_bitset_container_##opname##_justcard(                              \
@@ -571,77 +576,77 @@ CROARING_UNTARGET_AVX512
     const __m256i *__restrict__ data1 = (const __m256i *)src_1->words;         \
     const __m256i *__restrict__ data2 = (const __m256i *)src_2->words;         \
     return (int)avx2_harley_seal_popcount256_##opname(                         \
-        data2, data1, BITSET_CONTAINER_SIZE_IN_WORDS / (WORDS_IN_AVX2_REG));   \
+        data2, data1, BITSET_CONTAINER_SIZE_IN_WORDS / (CROARING_WORDS_IN_AVX2_REG));   \
   }
 
 
 // we duplicate the function because other containers use the "or" term, makes API more consistent
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, or,    |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, or,    |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, union, |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, union, |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, and,          &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, and,          &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, intersection, &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, intersection, &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, xor,    ^,  _mm256_xor_si256,    veorq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, xor,    ^,  _mm256_xor_si256,    veorq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, andnot, &~, _mm256_andnot_si256, vbicq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN1(CROARING_TARGET_AVX2, andnot, &~, _mm256_andnot_si256, vbicq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 // we duplicate the function because other containers use the "or" term, makes API more consistent
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, or,    |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, or,    |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, union, |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, union, |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, and,          &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, and,          &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, intersection, &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, intersection, &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, xor,    ^,  _mm256_xor_si256,    veorq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, xor,    ^,  _mm256_xor_si256,    veorq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, andnot, &~, _mm256_andnot_si256, vbicq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN2(CROARING_TARGET_AVX2, andnot, &~, _mm256_andnot_si256, vbicq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 // we duplicate the function because other containers use the "or" term, makes API more consistent
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, or,    |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, or,    |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, union, |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, union, |, _mm256_or_si256, vorrq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, and,          &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, and,          &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, intersection, &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, intersection, &, _mm256_and_si256, vandq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, xor,    ^,  _mm256_xor_si256,    veorq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, xor,    ^,  _mm256_xor_si256,    veorq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 CROARING_TARGET_AVX2
-AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, andnot, &~, _mm256_andnot_si256, vbicq_u64, CROARING_UNTARGET_AVX2)
+CROARING_AVX_BITSET_CONTAINER_FN3(CROARING_TARGET_AVX2, andnot, &~, _mm256_andnot_si256, vbicq_u64, CROARING_UNTARGET_AVX2)
 CROARING_UNTARGET_AVX2
 
 
@@ -703,7 +708,7 @@ SCALAR_BITSET_CONTAINER_FN(xor,    ^,  _mm256_xor_si256,    veorq_u64)
 SCALAR_BITSET_CONTAINER_FN(andnot, &~, _mm256_andnot_si256, vbicq_u64)
 
 #if CROARING_COMPILER_SUPPORTS_AVX512
-#define BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)   \
+#define CROARING_BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)   \
   int bitset_container_##opname(const bitset_container_t *src_1,               \
                                 const bitset_container_t *src_2,               \
                                 bitset_container_t *dst) {                     \
@@ -746,7 +751,7 @@ SCALAR_BITSET_CONTAINER_FN(andnot, &~, _mm256_andnot_si256, vbicq_u64)
 #else // CROARING_COMPILER_SUPPORTS_AVX512
 
 
-#define BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)   \
+#define CROARING_BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)   \
   int bitset_container_##opname(const bitset_container_t *src_1,               \
                                 const bitset_container_t *src_2,               \
                                 bitset_container_t *dst) {                     \
@@ -778,7 +783,7 @@ SCALAR_BITSET_CONTAINER_FN(andnot, &~, _mm256_andnot_si256, vbicq_u64)
 
 #elif defined(CROARING_USENEON)
 
-#define BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)  \
+#define CROARING_BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)  \
 int bitset_container_##opname(const bitset_container_t *src_1,                \
                               const bitset_container_t *src_2,                \
                               bitset_container_t *dst) {                      \
@@ -866,7 +871,7 @@ int bitset_container_##opname##_justcard(const bitset_container_t *src_1,     \
 
 #else
 
-#define BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)  \
+#define CROARING_BITSET_CONTAINER_FN(opname, opsymbol, avx_intrinsic, neon_intrinsic)  \
 int bitset_container_##opname(const bitset_container_t *src_1,            \
                               const bitset_container_t *src_2,            \
                               bitset_container_t *dst) {                  \
@@ -914,15 +919,15 @@ int bitset_container_##opname##_justcard(const bitset_container_t *src_1, \
 #endif // CROARING_IS_X64
 
 // we duplicate the function because other containers use the "or" term, makes API more consistent
-BITSET_CONTAINER_FN(or,    |, _mm256_or_si256, vorrq_u64)
-BITSET_CONTAINER_FN(union, |, _mm256_or_si256, vorrq_u64)
+CROARING_BITSET_CONTAINER_FN(or,    |, _mm256_or_si256, vorrq_u64)
+CROARING_BITSET_CONTAINER_FN(union, |, _mm256_or_si256, vorrq_u64)
 
 // we duplicate the function because other containers use the "intersection" term, makes API more consistent
-BITSET_CONTAINER_FN(and,          &, _mm256_and_si256, vandq_u64)
-BITSET_CONTAINER_FN(intersection, &, _mm256_and_si256, vandq_u64)
+CROARING_BITSET_CONTAINER_FN(and,          &, _mm256_and_si256, vandq_u64)
+CROARING_BITSET_CONTAINER_FN(intersection, &, _mm256_and_si256, vandq_u64)
 
-BITSET_CONTAINER_FN(xor,    ^,  _mm256_xor_si256,    veorq_u64)
-BITSET_CONTAINER_FN(andnot, &~, _mm256_andnot_si256, vbicq_u64)
+CROARING_BITSET_CONTAINER_FN(xor,    ^,  _mm256_xor_si256,    veorq_u64)
+CROARING_BITSET_CONTAINER_FN(andnot, &~, _mm256_andnot_si256, vbicq_u64)
 // clang-format On
 
 
@@ -1010,6 +1015,10 @@ bool bitset_container_validate(const bitset_container_t *v, const char **reason)
     }
     if (v->cardinality != bitset_container_compute_cardinality(v)) {
         *reason = "cardinality is incorrect";
+        return false;
+    }
+    if (v->cardinality <= DEFAULT_MAX_SIZE) {
+        *reason = "cardinality is too small for a bitmap container";
         return false;
     }
     // Attempt to forcibly load the first and last words, hopefully causing
@@ -1232,6 +1241,29 @@ int bitset_container_rank(const bitset_container_t *container, uint16_t x) {
   return sum;
 }
 
+uint32_t bitset_container_rank_many(const bitset_container_t *container, uint64_t start_rank, const uint32_t* begin, const uint32_t* end, uint64_t* ans){
+  const uint16_t high = (uint16_t)((*begin) >> 16);
+  int i = 0;
+  int sum = 0;
+  const uint32_t* iter = begin;
+  for(; iter != end; iter++) {
+      uint32_t x = *iter;
+      uint16_t xhigh = (uint16_t)(x >> 16);
+      if(xhigh != high) return iter - begin; // stop at next container
+
+      uint16_t xlow = (uint16_t)x;
+      for(int count = xlow / 64; i < count; i++){
+        sum += roaring_hamming(container->words[i]);
+      }
+      uint64_t lastword = container->words[i];
+      uint64_t lastpos = UINT64_C(1) << (xlow % 64);
+      uint64_t mask = lastpos + lastpos - 1; // smear right
+      *(ans++) = start_rank + sum + roaring_hamming(lastword & mask);
+  }
+  return iter - begin;
+}
+
+
 /* Returns the index of x , if not exsist return -1 */
 int bitset_container_get_index(const bitset_container_t *container, uint16_t x) {
   if (bitset_container_get(container, x)) {
@@ -1268,4 +1300,7 @@ int bitset_container_index_equalorlarger(const bitset_container_t *container, ui
 
 #ifdef __cplusplus
 } } }  // extern "C" { namespace roaring { namespace internal {
+#endif
+#if defined(__GNUC__) && !defined(__clang__)
+#pragma GCC diagnostic pop
 #endif

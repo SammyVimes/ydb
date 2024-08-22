@@ -55,7 +55,7 @@ public:
                 const TSnapshotKey key(pathId, snapshot.GetStep(), snapshot.GetTxId());
                 DataShard.GetSnapshotManager().RemoveSnapshot(txc.DB, key);
             } else {
-                Y_DEBUG_ABORT_UNLESS(false, "Absent snapshot");
+                Y_DEBUG_ABORT("Absent snapshot");
             }
 
             if (const auto heartbeatInterval = TDuration::MilliSeconds(streamDesc.GetResolvedTimestampsIntervalMs())) {
@@ -88,8 +88,8 @@ public:
         return EExecutionStatus::DelayCompleteNoMoreRestarts;
     }
 
-    void Complete(TOperation::TPtr, const TActorContext& ctx) override {
-        DataShard.EmitHeartbeats(ctx);
+    void Complete(TOperation::TPtr, const TActorContext&) override {
+        DataShard.EmitHeartbeats();
     }
 };
 

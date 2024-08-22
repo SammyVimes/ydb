@@ -55,11 +55,11 @@ TMaybe<Ydb::Table::CreateTableRequest> GenYdbScheme(
 
     try {
         FillTableBoundary(scheme, tableDesc, mkqlKeyType);
+        FillIndexDescription(scheme, tableDesc);
     } catch (const yexception&) {
         return Nothing();
     }
 
-    FillIndexDescription(scheme, tableDesc);
     FillStorageSettings(scheme, tableDesc);
     FillColumnFamilies(scheme, tableDesc);
     FillAttributes(scheme, pathDesc);
@@ -67,7 +67,32 @@ TMaybe<Ydb::Table::CreateTableRequest> GenYdbScheme(
     FillKeyBloomFilter(scheme, tableDesc);
     FillReadReplicasSettings(scheme, tableDesc);
 
+    TString error;
+    Ydb::StatusIds::StatusCode status;
+    if (!FillSequenceDescription(scheme, tableDesc, status, error)) {
+        return Nothing();
+    }
+
     return scheme;
+}
+
+TMaybe<Ydb::Scheme::ModifyPermissionsRequest> GenYdbPermissions(const NKikimrSchemeOp::TPathDescription& pathDesc) {
+    if (!pathDesc.HasSelf()) {
+        return Nothing();
+    }
+
+    Ydb::Scheme::ModifyPermissionsRequest permissions;
+
+    const auto& selfDesc = pathDesc.GetSelf();
+    permissions.mutable_actions()->Add()->set_change_owner(selfDesc.GetOwner());
+
+    NProtoBuf::RepeatedPtrField<Ydb::Scheme::Permissions> toGrant;
+    ConvertAclToYdb(selfDesc.GetOwner(), selfDesc.GetACL(), false, &toGrant);
+    for (const auto& permission : toGrant) {
+        *permissions.mutable_actions()->Add()->mutable_grant() = permission;
+    }
+
+    return permissions;
 }
 
 TString DecimalToString(const std::pair<ui64, i64>& loHi) {
@@ -114,6 +139,16 @@ bool PgToStream(TStringBuf data, void* typeDesc, IOutputStream& out, TString& er
         return false;
     }
     out << '"' << CGIEscapeRet(pgResult.Str) << '"';
+    return true;
+}
+
+bool UuidToStream(const std::pair<ui64, ui64>& loHi, IOutputStream& out, TString& err) {
+    Y_UNUSED(err);
+
+    NYdb::TUuidValue uuid(loHi.first, loHi.second);
+    
+    out << uuid.ToString();
+    
     return true;
 }
 

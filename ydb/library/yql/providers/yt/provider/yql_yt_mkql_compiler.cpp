@@ -349,6 +349,7 @@ TRuntimeNode BuildDqYtInputCall(
         }
 
         TVector<TRuntimeNode> tableTuples;
+        ui64 tableOffset = 0;
         for (auto p: section.Paths()) {
             TYtPathInfo pathInfo(p);
             // Table may have aux columns. Exclude them by specifying explicit columns from the type
@@ -369,7 +370,7 @@ TRuntimeNode BuildDqYtInputCall(
             }
             tablesNode.Add(refName);
             // TODO() Enable range indexes
-            auto skiffNode = SingleTableSpecToInputSkiff(specNode, structColumns, true, !enableBlockReader, false);
+            auto skiffNode = SingleTableSpecToInputSkiff(specNode, structColumns, !enableBlockReader, !enableBlockReader, false);
             const auto tmpFolder = GetTablesTmpFolder(*state->Configuration);
             auto tableName = pathInfo.Table->Name;
             if (pathInfo.Table->IsAnonymous && !TYtTableInfo::HasSubstAnonymousLabel(pathInfo.Table->FromNode.Cast())) {
@@ -385,16 +386,21 @@ TRuntimeNode BuildDqYtInputCall(
                 ctx.ProgramBuilder.NewDataLiteral<NUdf::EDataSlot::String>(pathInfo.Table->IsTemp ? TString() : tableName),
                 ctx.ProgramBuilder.NewDataLiteral<NUdf::EDataSlot::String>(NYT::NodeToYsonString(pathNode)),
                 ctx.ProgramBuilder.NewDataLiteral<NUdf::EDataSlot::String>(NYT::NodeToYsonString(skiffNode)),
+                ctx.ProgramBuilder.NewDataLiteral(tableOffset)
             }));
+            YQL_ENSURE(pathInfo.Table->Stat);
+            tableOffset += pathInfo.Table->Stat->RecordsCount;
         }
         groups.push_back(ctx.ProgramBuilder.NewList(tableTuples.front().GetStaticType(), tableTuples));
         // All sections have the same sampling settings
         if (samplingSpec.IsUndefined()) {
             if (auto sampling = GetSampleParams(section.Settings().Ref())) {
-                YQL_ENSURE(sampling->Mode != EYtSampleMode::System);
                 samplingSpec["sampling_rate"] = sampling->Percentage / 100.;
                 if (sampling->Repeat) {
                     samplingSpec["sampling_seed"] = static_cast<i64>(sampling->Repeat);
+                }
+                if (sampling->Mode == EYtSampleMode::System) {
+                    samplingSpec["sampling_mode"] = "block";
                 }
             }
         }
@@ -483,7 +489,8 @@ void RegisterDqYtMkqlCompilers(NCommon::TMkqlCallableCompilerBase& compiler, con
                 const auto readType = ytRead.Ref().GetTypeAnn()->Cast<TTupleExprType>()->GetItems().back();
                 const auto inputItemType = NCommon::BuildType(wrapper.Input().Ref(), GetSeqItemType(*readType), ctx.ProgramBuilder);
                 const auto cluster = ytRead.DataSource().Cluster().StringValue();
-                size_t inflight = state->Configuration->UseRPCReaderInDQ.Get(cluster).GetOrElse(DEFAULT_USE_RPC_READER_IN_DQ) ? state->Configuration->DQRPCReaderInflight.Get(cluster).GetOrElse(DEFAULT_RPC_READER_INFLIGHT) : 0;
+                const bool useRPCReaderDefault = DEFAULT_USE_RPC_READER_IN_DQ || state->Types->BlockEngineMode != EBlockEngineMode::Disable;
+                size_t inflight = state->Configuration->UseRPCReaderInDQ.Get(cluster).GetOrElse(useRPCReaderDefault) ? state->Configuration->DQRPCReaderInflight.Get(cluster).GetOrElse(DEFAULT_RPC_READER_INFLIGHT) : 0;
                 size_t timeout = state->Configuration->DQRPCReaderTimeout.Get(cluster).GetOrElse(DEFAULT_RPC_READER_TIMEOUT).MilliSeconds();
                 const auto outputType = NCommon::BuildType(wrapper.Ref(), *wrapper.Ref().GetTypeAnn(), ctx.ProgramBuilder);
                 TString tokenName;
@@ -495,11 +502,11 @@ void RegisterDqYtMkqlCompilers(NCommon::TMkqlCallableCompilerBase& compiler, con
                 for (const auto& flag : wrapper.Flags())
                     if (solid = flag.Value() == "Solid")
                         break;
-
-                if (solid)
-                    return BuildDqYtInputCall<false>(outputType, inputItemType, cluster, tokenName, ytRead.Input(), state, ctx, inflight, timeout, true && inflight);
-                else
-                    return BuildDqYtInputCall<true>(outputType, inputItemType, cluster, tokenName, ytRead.Input(), state, ctx, inflight, timeout, true && inflight);
+                return ctx.ProgramBuilder.BlockExpandChunked(
+                    solid
+                    ? BuildDqYtInputCall<false>(outputType, inputItemType, cluster, tokenName, ytRead.Input(), state, ctx, inflight, timeout, true && inflight)
+                    : BuildDqYtInputCall<true>(outputType, inputItemType, cluster, tokenName, ytRead.Input(), state, ctx, inflight, timeout, true && inflight)
+                );
             }
 
             return TRuntimeNode();

@@ -48,13 +48,19 @@ public:
         return str;
     }
 
+    const TString& GetSpillingSessionId() const {
+        return SpillingSessionId_;
+    }
+
     TActorId StartSpillingService(ui64 maxTotalSize = 1000, ui64 maxFileSize = 500,
         ui64 maxFilePartSize = 100, const TFsPath& root = TFsPath::Cwd() / GetSpillingPrefix())
     {
         SpillingRoot_ = root;
+        SpillingSessionId_ = CreateGuidAsString();
 
         auto config = TFileSpillingServiceConfig{
             .Root = root.GetPath(),
+            .SpillingSessionId = SpillingSessionId_,
             .MaxTotalSize = maxTotalSize,
             .MaxFileSize = maxFileSize,
             .MaxFilePartSize = maxFilePartSize
@@ -91,6 +97,7 @@ public:
 
 private:
     TFsPath SpillingRoot_;
+    TString SpillingSessionId_;
 };
 
 TBuffer CreateBlob(ui32 size, char symbol) {
@@ -145,7 +152,7 @@ struct THttpRequest : NMonitoring::IHttpRequest {
     }
 
     TStringBuf GetPostContent() const override {
-        return TString();
+        return TStringBuf();
     }
 
     HTTP_METHOD GetMethod() const override {
@@ -303,8 +310,7 @@ Y_UNIT_TEST_SUITE(DqSpillingFileTests) {
         auto spillingActor = runtime.StartSpillingActor(tester);
 
         runtime.WaitBootstrap();
-
-        const TString filePrefix = TStringBuilder() << runtime.GetSpillingRoot().GetPath() << "/node_" << runtime.GetNodeId() << "/1_test_";
+        const TString filePrefix = TStringBuilder() << runtime.GetSpillingRoot().GetPath() << "/node_" << runtime.GetNodeId() << "_" << runtime.GetSpillingSessionId() << "/1_test_";
 
         for (ui32 i = 0; i < 5; ++i) {
             // Cerr << "---- store blob #" << i << Endl;
@@ -346,7 +352,7 @@ Y_UNIT_TEST_SUITE(DqSpillingFileTests) {
 
         runtime.WaitBootstrap();
 
-        const TString filePrefix = TStringBuilder() << runtime.GetSpillingRoot().GetPath() << "/node_" << runtime.GetNodeId() << "/1_test_";
+        const TString filePrefix = TStringBuilder() << runtime.GetSpillingRoot().GetPath() << "/node_" << runtime.GetNodeId() << "_" << runtime.GetSpillingSessionId() << "/1_test_";
 
         for (ui32 i = 0; i < 5; ++i) {
             // Cerr << "---- store blob #" << i << Endl;
@@ -377,12 +383,10 @@ Y_UNIT_TEST_SUITE(DqSpillingFileTests) {
     }
 
     Y_UNIT_TEST(ReadError) {
-        //return;
-
         TTestActorRuntime runtime;
         runtime.Initialize();
 
-        runtime.StartSpillingService();
+        auto spillingSvc = runtime.StartSpillingService();
         auto tester = runtime.AllocateEdgeActor();
         auto spillingActor = runtime.StartSpillingActor(tester);
 
@@ -395,16 +399,16 @@ Y_UNIT_TEST_SUITE(DqSpillingFileTests) {
             auto resp = runtime.GrabEdgeEvent<TEvDqSpilling::TEvWriteResult>(tester);
             UNIT_ASSERT_VALUES_EQUAL(0, resp->Get()->BlobId);
         }
-
-        (runtime.GetSpillingRoot() / "node_1" / "1_test_0").ForceDelete();
+        auto nodePath = TFsPath("node_" + std::to_string(spillingSvc.NodeId()) + "_" + runtime.GetSpillingSessionId());
+        (runtime.GetSpillingRoot() / nodePath / "1_test_0").ForceDelete();
 
         {
             auto ev = new TEvDqSpilling::TEvRead(0, true);
             runtime.Send(new IEventHandle(spillingActor, tester, ev));
 
             auto resp = runtime.GrabEdgeEvent<TEvDqSpilling::TEvError>(tester);
-            auto& err = resp->Get()->Message;
-            auto expected = "can't open \"" + runtime.GetSpillingRoot().GetPath() + "/node_1/1_test_0\" with mode RdOnly";
+            auto err = resp->Get()->Message;
+            auto expected = "can't open \"" + runtime.GetSpillingRoot().GetPath() + "/" + nodePath.GetPath() +"/1_test_0\" with mode RdOnly";
             UNIT_ASSERT_C(err.Contains("No such file or directory"), err);
             UNIT_ASSERT_C(err.Contains(expected), err);
         }
@@ -448,6 +452,34 @@ Y_UNIT_TEST_SUITE(DqSpillingFileTests) {
             auto resp = runtime.GrabEdgeEvent<NMon::TEvHttpInfoRes>(tester, TDuration::Seconds(1));
             UNIT_ASSERT_EQUAL("<html><h2>Service is not started due to IO error</h2></html>",
                             ((NMon::TEvHttpInfoRes*) resp->Get())->Answer);
+        }
+    }
+
+    Y_UNIT_TEST(NoSpillingService) {
+        TTestActorRuntime runtime;
+        runtime.Initialize();
+
+        auto tester = runtime.AllocateEdgeActor();
+        auto spillingActor = runtime.StartSpillingActor(tester);
+
+        runtime.WaitBootstrap();
+
+        // put blob 1
+        {
+            auto ev = new TEvDqSpilling::TEvWrite(1, CreateRope(10, 'a'));
+            runtime.Send(new IEventHandle(spillingActor, tester, ev));
+
+            auto resp = runtime.GrabEdgeEvent<TEvDqSpilling::TEvError>(tester, TDuration::Seconds(1));
+            UNIT_ASSERT_EQUAL("Spilling Service not started", resp->Get()->Message);
+        }
+
+        // get blob 1
+        {
+            auto ev = new TEvDqSpilling::TEvRead(1);
+            runtime.Send(new IEventHandle(spillingActor, tester, ev));
+
+            auto resp = runtime.GrabEdgeEvent<TEvDqSpilling::TEvError>(tester, TDuration::Seconds(1));
+            UNIT_ASSERT_EQUAL("Spilling Service not started", resp->Get()->Message);
         }
     }
 

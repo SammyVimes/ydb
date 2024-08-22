@@ -11,11 +11,11 @@ class Result(object):
 def lazy(func):
     result = Result()
 
-    def wrapper():
+    def wrapper(*args, **kwargs):
         try:
             return result._result
         except AttributeError:
-            result._result = func()
+            result._result = func(*args, **kwargs)
 
         return result._result
 
@@ -28,6 +28,10 @@ def pathid(path):
 
 def listid(items):
     return pathid(str(sorted(items)))
+
+
+def sort_uniq(items):
+    return sorted(set(items))
 
 
 def stripext(fname):

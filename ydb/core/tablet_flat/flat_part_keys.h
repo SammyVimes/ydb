@@ -1,88 +1,18 @@
 #pragma once
+#include "flat_page_data.h"
 #include "flat_part_iface.h"
-#include "flat_part_index_iter.h"
+#include "flat_part_index_iter_iface.h"
 #include "flat_part_slice.h"
-#include "flat_sausage_fetch.h"
-#include "flat_sausagecache.h"
-#include "util_fmt_abort.h"
 
 namespace NKikimr {
 namespace NTable {
-
-    class TKeysEnv : public IPages {
-    public:
-        using TCache = NTabletFlatExecutor::TPrivatePageCache::TInfo;
-
-        TKeysEnv(const TPart *part, TIntrusivePtr<TCache> cache)
-            : Part(part)
-            , Cache(std::move(cache))
-        {
-        }
-
-        TResult Locate(const TMemTable*, ui64, ui32) noexcept override
-        {
-            Y_ABORT("IPages::Locate(TMemTable*, ...) shouldn't be used here");
-        }
-
-        TResult Locate(const TPart*, ui64, ELargeObj) noexcept override
-        {
-            Y_ABORT("IPages::Locate(TPart*, ...) shouldn't be used here");
-        }
-
-        const TSharedData* TryGetPage(const TPart* part, TPageId id, TGroupId groupId) override
-        {
-            Y_ABORT_UNLESS(part == Part, "Unsupported part");
-            Y_ABORT_UNLESS(groupId.IsMain(), "Unsupported column group");
-
-            if (auto* extra = ExtraPages.FindPtr(id)) {
-                return extra;
-            } else if (auto* cached = Cache->Lookup(id)) {
-                // Save page in case it's evicted on the next iteration
-                ExtraPages[id] = *cached;
-                return cached;
-            } else {
-                NeedPages.insert(id);
-                return nullptr;
-            }
-        }
-
-        void Check(bool has) const noexcept
-        {
-            Y_ABORT_UNLESS(bool(NeedPages) == has, "Loader does not have some ne");
-        }
-
-        TAutoPtr<NPageCollection::TFetch> GetFetches()
-        {
-            if (NeedPages) {
-                TVector<TPageId> pages(NeedPages.begin(), NeedPages.end());
-                std::sort(pages.begin(), pages.end());
-                return new NPageCollection::TFetch{ 0, Cache->PageCollection, std::move(pages) };
-            } else {
-                return nullptr;
-            }
-        }
-
-        void Save(ui32 cookie, NSharedCache::TEvResult::TLoaded&& loaded) noexcept
-        {
-            if (cookie == 0 && NeedPages.erase(loaded.PageId)) {
-                ExtraPages[loaded.PageId] = TPinnedPageRef(loaded.Page).GetData();
-                Cache->Fill(std::move(loaded));
-            }
-        }
-
-    private:
-        const TPart* Part;
-        TIntrusivePtr<TCache> Cache;
-        THashMap<TPageId, TSharedData> ExtraPages;
-        THashSet<TPageId> NeedPages;
-    };
 
     class TKeysLoader {
     public:
         explicit TKeysLoader(const TPart* part, IPages* env)
             : Part(part)
             , Env(env)
-            , Index(Part, Env, {})
+            , Index(CreateIndexIter(part, env, {}))
         {
         }
 
@@ -151,7 +81,7 @@ namespace NTable {
                     return true;
                 }
 
-                auto ready = Index.Seek(rowId);
+                auto ready = Index->Seek(rowId);
                 if (ready == EReady::Page) {
                     return false;
                 } else if (ready == EReady::Gone) {
@@ -161,11 +91,11 @@ namespace NTable {
                     return true;
                 }
 
-                Y_ABORT_UNLESS(Index.GetRowId() <= rowId, "SeekIndex invariant failure");
-                if (!LoadPage(Index.GetPageId())) {
+                Y_ABORT_UNLESS(Index->GetRowId() <= rowId, "SeekIndex invariant failure");
+                if (!LoadPage(Index->GetPageId())) {
                     return false;
                 }
-                Y_ABORT_UNLESS(Page.BaseRow() == Index.GetRowId(), "Index and data are out of sync");
+                Y_ABORT_UNLESS(Page.BaseRow() == Index->GetRowId(), "Index and data are out of sync");
                 auto lastRowId = Page.BaseRow() + (Page->Count - 1);
                 if (lastRowId < rowId) {
                     // Row is out of range for this page
@@ -180,16 +110,16 @@ namespace NTable {
 
         bool SeekLastRow() noexcept
         {
-            auto hasLast = Index.SeekLast();
+            auto hasLast = Index->SeekLast();
             if (hasLast == EReady::Page) {
                 return false;
             }
             Y_ABORT_UNLESS(hasLast != EReady::Gone, "Unexpected failure to find the last index record");
 
-            if (!LoadPage(Index.GetPageId())) {
+            if (!LoadPage(Index->GetPageId())) {
                 return false;
             }
-            Y_ABORT_UNLESS(Page.BaseRow() == Index.GetRowId(), "Index and data are out of sync");
+            Y_ABORT_UNLESS(Page.BaseRow() == Index->GetRowId(), "Index and data are out of sync");
             auto lastRowId = Page.BaseRow() + (Page->Count - 1);
             LoadRow(lastRowId);
             return true;
@@ -199,7 +129,7 @@ namespace NTable {
         {
             Y_ABORT_UNLESS(pageId != Max<TPageId>(), "Unexpected seek to an invalid page id");
             if (PageId != pageId) {
-                if (auto* data = Env->TryGetPage(Part, pageId)) {
+                if (auto* data = Env->TryGetPage(Part, pageId, {})) {
                     Y_ABORT_UNLESS(Page.Set(data), "Unexpected failure to load data page");
                     PageId = pageId;
                 } else {
@@ -227,7 +157,7 @@ namespace NTable {
         IPages* Env;
         TRowId RowId = Max<TRowId>();
         TPageId PageId = Max<TPageId>();
-        TPartIndexIt Index;
+        THolder<IPartGroupIndexIter> Index;
         NPage::TDataPage Page;
         TSmallVec<TCell> Key;
     };

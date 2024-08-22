@@ -4,6 +4,7 @@
 #include <ydb/library/dynumber/dynumber.h>
 #include <ydb/library/uuid/uuid.h>
 
+#include <ydb/library/yql/parser/pg_wrapper/interface/type_desc.h>
 #include <ydb/library/yql/providers/common/codec/yql_codec_results.h>
 #include <ydb/library/yql/public/decimal/yql_decimal.h>
 
@@ -76,6 +77,11 @@ void WriteValueToYson(const TStringStream& stream, NCommon::TYsonResultWriter& w
                 return;
             }
 
+            if (type.GetData().GetScheme() == NYql::NProto::TypeIds::Yson) {
+                writer.OnRaw(value.GetBytes(), NYT::NYson::EYsonType::Node);
+                return;
+            }
+
             if (value.HasBool()) {
                 writer.OnBooleanScalar(value.GetBool());
             }
@@ -112,6 +118,24 @@ void WriteValueToYson(const TStringStream& stream, NCommon::TYsonResultWriter& w
                 writer.OnStringScalar(value.GetText());
             }
 
+            return;
+        }
+
+        case NKikimrMiniKQL::ETypeKind::Pg:
+        {
+            if (value.GetValueValueCase() == NKikimrMiniKQL::TValue::kNullFlagValue) {
+                writer.OnEntity();
+            } else if (value.HasBytes()) {
+                auto convert = NKikimr::NPg::PgNativeTextFromNativeBinary(
+                    value.GetBytes(), NKikimr::NPg::TypeDescFromPgTypeId(type.GetPg().Getoid())
+                );
+                YQL_ENSURE(!convert.Error, "Failed to convert pg value to text: " << *convert.Error);
+                writer.OnStringScalar(convert.Str);
+            } else if (value.HasText()) {
+                writer.OnStringScalar(value.GetText());
+            } else {
+                YQL_ENSURE(false, "malformed pg value");
+            }
             return;
         }
 
@@ -268,6 +292,14 @@ TExprNode::TPtr MakeAtomForDataType(EDataSlot slot, const NKikimrMiniKQL::TValue
         return ctx.NewAtom(pos, ToString(value.GetUint64()));
     } else if (slot == EDataSlot::Interval) {
         return ctx.NewAtom(pos, ToString(value.GetInt64()));
+    } else if (slot == EDataSlot::Date32) {
+        return ctx.NewAtom(pos, ToString(value.GetInt32()));
+    } else if (slot == EDataSlot::Datetime64) {
+        return ctx.NewAtom(pos, ToString(value.GetInt64()));
+    } else if (slot == EDataSlot::Timestamp64) {
+        return ctx.NewAtom(pos, ToString(value.GetInt64()));
+    } else if (slot == EDataSlot::Interval64) {
+        return ctx.NewAtom(pos, ToString(value.GetInt64()));
     } else {
        return nullptr;
     }
@@ -339,6 +371,7 @@ NKikimrMiniKQL::TResult* KikimrResultToProto(const NKikimrMiniKQL::TResult& resu
     auto* truncatedValue = packedValue->AddStruct();
 
     bool truncated = false;
+    TColumnOrder order(columnHints);
     if (result.GetType().GetKind() == NKikimrMiniKQL::ETypeKind::List) {
         const auto& itemType = result.GetType().GetList().GetItem();
 
@@ -354,11 +387,11 @@ NKikimrMiniKQL::TResult* KikimrResultToProto(const NKikimrMiniKQL::TResult& resu
             auto* newItem = dataType->MutableList()->MutableItem();
             newItem->SetKind(NKikimrMiniKQL::ETypeKind::Struct);
             auto* newStructType = newItem->MutableStruct();
-            for (auto& column : columnHints) {
-                auto* memberIndex = memberIndices.FindPtr(column);
+            for (auto& [column, gen_col] : order) {
+                auto* memberIndex = memberIndices.FindPtr(gen_col);
                 YQL_ENSURE(memberIndex);
 
-                *newStructType->AddMember() = structType.GetMember(*memberIndex);
+                (*newStructType->AddMember() = structType.GetMember(*memberIndex)).SetName(column);
             }
         } else {
             *dataType = result.GetType();
@@ -371,11 +404,10 @@ NKikimrMiniKQL::TResult* KikimrResultToProto(const NKikimrMiniKQL::TResult& resu
                 truncated = true;
                 break;
             }
-
             if (!memberIndices.empty()) {
                 auto* newStruct = dataValue->AddList();
-                for (auto& column : columnHints) {
-                    auto* memberIndex = memberIndices.FindPtr(column);
+                for (auto& [column, gen_column] : order) {
+                    auto* memberIndex = memberIndices.FindPtr(gen_column);
                     YQL_ENSURE(memberIndex);
 
                     *newStruct->AddStruct() = item.GetStruct(*memberIndex);
@@ -857,7 +889,6 @@ const TTypeAnnotationNode* ParseTypeFromYdbType(const Ydb::Type& type, TExprCont
             if (!type.pg_type().type_name().empty()) {
                 const auto& typeName = type.pg_type().type_name();
                 auto* typeDesc = NKikimr::NPg::TypeDescFromPgTypeName(typeName);
-                NKikimr::NPg::PgTypeIdFromTypeDesc(typeDesc);
                 return ctx.MakeType<TPgExprType>(NKikimr::NPg::PgTypeIdFromTypeDesc(typeDesc));
             }
             return ctx.MakeType<TPgExprType>(type.pg_type().Getoid());

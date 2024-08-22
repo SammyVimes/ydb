@@ -8,8 +8,12 @@ import ydb.public.api.protos.ydb_value_pb2 as ydb_value
 from ydb.library.yql.providers.generic.connector.api.common.data_source_pb2 import EDataSourceKind
 from ydb.public.api.protos.ydb_value_pb2 import Type, OptionalType
 
-import ydb.library.yql.providers.generic.connector.tests.utils.clickhouse as clickhouse
-import ydb.library.yql.providers.generic.connector.tests.utils.postgresql as postgresql
+import ydb.library.yql.providers.generic.connector.tests.utils.types.clickhouse as clickhouse
+import ydb.library.yql.providers.generic.connector.tests.utils.types.mysql as mysql
+import ydb.library.yql.providers.generic.connector.tests.utils.types.oracle as oracle
+import ydb.library.yql.providers.generic.connector.tests.utils.types.ms_sql_server as ms_sql_server
+import ydb.library.yql.providers.generic.connector.tests.utils.types.postgresql as postgresql
+import ydb.library.yql.providers.generic.connector.tests.utils.types.ydb as Ydb
 
 YsonList: TypeAlias = yson.yson_types.YsonList
 
@@ -17,15 +21,27 @@ YsonList: TypeAlias = yson.yson_types.YsonList
 @dataclass
 class DataSourceType:
     ch: clickhouse.Type = None
+    ms: ms_sql_server.Type = None
+    my: mysql.Type = None
+    ora: oracle.Type = None
     pg: postgresql.Type = None
+    ydb: Ydb.Type = None
 
     def pick(self, kind: EDataSourceKind.ValueType) -> str:
         target = None
         match kind:
             case EDataSourceKind.CLICKHOUSE:
                 target = self.ch
+            case EDataSourceKind.MS_SQL_SERVER:
+                target = self.ms
+            case EDataSourceKind.MYSQL:
+                target = self.my
+            case EDataSourceKind.ORACLE:
+                target = self.ora
             case EDataSourceKind.POSTGRESQL:
                 target = self.pg
+            case EDataSourceKind.YDB:
+                target = self.ydb
             case _:
                 raise Exception(f'invalid data source: {kind}')
 
@@ -79,6 +95,8 @@ class Column:
                 return ydb_value.Type.BOOL
             case "Utf8":
                 return ydb_value.Type.UTF8
+            case "Json":
+                return ydb_value.Type.JSON
             case "String":
                 return ydb_value.Type.STRING
             case "Int8":
@@ -138,6 +156,10 @@ class Column:
             case ydb_value.Type.BOOL:
                 return value
             case ydb_value.Type.UTF8:
+                return value
+            case ydb_value.Type.JSON:
+                return value
+            case ydb_value.Type.JSON_DOCUMENT:
                 return value
             case ydb_value.Type.STRING:
                 return value
@@ -285,18 +307,23 @@ class SelectWhat:
         return "_".join((str(item) for item in self.items))
 
 
+@dataclass
 class SelectWhere:
     """
-    Represents filter for query
+    Represents filter for query. Can handle dynamic arguments with keywords.
+    Put this into expression if you want:
+
+    * {cluster_name}
+    * {table_name}
     """
 
-    filter_expression: str  # filter expr without WHERE statement
+    expression_: str  # filter expression or a template for it
 
-    def __init__(self, expr):
-        self.filter_expression = expr
-
-    def __str__(self) -> str:
-        return self.filter_expression
+    def render(self, cluster_name: str = None, table_name: str = None) -> str:
+        """
+        Renders expression template into final form.
+        """
+        return self.expression_.format(cluster_name=cluster_name, table_name=table_name)
 
 
 @dataclass

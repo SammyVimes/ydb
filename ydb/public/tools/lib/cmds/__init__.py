@@ -8,7 +8,9 @@ import random
 import string
 import typing  # noqa: F401
 import sys
+from six.moves.urllib.parse import urlparse
 
+from ydb.library.yql.providers.common.proto.gateways_config_pb2 import TGenericConnectorConfig
 from ydb.tests.library.common import yatest_common
 from ydb.tests.library.harness.kikimr_cluster import kikimr_cluster_factory
 from ydb.tests.library.harness.kikimr_config import KikimrConfigGenerator
@@ -31,6 +33,7 @@ class EmptyArguments(object):
         self.auth_config_path = None
         self.debug_logging = []
         self.fixed_ports = False
+        self.base_port_offset = 0
         self.public_http_config_path = None
         self.dont_use_log_files = False
         self.enabled_feature_flags = []
@@ -255,6 +258,34 @@ def enable_tls():
     return os.getenv('YDB_GRPC_ENABLE_TLS') == 'true'
 
 
+def generic_connector_config():
+    endpoint = os.getenv("FQ_CONNECTOR_ENDPOINT")
+    if not endpoint:
+        return None
+
+    parsed = urlparse(endpoint)
+    if not parsed.hostname:
+        raise ValueError("Invalid host '{}' in FQ_CONNECTOR_ENDPOINT".format(parsed.hostname))
+
+    if not (1024 <= parsed.port <= 65535):
+        raise ValueError("Invalid port '{}' in FQ_CONNECTOR_ENDPOINT".format(parsed.port))
+
+    valid_schemes = ['grpc', 'grpcs']
+    if parsed.scheme not in valid_schemes:
+        raise ValueError("Invalid schema '{}' in FQ_CONNECTOR_ENDPOINT (possible: {})".format(parsed.scheme, valid_schemes))
+
+    cfg = TGenericConnectorConfig()
+    cfg.Endpoint.host = parsed.hostname
+    cfg.Endpoint.port = parsed.port
+
+    if parsed.scheme == 'grpc':
+        cfg.UseSsl = False
+    elif parsed.scheme == 'grpcs':
+        cfg.UseSsl = True
+
+    return cfg
+
+
 def grpc_tls_data_path(arguments):
     default_store = arguments.ydb_working_dir if arguments.ydb_working_dir else None
     return os.getenv('YDB_GRPC_TLS_DATA_PATH', default_store)
@@ -300,7 +331,8 @@ def deploy(arguments):
 
     port_allocator = None
     if getattr(arguments, 'fixed_ports', False):
-        port_allocator = KikimrFixedPortAllocator([KikimrFixedNodePortAllocator()])
+        base_port_offset = getattr(arguments, 'base_port_offset', 0)
+        port_allocator = KikimrFixedPortAllocator(base_port_offset, [KikimrFixedNodePortAllocator(base_port_offset=base_port_offset)])
 
     optionals = {}
     if enable_tls():
@@ -313,6 +345,9 @@ def deploy(arguments):
         flags = os.environ['YDB_FEATURE_FLAGS'].split(",")
         for flag_name in flags:
             enable_feature_flags.append(flag_name)
+
+    if 'YDB_EXPERIMENTAL_PG' in os.environ:
+        optionals['pg_compatible_expirement'] = True
 
     configuration = KikimrConfigGenerator(
         parse_erasure(arguments),
@@ -335,6 +370,7 @@ def deploy(arguments):
         default_users=default_users(),
         extra_feature_flags=enable_feature_flags,
         extra_grpc_services=arguments.enabled_grpc_services,
+        generic_connector_config=generic_connector_config(),
         **optionals
     )
 
@@ -352,7 +388,6 @@ def deploy(arguments):
             'mon_port': node.mon_port,
             'command': node.command,
             'cwd': node.cwd,
-            'stdin_file': node.stdin_file_name,
             'stderr_file': node.stderr_file_name,
             'stdout_file': node.stdout_file_name,
             'pdisks': [
@@ -435,7 +470,6 @@ def start(arguments):
         files = {}
         if node_meta['stderr_file'] is not None and os.path.exists(node_meta['stderr_file']):
             files = {
-                'stdin_file': node_meta['stdin_file'],
                 'stderr_file': node_meta['stderr_file'],
                 'stdout_file': node_meta['stdout_file'],
             }
@@ -477,6 +511,7 @@ def produce_arguments(args):
     parser.add_argument("--debug-logging", nargs='*')
     parser.add_argument("--enable-pq", action='store_true', default=False)
     parser.add_argument("--fixed-ports", action='store_true', default=False)
+    parser.add_argument("--base-port-offset", action="store", type=int, default=0)
     parser.add_argument("--pq-client-service-type", action='append', default=[])
     parser.add_argument("--enable-datastreams", action='store_true', default=False)
     parser.add_argument("--enable-pqcd", action='store_true', default=False)
@@ -485,6 +520,7 @@ def produce_arguments(args):
     arguments.suppress_version_check = parsed.suppress_version_check
     arguments.ydb_working_dir = parsed.ydb_working_dir
     arguments.fixed_ports = parsed.fixed_ports
+    arguments.base_port_offset = parsed.base_port_offset
     if parsed.use_packages is not None:
         arguments.use_packages = parsed.use_packages
     if parsed.debug_logging:

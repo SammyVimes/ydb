@@ -38,46 +38,6 @@ def extract_macro_calls2(unit, macro_value_name):
     return calls
 
 
-def on_run_jbuild_program(unit, *args):
-    args = list(args)
-    """
-    Custom code generation
-    @link: https://wiki.yandex-team.ru/yatool/java/#kodogeneracijarunjavaprogram
-    """
-
-    flat, kv = common.sort_by_keywords(
-        {
-            'IN': -1,
-            'IN_DIR': -1,
-            'OUT': -1,
-            'OUT_DIR': -1,
-            'CWD': 1,
-            'CLASSPATH': -1,
-            'CP_USE_COMMAND_FILE': 1,
-            'ADD_SRCS_TO_CLASSPATH': 0,
-        },
-        args,
-    )
-    depends = kv.get('CLASSPATH', []) + kv.get('JAR', [])
-    fake_out = None
-    if depends:
-        # XXX: hack to force ymake to build dependencies
-        fake_out = "fake.out.{}".format(hash(tuple(args)))
-        unit.on_run_java(['TOOL'] + depends + ["OUT", fake_out])
-
-    if not kv.get('CP_USE_COMMAND_FILE'):
-        args += ['CP_USE_COMMAND_FILE', unit.get(['JAVA_PROGRAM_CP_USE_COMMAND_FILE']) or 'yes']
-
-    if fake_out is not None:
-        args += ['FAKE_OUT', fake_out]
-
-    prev = unit.get(['RUN_JAVA_PROGRAM_VALUE']) or ''
-    new_val = (
-        prev + ' ' + six.ensure_str(base64.b64encode(six.ensure_binary(json.dumps(list(args)), encoding='utf-8')))
-    ).strip()
-    unit.set(['RUN_JAVA_PROGRAM_VALUE', new_val])
-
-
 def ongenerate_script(unit, *args):
     """
     heretic@ promised to make tutorial here
@@ -114,7 +74,7 @@ def onjava_module(unit, *args):
         'JAVAC_FLAGS': extract_macro_calls(unit, 'JAVAC_FLAGS_VALUE', args_delim),
         'ANNOTATION_PROCESSOR': extract_macro_calls(unit, 'ANNOTATION_PROCESSOR_VALUE', args_delim),
         'EXTERNAL_JAR': extract_macro_calls(unit, 'EXTERNAL_JAR_VALUE', args_delim),
-        'RUN_JAVA_PROGRAM': extract_macro_calls2(unit, 'RUN_JAVA_PROGRAM_VALUE'),
+        'RUN_JAVA_PROGRAM': [],
         'RUN_JAVA_PROGRAM_MANAGED': '${RUN_JAVA_PROGRAM_MANAGED}',
         'MAVEN_GROUP_ID': extract_macro_calls(unit, 'MAVEN_GROUP_ID_VALUE', args_delim),
         'JAR_INCLUDE_FILTER': extract_macro_calls(unit, 'JAR_INCLUDE_FILTER_VALUE', args_delim),
@@ -142,10 +102,9 @@ def onjava_module(unit, *args):
     if unit.get('ENABLE_PREVIEW_VALUE') == 'yes' and (unit.get('JDK_VERSION') or unit.get('JDK_REAL_VERSION')) in (
         '15',
         '17',
-        '18',
-        '19',
         '20',
         '21',
+        '22',
     ):
         data['ENABLE_PREVIEW'] = extract_macro_calls(unit, 'ENABLE_PREVIEW_VALUE', args_delim)
 
@@ -415,10 +374,9 @@ def on_jdk_version_macro_check(unit, *args):
         '11',
         '15',
         '17',
-        '18',
-        '19',
         '20',
         '21',
+        '22',
     )
     if jdk_version not in available_versions:
         ymake.report_configure_error(
@@ -483,4 +441,3 @@ def on_setup_project_coords_if_needed(unit, *args):
     else:
         value = 'project(\\":{}\\")'.format(project_dir.replace('/', ':'))
     unit.set(['EXPORT_GRADLE_CLASSPATH', value])
-    unit.set(['EXPORT_GRADLE_CLASSPATH_GLOBAL', value])

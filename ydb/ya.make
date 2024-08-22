@@ -1,12 +1,11 @@
 RECURSE(
     apps
+    docs
     core
     library
+    mvp
     public
     services
     tests
     tools
-    docs
-    docs/ru/core
-    docs/en/core
 )

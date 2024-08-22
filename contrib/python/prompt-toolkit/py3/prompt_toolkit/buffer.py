@@ -2,6 +2,7 @@
 Data structures for the Buffer.
 It holds the text, cursor position, history, etc...
 """
+
 from __future__ import annotations
 
 import asyncio
@@ -15,7 +16,7 @@ import tempfile
 from collections import deque
 from enum import Enum
 from functools import wraps
-from typing import Any, Awaitable, Callable, Coroutine, Deque, Iterable, TypeVar, cast
+from typing import Any, Callable, Coroutine, Iterable, TypeVar, cast
 
 from .application.current import get_app
 from .application.run_in_terminal import run_in_terminal
@@ -56,6 +57,7 @@ class EditReadOnlyBuffer(Exception):
 
 class ValidationState(Enum):
     "The validation state of a buffer. This is set after the validation."
+
     VALID = "VALID"
     INVALID = "INVALID"
     UNKNOWN = "UNKNOWN"
@@ -84,12 +86,7 @@ class CompletionState:
         self.complete_index = complete_index  # Position in the `_completions` array.
 
     def __repr__(self) -> str:
-        return "{}({!r}, <{!r}> completions, index={!r})".format(
-            self.__class__.__name__,
-            self.original_document,
-            len(self.completions),
-            self.complete_index,
-        )
+        return f"{self.__class__.__name__}({self.original_document!r}, <{len(self.completions)!r}> completions, index={self.complete_index!r})"
 
     def go_to_index(self, index: int | None) -> None:
         """
@@ -148,12 +145,7 @@ class YankNthArgState:
         self.n = n
 
     def __repr__(self) -> str:
-        return "{}(history_position={!r}, n={!r}, previous_inserted_word={!r})".format(
-            self.__class__.__name__,
-            self.history_position,
-            self.n,
-            self.previous_inserted_word,
-        )
+        return f"{self.__class__.__name__}(history_position={self.history_position!r}, n={self.n!r}, previous_inserted_word={self.previous_inserted_word!r})"
 
 
 BufferEventHandler = Callable[["Buffer"], None]
@@ -187,6 +179,9 @@ class Buffer:
         In case of a `PromptSession` for instance, we want to keep the text,
         because we will exit the application, and only reset it during the next
         run.
+    :param max_number_of_completions: Never display more than this number of
+        completions, even when the completer can produce more (limited by
+        default to 10k for performance).
 
     Events:
 
@@ -233,12 +228,13 @@ class Buffer:
         accept_handler: BufferAcceptHandler | None = None,
         read_only: FilterOrBool = False,
         multiline: FilterOrBool = True,
+        max_number_of_completions: int = 10000,
         on_text_changed: BufferEventHandler | None = None,
         on_text_insert: BufferEventHandler | None = None,
         on_cursor_position_changed: BufferEventHandler | None = None,
         on_completions_changed: BufferEventHandler | None = None,
         on_suggestion_set: BufferEventHandler | None = None,
-    ):
+    ) -> None:
         # Accept both filters and booleans as input.
         enable_history_search = to_filter(enable_history_search)
         complete_while_typing = to_filter(complete_while_typing)
@@ -260,6 +256,7 @@ class Buffer:
         self.enable_history_search = enable_history_search
         self.read_only = read_only
         self.multiline = multiline
+        self.max_number_of_completions = max_number_of_completions
 
         # Text width. (For wrapping, used by the Vi 'gq' operator.)
         self.text_width = 0
@@ -366,7 +363,7 @@ class Buffer:
         #: Ctrl-C should reset this, and copy the whole history back in here.
         #: Enter should process the current command and append to the real
         #: history.
-        self._working_lines: Deque[str] = deque([document.text])
+        self._working_lines: deque[str] = deque([document.text])
         self.__working_index = 0
 
     def load_history_if_not_yet_loaded(self) -> None:
@@ -1747,6 +1744,13 @@ class Buffer:
                         # If the input text changes, abort.
                         if not proceed():
                             break
+
+                        # Always stop at 10k completions.
+                        if (
+                            len(complete_state.completions)
+                            >= self.max_number_of_completions
+                        ):
+                            break
             finally:
                 refresh_task.cancel()
 
@@ -1890,7 +1894,7 @@ class Buffer:
                 self.reset()
 
 
-_T = TypeVar("_T", bound=Callable[..., Awaitable[None]])
+_T = TypeVar("_T", bound=Callable[..., Coroutine[Any, Any, None]])
 
 
 def _only_one_at_a_time(coroutine: _T) -> _T:
@@ -1936,18 +1940,18 @@ def indent(buffer: Buffer, from_row: int, to_row: int, count: int = 1) -> None:
     Indent text of a :class:`.Buffer` object.
     """
     current_row = buffer.document.cursor_position_row
+    current_col = buffer.document.cursor_position_col
     line_range = range(from_row, to_row)
 
     # Apply transformation.
-    new_text = buffer.transform_lines(line_range, lambda l: "    " * count + l)
+    indent_content = "    " * count
+    new_text = buffer.transform_lines(line_range, lambda l: indent_content + l)
     buffer.document = Document(
         new_text, Document(new_text).translate_row_col_to_index(current_row, 0)
     )
 
-    # Go to the start of the line.
-    buffer.cursor_position += buffer.document.get_start_of_line_position(
-        after_whitespace=True
-    )
+    # Place cursor in the same position in text after indenting
+    buffer.cursor_position += current_col + len(indent_content)
 
 
 def unindent(buffer: Buffer, from_row: int, to_row: int, count: int = 1) -> None:
@@ -1955,10 +1959,13 @@ def unindent(buffer: Buffer, from_row: int, to_row: int, count: int = 1) -> None
     Unindent text of a :class:`.Buffer` object.
     """
     current_row = buffer.document.cursor_position_row
+    current_col = buffer.document.cursor_position_col
     line_range = range(from_row, to_row)
 
+    indent_content = "    " * count
+
     def transform(text: str) -> str:
-        remove = "    " * count
+        remove = indent_content
         if text.startswith(remove):
             return text[len(remove) :]
         else:
@@ -1970,10 +1977,8 @@ def unindent(buffer: Buffer, from_row: int, to_row: int, count: int = 1) -> None
         new_text, Document(new_text).translate_row_col_to_index(current_row, 0)
     )
 
-    # Go to the start of the line.
-    buffer.cursor_position += buffer.document.get_start_of_line_position(
-        after_whitespace=True
-    )
+    # Place cursor in the same position in text after dedent
+    buffer.cursor_position += current_col - len(indent_content)
 
 
 def reshape_text(buffer: Buffer, from_row: int, to_row: int) -> None:

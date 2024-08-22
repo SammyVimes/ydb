@@ -97,6 +97,17 @@ THolder<TEvSchemeShard::TEvModifySchemeTransaction> AlterMainTablePropose(
 
             col->SetType(NScheme::TypeName(typeInfo, typeMod));
             col->SetName(colInfo.ColumnName);
+            col->MutableDefaultFromLiteral()->CopyFrom(colInfo.DefaultFromLiteral);
+            col->SetIsBuildInProgress(true);
+
+            if (!colInfo.FamilyName.empty()) {
+                col->SetFamilyName(colInfo.FamilyName);
+            }
+
+            if (colInfo.NotNull) {
+                col->SetNotNull(colInfo.NotNull);
+            }
+
         }
 
     } else {
@@ -225,7 +236,7 @@ public:
             } else if (!buildInfo->LockTxDone) {
                 Send(Self->SelfId(), MakeHolder<TEvSchemeShard::TEvNotifyTxCompletion>(ui64(buildInfo->LockTxId)));
             } else {
-                ChangeState(BuildId, TIndexBuildInfo::EState::GatheringStatistics);
+                ChangeState(BuildId, TIndexBuildInfo::EState::Initiating);
                 Progress(BuildId);
             }
 
@@ -242,6 +253,13 @@ public:
             } else if (!buildInfo->InitiateTxDone) {
                 Send(Self->SelfId(), MakeHolder<TEvSchemeShard::TEvNotifyTxCompletion>(ui64(buildInfo->InitiateTxId)));
             } else {
+                // TODO add vector index filling
+                if (buildInfo->IndexType == NKikimrSchemeOp::EIndexType::EIndexTypeGlobalVectorKmeansTree) {
+                    ChangeState(BuildId, TIndexBuildInfo::EState::Applying);
+                    Progress(BuildId);
+                    break;
+                }
+
                 ChangeState(BuildId, TIndexBuildInfo::EState::Filling);
                 Progress(BuildId);
             }
@@ -303,7 +321,7 @@ public:
             }
 
             if (buildInfo->ImplTablePath.Empty() && buildInfo->IsBuildIndex()) {
-                TPath implTable = TPath::Init(buildInfo->TablePathId, Self).Dive(buildInfo->IndexName).Dive("indexImplTable");
+                TPath implTable = TPath::Init(buildInfo->TablePathId, Self).Dive(buildInfo->IndexName).Dive(NTableIndex::ImplTable);
                 buildInfo->ImplTablePath = implTable.PathString();
 
                 TTableInfo::TPtr implTableInfo = Self->Tables.at(implTable.Base()->PathId);
@@ -1047,7 +1065,7 @@ public:
             }
 
             ReplyOnCreation(buildInfo, statusCode);
-            break;            
+            break;
         }
 
         case TIndexBuildInfo::EState::Locking:
@@ -1123,7 +1141,7 @@ public:
             } else {
                 buildInfo->Issue += TStringBuilder()
                     << "At applying state got unsuccess propose result"
-                    << ", status: " << NKikimrScheme::EStatus_Name(buildInfo->InitiateTxStatus)
+                    << ", status: " << NKikimrScheme::EStatus_Name(record.GetStatus())
                     << ", reason: " << record.GetReason();
                 Self->PersistBuildIndexIssue(db, buildInfo);
                 ChangeState(buildInfo->Id, TIndexBuildInfo::EState::Rejection_Unlocking);
@@ -1146,7 +1164,7 @@ public:
             } else {
                 buildInfo->Issue += TStringBuilder()
                     << "At unlocking state got unsuccess propose result"
-                    << ", status: " << NKikimrScheme::EStatus_Name(buildInfo->InitiateTxStatus)
+                    << ", status: " << NKikimrScheme::EStatus_Name(record.GetStatus())
                     << ", reason: " << record.GetReason();
                 Self->PersistBuildIndexIssue(db, buildInfo);
                 ChangeState(buildInfo->Id, TIndexBuildInfo::EState::Rejection_Unlocking);
@@ -1173,7 +1191,7 @@ public:
             } else {
                 buildInfo->Issue += TStringBuilder()
                     << "At cancellation applying state got unsuccess propose result"
-                    << ", status: " << NKikimrScheme::EStatus_Name(buildInfo->InitiateTxStatus)
+                    << ", status: " << NKikimrScheme::EStatus_Name(record.GetStatus())
                     << ", reason: " << record.GetReason();
                 Self->PersistBuildIndexIssue(db, buildInfo);
                 ChangeState(buildInfo->Id, TIndexBuildInfo::EState::Cancellation_Unlocking);
@@ -1196,7 +1214,7 @@ public:
             } else {
                 buildInfo->Issue += TStringBuilder()
                     << "At cancellation unlocking state got unsuccess propose result"
-                    << ", status: " << NKikimrScheme::EStatus_Name(buildInfo->InitiateTxStatus)
+                    << ", status: " << NKikimrScheme::EStatus_Name(record.GetStatus())
                     << ", reason: " << record.GetReason();
                 Self->PersistBuildIndexIssue(db, buildInfo);
                 ChangeState(buildInfo->Id, TIndexBuildInfo::EState::Cancelled);
@@ -1223,7 +1241,7 @@ public:
             } else {
                 buildInfo->Issue += TStringBuilder()
                     << "At rejection_applying state got unsuccess propose result"
-                    << ", status: " << NKikimrScheme::EStatus_Name(buildInfo->InitiateTxStatus)
+                    << ", status: " << NKikimrScheme::EStatus_Name(record.GetStatus())
                     << ", reason: " << record.GetReason();
                 Self->PersistBuildIndexIssue(db, buildInfo);
                 ChangeState(buildInfo->Id, TIndexBuildInfo::EState::Rejection_Unlocking);
@@ -1246,7 +1264,7 @@ public:
             } else {
                 buildInfo->Issue += TStringBuilder()
                     << "At rejection_unlocking state got unsuccess propose result"
-                    << ", status: " << NKikimrScheme::EStatus_Name(buildInfo->InitiateTxStatus)
+                    << ", status: " << NKikimrScheme::EStatus_Name(record.GetStatus())
                     << ", reason: " << record.GetReason();
                 Self->PersistBuildIndexIssue(db, buildInfo);
                 ChangeState(buildInfo->Id, TIndexBuildInfo::EState::Rejected);
@@ -1286,7 +1304,7 @@ public:
                 buildInfo->AlterMainTableTxId = txId;
                 NIceDb::TNiceDb db(txc.DB);
                 Self->PersistBuildIndexAlterMainTableTxId(db, buildInfo);
-        
+
             }
             break;
 

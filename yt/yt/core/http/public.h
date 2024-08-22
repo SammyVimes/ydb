@@ -28,10 +28,11 @@ DECLARE_REFCOUNTED_CLASS(TCorsConfig)
 
 DECLARE_REFCOUNTED_CLASS(TConnectionPool)
 
+DECLARE_REFCOUNTED_CLASS(TSharedRefOutputStream)
+
 ////////////////////////////////////////////////////////////////////////////////
 
-extern const TString DefaultServer;
-extern const TString DefaultUserAgent;
+using TContentEncoding = TString;
 
 ////////////////////////////////////////////////////////////////////////////////
 

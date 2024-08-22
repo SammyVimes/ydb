@@ -8,6 +8,7 @@
 #include <ydb/library/yql/core/services/mounts/yql_mounts.h>
 
 #include <library/cpp/protobuf/util/pb_io.h>
+#include <ydb/core/protos/config.pb.h>
 
 namespace NKikimr {
 namespace NKqp {
@@ -20,7 +21,7 @@ namespace {
 
 [[maybe_unused]]
 NKqpProto::TKqpPhyTx BuildTxPlan(const TString& sql, TIntrusivePtr<IKqpGateway> gateway,
-    const TKikimrConfiguration::TPtr& config)
+    const TKikimrConfiguration::TPtr& config, NActors::TActorId* actorSystem)
 {
     auto cluster = TString(DefaultKikimrClusterName);
 
@@ -28,7 +29,7 @@ NKqpProto::TKqpPhyTx BuildTxPlan(const TString& sql, TIntrusivePtr<IKqpGateway> 
     IModuleResolver::TPtr moduleResolver;
     UNIT_ASSERT(GetYqlDefaultModuleResolver(moduleCtx, moduleResolver));
 
-    auto qp = CreateKqpHost(gateway, cluster, "/Root", config, moduleResolver, NYql::IHTTPGateway::Make());
+    auto qp = CreateKqpHost(gateway, cluster, "/Root", config, moduleResolver, NYql::IHTTPGateway::Make(), nullptr, nullptr, NKikimrConfig::TQueryServiceConfig(), Nothing(), nullptr, nullptr, false, false, nullptr, actorSystem, nullptr);
     auto result = qp->SyncPrepareDataQuery(sql, IKqpHost::TPrepareSettings());
     result.Issues().PrintTo(Cerr);
     UNIT_ASSERT(result.Success());
@@ -42,7 +43,8 @@ NKqpProto::TKqpPhyTx BuildTxPlan(const TString& sql, TIntrusivePtr<IKqpGateway> 
 TIntrusivePtr<IKqpGateway> MakeIcGateway(const TKikimrRunner& kikimr) {
     auto actorSystem = kikimr.GetTestServer().GetRuntime()->GetAnyNodeActorSystem();
     return CreateKikimrIcGateway(TString(DefaultKikimrClusterName), "/Root", TKqpGatewaySettings(),
-        actorSystem, kikimr.GetTestServer().GetRuntime()->GetNodeId(0), TAlignedPagePoolCounters());
+        actorSystem, kikimr.GetTestServer().GetRuntime()->GetNodeId(0),
+        TAlignedPagePoolCounters(), kikimr.GetTestServer().GetSettings().AppConfig->GetQueryServiceConfig());
 }
 
 [[maybe_unused]]
@@ -96,7 +98,7 @@ Y_UNIT_TEST_SUITE(KqpExecuter) {
 
             UPSERT INTO [Root/EightShard]
             SELECT * FROM $itemsSource;
-        )", gateway, ctx);
+        )", gateway, ctx, kikimr.GetTestServer().GetRuntime()->GetAnyNodeActorSystem());
 
         LogTxPlan(kikimr, tx);
 

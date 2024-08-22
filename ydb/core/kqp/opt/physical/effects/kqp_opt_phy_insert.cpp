@@ -9,14 +9,14 @@ using namespace NYql::NDq;
 using namespace NYql::NNodes;
 
 TMaybeNode<TDqCnUnionAll> MakeConditionalInsertRows(const TExprBase& input, const TKikimrTableDescription& table,
-    bool abortOnError, TPositionHandle pos, TExprContext& ctx)
+    const TMaybe<THashSet<TStringBuf>>& inputColumns, bool abortOnError, TPositionHandle pos, TExprContext& ctx)
 {
     auto condenseResult = CondenseInput(input, ctx);
     if (!condenseResult) {
         return {};
     }
 
-    auto helper = CreateInsertUniqBuildHelper(table, pos, ctx);
+    auto helper = CreateInsertUniqBuildHelper(table, inputColumns, pos, ctx);
     auto computeKeysStage = helper->CreateComputeKeysStage(condenseResult.GetRef(), pos, ctx);
 
     auto inputPrecompute = helper->CreateInputPrecompute(computeKeysStage, pos, ctx);
@@ -127,16 +127,32 @@ TExprBase KqpBuildInsertStages(TExprBase node, TExprContext& ctx, const TKqpOpti
     bool abortOnError = insert.OnConflict().Value() == "abort"sv;
     const auto& table = kqpCtx.Tables->ExistingTable(kqpCtx.Cluster, insert.Table().Path());
 
-    auto insertRows = MakeConditionalInsertRows(insert.Input(), table, abortOnError, insert.Pos(), ctx);
-    if (!insertRows) {
-        return node;
-    }
+    const bool isSink = NeedSinks(table, kqpCtx);
+    const bool needPrecompute = !(isSink && abortOnError);
 
-    return Build<TKqlUpsertRows>(ctx, insert.Pos())
-        .Table(insert.Table())
-        .Input(insertRows.Cast())
-        .Columns(insert.Columns())
-        .Done();
+    if (needPrecompute) {
+        const static TMaybe<THashSet<TStringBuf>> empty;
+        auto insertRows = MakeConditionalInsertRows(insert.Input(), table, empty, abortOnError, insert.Pos(), ctx);
+        if (!insertRows) {
+            return node;
+        }
+
+        return Build<TKqlUpsertRows>(ctx, insert.Pos())
+            .Table(insert.Table())
+            .Input(insertRows.Cast())
+            .Columns(insert.Columns())
+            .ReturningColumns(insert.ReturningColumns())
+            .Settings(insert.Settings())
+            .Done();
+    } else {
+        return Build<TKqlUpsertRows>(ctx, insert.Pos())
+            .Table(insert.Table())
+            .Input(insert.Input())
+            .Columns(insert.Columns())
+            .ReturningColumns(insert.ReturningColumns())
+            .Settings(insert.Settings())
+            .Done();
+    }
 }
 
 } // namespace NKikimr::NKqp::NOpt

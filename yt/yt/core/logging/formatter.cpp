@@ -1,15 +1,12 @@
 #include "formatter.h"
 
 #include "private.h"
-// #include "log.h"
 
 #include <yt/yt/build/build.h>
 
 #include <yt/yt/core/json/json_writer.h>
 
 #include <yt/yt/core/ytree/fluent.h>
-
-// #include <yt/yt/core/yson/writer.h>
 
 #include <util/stream/length.h>
 
@@ -21,7 +18,7 @@ using namespace NYson;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const TLogger Logger(SystemLoggingCategoryName);
+YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, SystemLoggingCategoryName);
 
 namespace {
 
@@ -29,7 +26,7 @@ TLogEvent GetStartLogEvent()
 {
     TLogEvent event;
     event.Instant = GetCpuInstant();
-    event.Category = Logger.GetCategory();
+    event.Category = Logger().GetCategory();
     event.Level = ELogLevel::Info;
     event.MessageRef = TSharedRef::FromString(Format("Logging started (Version: %v, BuildHost: %v, BuildTime: %v)",
         GetVersion(),
@@ -43,7 +40,7 @@ TLogEvent GetStartLogStructuredEvent()
 {
     TLogEvent event;
     event.Instant = GetCpuInstant();
-    event.Category = Logger.GetCategory();
+    event.Category = Logger().GetCategory();
     event.Level = ELogLevel::Info;
     event.MessageRef = BuildYsonStringFluently<NYson::EYsonType::MapFragment>()
         .Item("message").Value("Logging started")
@@ -60,7 +57,7 @@ TLogEvent GetSkippedLogEvent(i64 count, TStringBuf skippedBy)
 {
     TLogEvent event;
     event.Instant = GetCpuInstant();
-    event.Category = Logger.GetCategory();
+    event.Category = Logger().GetCategory();
     event.Level = ELogLevel::Info;
     event.MessageRef = TSharedRef::FromString(Format("Skipped log records in last second (Count: %v, SkippedBy: %v)",
         count,
@@ -73,7 +70,7 @@ TLogEvent GetSkippedLogStructuredEvent(i64 count, TStringBuf skippedBy)
 {
     TLogEvent event;
     event.Instant = GetCpuInstant();
-    event.Category = Logger.GetCategory();
+    event.Category = Logger().GetCategory();
     event.Level = ELogLevel::Info;
     event.MessageRef = BuildYsonStringFluently<NYson::EYsonType::MapFragment>()
         .Item("message").Value("Events skipped")
@@ -92,7 +89,7 @@ TLogEvent GetSkippedLogStructuredEvent(i64 count, TStringBuf skippedBy)
 TPlainTextLogFormatter::TPlainTextLogFormatter(
     bool enableSystemMessages,
     bool enableSourceLocation)
-    : EnableSystemMessages_(enableSystemMessages && Logger)
+    : TLogFormatterBase(enableSystemMessages, enableSourceLocation)
     , EventFormatter_(enableSourceLocation)
 { }
 
@@ -118,16 +115,35 @@ void TPlainTextLogFormatter::WriteLogReopenSeparator(IOutputStream* outputStream
 
 void TPlainTextLogFormatter::WriteLogStartEvent(IOutputStream* outputStream)
 {
-    if (EnableSystemMessages_) {
+    if (AreSystemMessagesEnabled()) {
         WriteFormatted(outputStream, GetStartLogEvent());
     }
 }
 
 void TPlainTextLogFormatter::WriteLogSkippedEvent(IOutputStream* outputStream, i64 count, TStringBuf skippedBy)
 {
-    if (EnableSystemMessages_) {
+    if (AreSystemMessagesEnabled()) {
         WriteFormatted(outputStream, GetSkippedLogEvent(count, skippedBy));
     }
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+TLogFormatterBase::TLogFormatterBase(
+    bool enableSystemMessages,
+    bool enableSourceLocation)
+    : EnableSystemMessages_(enableSystemMessages)
+    , EnableSourceLocation_(enableSourceLocation)
+{ }
+
+bool TLogFormatterBase::AreSystemMessagesEnabled() const
+{
+    return EnableSystemMessages_ && GetDefaultLogManager();
+}
+
+bool TLogFormatterBase::IsSourceLocationEnabled() const
+{
+    return EnableSourceLocation_;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -137,13 +153,12 @@ TStructuredLogFormatter::TStructuredLogFormatter(
     THashMap<TString, NYTree::INodePtr> commonFields,
     bool enableSystemMessages,
     bool enableSourceLocation,
-    bool enableInstant,
+    bool enableSystemFields,
     NJson::TJsonFormatConfigPtr jsonFormat)
-    : Format_(format)
+    : TLogFormatterBase(enableSystemMessages, enableSourceLocation)
+    , Format_(format)
     , CommonFields_(std::move(commonFields))
-    , EnableSystemMessages_(enableSystemMessages)
-    , EnableSourceLocation_(enableSourceLocation)
-    , EnableInstant_(enableInstant)
+    , EnableSystemFields_(enableSystemFields)
     , JsonFormat_(!jsonFormat && (Format_ == ELogFormat::Json)
         ? New<NJson::TJsonFormatConfig>()
         : std::move(jsonFormat))
@@ -184,11 +199,12 @@ i64 TStructuredLogFormatter::WriteFormatted(IOutputStream* stream, const TLogEve
             .DoIf(event.MessageKind == ELogMessageKind::Unstructured, [&] (auto fluent) {
                 fluent.Item("message").Value(event.MessageRef.ToStringBuf());
             })
-            .DoIf(EnableInstant_, [&] (auto fluent) {
-                fluent.Item("instant").Value(dateTimeBuffer.GetBuffer());
+            .DoIf(EnableSystemFields_, [&] (auto fluent) {
+                fluent
+                    .Item("instant").Value(dateTimeBuffer.GetBuffer())
+                    .Item("level").Value(FormatEnum(event.Level))
+                    .Item("category").Value(event.Category->Name);
             })
-            .Item("level").Value(FormatEnum(event.Level))
-            .Item("category").Value(event.Category->Name)
             .DoIf(event.Family == ELogFamily::PlainText, [&] (auto fluent) {
                 if (event.FiberId != TFiberId()) {
                     fluent.Item("fiber_id").Value(Format("%x", event.FiberId));
@@ -196,7 +212,7 @@ i64 TStructuredLogFormatter::WriteFormatted(IOutputStream* stream, const TLogEve
                 if (event.TraceId != TTraceId()) {
                     fluent.Item("trace_id").Value(event.TraceId);
                 }
-                if (EnableSourceLocation_ && event.SourceFile) {
+                if (IsSourceLocationEnabled() && event.SourceFile) {
                     auto sourceFile = event.SourceFile;
                     fluent.Item("source_file").Value(Format("%v:%v", sourceFile.RNextTok(LOCSLASH_C), event.SourceLine));
                 }
@@ -219,14 +235,14 @@ void TStructuredLogFormatter::WriteLogReopenSeparator(IOutputStream* /*outputStr
 
 void TStructuredLogFormatter::WriteLogStartEvent(IOutputStream* outputStream)
 {
-    if (EnableSystemMessages_) {
+    if (AreSystemMessagesEnabled()) {
         WriteFormatted(outputStream, GetStartLogStructuredEvent());
     }
 }
 
 void TStructuredLogFormatter::WriteLogSkippedEvent(IOutputStream* outputStream, i64 count, TStringBuf skippedBy)
 {
-    if (EnableSystemMessages_) {
+    if (AreSystemMessagesEnabled()) {
         WriteFormatted(outputStream, GetSkippedLogStructuredEvent(count, skippedBy));
     }
 }

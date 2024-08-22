@@ -34,9 +34,10 @@ namespace NKikimr::NPublicHttp {
         ReplySender(RequestContext, JsonSettings, resp, status);
     }
 
-    void TGrpcRequestContextWrapper::Reply(grpc::ByteBuffer* resp, ui32 status) {
+    void TGrpcRequestContextWrapper::Reply(grpc::ByteBuffer* resp, ui32 status, EStreamCtrl ctrl) {
         Y_UNUSED(resp);
         Y_UNUSED(status);
+        Y_UNUSED(ctrl);
         Y_ABORT_UNLESS(false, "TGrpcRequestContextWrapper::Reply");
     }
 
@@ -76,4 +77,9 @@ namespace NKikimr::NPublicHttp {
     google::protobuf::Arena* TGrpcRequestContextWrapper::GetArena() {
         return &Arena;
     }
+
+    TString TGrpcRequestContextWrapper::GetPeer() const {
+       return RequestContext.GetPeer();
+    }
+
 } // namespace NKikimr::NPublicHttp

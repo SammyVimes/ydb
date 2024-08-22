@@ -29,14 +29,14 @@ class TSerializableHunkDescriptor
     , public NYTree::TYsonStruct
 {
 public:
-    TSerializableHunkDescriptor(const THunkDescriptor& descriptor);
-
     REGISTER_YSON_STRUCT(TSerializableHunkDescriptor);
 
     static void Register(TRegistrar registrar);
 };
 
 using TSerializableHunkDescriptorPtr = TIntrusivePtr<TSerializableHunkDescriptor>;
+
+TSerializableHunkDescriptorPtr CreateSerializableHunkDescriptor(const THunkDescriptor& descriptor);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -137,7 +137,7 @@ struct IInternalClient
         const TUnlockHunkStoreOptions& options = {}) = 0;
 
     //! Same as NApi::IClient::PullQueue, but without authentication.
-    //! This is used inside methods like NApi::IClient::PullConsumer, which perform their own authentication
+    //! This is used inside methods like NApi::IClient::PullQueueConsumer, which perform their own authentication
     //! and allow reading from a queue without having read permissions for the underlying dynamic table.
     virtual TFuture<NQueueClient::IQueueRowsetPtr> PullQueueUnauthenticated(
         const NYPath::TRichYPath& queuePath,

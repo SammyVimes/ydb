@@ -4,6 +4,10 @@ FORK_SUBTESTS()
 
 SPLIT_FACTOR(60)
 
+IF (SANITIZER_TYPE OR NOT OPENSOURCE)
+    REQUIREMENTS(ram:10)
+ENDIF()
+
 IF (SANITIZER_TYPE == "thread" OR WITH_VALGRIND)
     TIMEOUT(3600)
     SIZE(LARGE)
@@ -20,6 +24,7 @@ SRCS(
 PEERDIR(
     ydb/library/yql/public/udf
     ydb/library/yql/public/udf/service/exception_policy
+    ydb/library/yql/sql/pg_dummy
 )
 
 YQL_LAST_ABI_VERSION()
@@ -30,6 +35,5 @@ IF (MKQL_RUNTIME_VERSION)
     )
 ENDIF()
 
-REQUIREMENTS(ram:10)
 
 END()

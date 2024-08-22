@@ -23,45 +23,38 @@ void TCompactColumnEngineChanges::DoCompile(TFinalizationContext& context) {
 
     const TPortionMeta::EProduced producedClassResultCompaction = GetResultProducedClass();
     for (auto& portionInfo : AppendedPortions) {
-        portionInfo.GetPortionInfo().UpdateRecordsMeta(producedClassResultCompaction);
+        portionInfo.GetPortionConstructor().MutableMeta().UpdateRecordsMeta(producedClassResultCompaction);
     }
-}
-
-bool TCompactColumnEngineChanges::DoApplyChanges(TColumnEngineForLogs& self, TApplyChangesContext& context) {
-    return TBase::DoApplyChanges(self, context);
-}
-
-ui32 TCompactColumnEngineChanges::NumSplitInto(const ui32 srcRows) const {
-    Y_ABORT_UNLESS(srcRows > 1);
-    const ui64 totalBytes = TotalBlobsSize();
-    const ui32 numSplitInto = (totalBytes / Limits.GranuleSizeForOverloadPrevent) + 1;
-    return std::max<ui32>(2, numSplitInto);
-}
-
-void TCompactColumnEngineChanges::DoWriteIndex(NColumnShard::TColumnShard& self, TWriteIndexContext& context) {
-    TBase::DoWriteIndex(self, context);
 }
 
 void TCompactColumnEngineChanges::DoStart(NColumnShard::TColumnShard& self) {
     TBase::DoStart(self);
 
     Y_ABORT_UNLESS(SwitchedPortions.size());
+    THashMap<TString, THashSet<TBlobRange>> blobRanges;
+    auto& index = self.GetIndexAs<TColumnEngineForLogs>().GetVersionedIndex();
     for (const auto& p : SwitchedPortions) {
         Y_ABORT_UNLESS(!p.Empty());
-        auto action = BlobsAction.GetReading(p);
-        for (const auto& rec : p.Records) {
-            action->AddRange(rec.BlobRange);
+        p.FillBlobRangesByStorage(blobRanges, index);
+    }
+
+    for (const auto& p : blobRanges) {
+        auto action = BlobsAction.GetReading(p.first);
+        for (auto&& b: p.second) {
+            action->AddRange(b);
         }
     }
 
-    self.BackgroundController.StartCompaction(NKikimr::NOlap::TPlanCompactionInfo(GranuleMeta->GetPathId()), *this);
+    self.BackgroundController.StartCompaction(NKikimr::NOlap::TPlanCompactionInfo(GranuleMeta->GetPathId()));
     NeedGranuleStatusProvide = true;
     GranuleMeta->OnCompactionStarted();
 }
 
-void TCompactColumnEngineChanges::DoWriteIndexComplete(NColumnShard::TColumnShard& self, TWriteIndexCompleteContext& context) {
-    TBase::DoWriteIndexComplete(self, context);
-    self.IncCounter(NColumnShard::COUNTER_COMPACTION_TIME, context.Duration.MilliSeconds());
+void TCompactColumnEngineChanges::DoWriteIndexOnComplete(NColumnShard::TColumnShard* self, TWriteIndexCompleteContext& context) {
+    TBase::DoWriteIndexOnComplete(self, context);
+    if (self) {
+        self->Counters.GetTabletCounters()->IncCounter(NColumnShard::COUNTER_COMPACTION_TIME, context.Duration.MilliSeconds());
+    }
 }
 
 void TCompactColumnEngineChanges::DoOnFinish(NColumnShard::TColumnShard& self, TChangesFinishContext& context) {
@@ -75,18 +68,16 @@ void TCompactColumnEngineChanges::DoOnFinish(NColumnShard::TColumnShard& self, T
     NeedGranuleStatusProvide = false;
 }
 
-TCompactColumnEngineChanges::TCompactColumnEngineChanges(const TCompactionLimits& limits, std::shared_ptr<TGranuleMeta> granule, const std::vector<std::shared_ptr<TPortionInfo>>& portions, const TSaverContext& saverContext)
-    : TBase(limits.GetSplitSettings(), saverContext, StaticTypeName())
-    , Limits(limits)
-    , GranuleMeta(granule)
-{
+TCompactColumnEngineChanges::TCompactColumnEngineChanges(std::shared_ptr<TGranuleMeta> granule, const std::vector<std::shared_ptr<TPortionInfo>>& portions, const TSaverContext& saverContext)
+    : TBase(saverContext, NBlobOperations::EConsumer::GENERAL_COMPACTION)
+    , GranuleMeta(granule) {
     Y_ABORT_UNLESS(GranuleMeta);
 
     SwitchedPortions.reserve(portions.size());
     for (const auto& portionInfo : portions) {
         Y_ABORT_UNLESS(!portionInfo->HasRemoveSnapshot());
         SwitchedPortions.emplace_back(*portionInfo);
-        AFL_VERIFY(PortionsToRemove.emplace(portionInfo->GetAddress(), *portionInfo).second);
+        AddPortionToRemove(*portionInfo);
         Y_ABORT_UNLESS(portionInfo->GetPathId() == GranuleMeta->GetPathId());
     }
     Y_ABORT_UNLESS(SwitchedPortions.size());
@@ -94,14 +85,6 @@ TCompactColumnEngineChanges::TCompactColumnEngineChanges(const TCompactionLimits
 
 TCompactColumnEngineChanges::~TCompactColumnEngineChanges() {
     Y_DEBUG_ABORT_UNLESS(!NActors::TlsActivationContext || !NeedGranuleStatusProvide);
-}
-
-THashSet<TPortionAddress> TCompactColumnEngineChanges::GetTouchedPortions() const {
-    THashSet<TPortionAddress> result = TBase::GetTouchedPortions();
-    for (auto&& i : SwitchedPortions) {
-        result.emplace(i.GetAddress());
-    }
-    return result;
 }
 
 }

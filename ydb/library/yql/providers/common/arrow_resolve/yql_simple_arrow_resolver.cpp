@@ -25,15 +25,15 @@ private:
         try {
             TScopedAlloc alloc(__LOCATION__);
             TTypeEnvironment env(alloc);
-            TProgramBuilder pgmBuilder(env, FunctionRegistry_);
+            TTypeBuilder typeBuilder(env);
             TNullOutput null;
             TVector<TType*> mkqlInputTypes;
             for (const auto& type : argTypes) {
-                auto mkqlType = NCommon::BuildType(*type, pgmBuilder, null);
+                auto mkqlType = NCommon::BuildType(*type, typeBuilder, null);
                 YQL_ENSURE(mkqlType, "Failed to convert type " << *type << " to MKQL type");
                 mkqlInputTypes.emplace_back(mkqlType);
             }
-            TType* mkqlOutputType = NCommon::BuildType(*returnType, pgmBuilder, null);
+            TType* mkqlOutputType = NCommon::BuildType(*returnType, typeBuilder, null);
             bool found = FindArrowFunction(name, mkqlInputTypes, mkqlOutputType, *FunctionRegistry_.GetBuiltins());
             return found ? EStatus::OK : EStatus::NOT_FOUND;
         } catch (const std::exception& e) {
@@ -46,10 +46,10 @@ private:
         try {
             TScopedAlloc alloc(__LOCATION__);
             TTypeEnvironment env(alloc);
-            TProgramBuilder pgmBuilder(env, FunctionRegistry_);
+            TTypeBuilder typeBuilder(env);
             TNullOutput null;
-            auto mkqlFromType = NCommon::BuildType(*from, pgmBuilder, null);
-            auto mkqlToType = NCommon::BuildType(*to, pgmBuilder, null);
+            auto mkqlFromType = NCommon::BuildType(*from, typeBuilder, null);
+            auto mkqlToType = NCommon::BuildType(*to, typeBuilder, null);
             return HasArrowCast(mkqlFromType, mkqlToType) ? EStatus::OK : EStatus::NOT_FOUND;
         } catch (const std::exception& e) {
             ctx.AddError(TIssue(pos, e.what()));
@@ -57,20 +57,41 @@ private:
         }
     }
 
-    EStatus AreTypesSupported(const TPosition& pos, const TVector<const TTypeAnnotationNode*>& types, TExprContext& ctx) const override {
+    EStatus AreTypesSupported(const TPosition& pos, const TVector<const TTypeAnnotationNode*>& types, TExprContext& ctx,
+        const TUnsupportedTypeCallback& onUnsupported = {}) const override
+    {
         try {
             TScopedAlloc alloc(__LOCATION__);
             TTypeEnvironment env(alloc);
-            TProgramBuilder pgmBuilder(env, FunctionRegistry_);
+            TTypeBuilder typeBuilder(env);
+
+	    bool allOk = true;
+            TArrowConvertFailedCallback cb;
+            if (onUnsupported) {
+                cb = [&](TType* failed) {
+                    if (failed->IsData()) {
+                        auto slot = static_cast<TDataType*>(failed)->GetDataSlot();
+                        YQL_ENSURE(slot);
+                        onUnsupported(*slot);
+                    } else {
+                        onUnsupported(NYql::NCommon::ConvertMiniKQLTypeKind(failed));
+                    }
+                };
+            }
+
             for (const auto& type : types) {
+                YQL_ENSURE(type);
                 TNullOutput null;
-                auto mkqlType = NCommon::BuildType(*type, pgmBuilder, null);
+                auto mkqlType = NCommon::BuildType(*type, typeBuilder, null);
                 std::shared_ptr<arrow::DataType> arrowType;
-                if (!ConvertArrowType(mkqlType, arrowType)) {
-                    return EStatus::NOT_FOUND;
+                if (!ConvertArrowType(mkqlType, arrowType, cb)) {
+                    allOk = false;
+                    if (!cb) {
+                        break;
+                    }
                 }
             }
-            return EStatus::OK;
+            return allOk ? EStatus::OK : EStatus::NOT_FOUND;
         } catch (const std::exception& e) {
             ctx.AddError(TIssue(pos, e.what()));
             return EStatus::ERROR;

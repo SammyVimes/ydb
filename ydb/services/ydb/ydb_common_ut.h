@@ -4,8 +4,11 @@
 #include <library/cpp/testing/unittest/registar.h>
 #include <ydb/core/testlib/test_client.h>
 #include <ydb/core/formats/arrow/arrow_helpers.h>
+#include <ydb/core/security/certificate_check/cert_auth_utils.h>
 #include <ydb/services/ydb/ydb_dummy.h>
 #include <ydb/public/sdk/cpp/client/ydb_value/value.h>
+
+#include <util/system/tempfile.h>
 
 #include "ydb_keys_ut.h"
 
@@ -30,7 +33,7 @@ struct TKikimrTestSettings {
     static TString GetServerCrt() { return NYdbSslTestData::ServerCrt; }
     static TString GetServerKey() { return NYdbSslTestData::ServerKey; }
 
-    static NKikimr::TDynamicNodeAuthorizationParams GetCertAuthParams() {return {}; }
+    static NKikimr::TCertificateAuthorizationParams GetCertAuthParams() {return {}; }
 };
 
 struct TKikimrTestWithAuth : TKikimrTestSettings {
@@ -39,6 +42,32 @@ struct TKikimrTestWithAuth : TKikimrTestSettings {
 
 struct TKikimrTestWithAuthAndSsl : TKikimrTestWithAuth {
     static constexpr bool SSL = true;
+};
+
+struct TKikimrTestWithServerCert : TKikimrTestWithAuthAndSsl {
+    static constexpr bool SSL = true;
+
+    static const TCertAndKey& GetCACertAndKey() {
+        static const TCertAndKey ca = GenerateCA(TProps::AsCA());
+        return ca;
+    }
+
+    static const TCertAndKey& GetServerCert() {
+        static const TCertAndKey server = GenerateSignedCert(GetCACertAndKey(), TProps::AsServer());
+        return server;
+    }
+
+    static TString GetCaCrt() {
+        return GetCACertAndKey().Certificate.c_str();
+    }
+
+    static TString GetServerCrt() {
+        return GetServerCert().Certificate.c_str();
+    }
+
+    static TString GetServerKey() {
+        return GetServerCert().PrivateKey.c_str();
+    }
 };
 
 struct TKikimrTestNoSystemViews : TKikimrTestSettings {
@@ -59,7 +88,10 @@ public:
     {
         ui16 port = PortManager.GetPort(2134);
         ui16 grpc = PortManager.GetPort(2135);
-        ServerSettings = new TServerSettings(port);
+
+        NKikimrProto::TAuthConfig authConfig = appConfig.GetAuthConfig();
+        authConfig.SetUseBuiltinDomain(true);
+        ServerSettings = new TServerSettings(port, authConfig);
         ServerSettings->SetGrpcPort(grpc);
         ServerSettings->SetLogBackend(logBackend);
         ServerSettings->SetDomainName("Root");
@@ -77,8 +109,7 @@ public:
             ServerSettings->AddStoragePoolType("hdd1");
             ServerSettings->AddStoragePoolType("hdd2");
         }
-        ServerSettings->AppConfig.MergeFrom(appConfig);
-        ServerSettings->AuthConfig = appConfig.GetAuthConfig();
+        ServerSettings->AppConfig->MergeFrom(appConfig);
         ServerSettings->FeatureFlags = appConfig.GetFeatureFlags();
         ServerSettings->SetKqpSettings(kqpSettings);
         ServerSettings->SetEnableDataColumnForIndexTable(true);
@@ -98,6 +129,9 @@ public:
             builder(*ServerSettings);;
         }
 
+        ServerCertificateFile.Write(TestSettings::GetServerCrt().data(), TestSettings::GetServerCrt().size());
+        ServerSettings->ServerCertFilePath = ServerCertificateFile.Name();
+
         Server_.Reset(new TServer(*ServerSettings));
         Tenants_.Reset(new Tests::TTenants(Server_));
 
@@ -116,7 +150,7 @@ public:
 
         NYdbGrpc::TServerOptions grpcOption;
         if (TestSettings::AUTH) {
-            grpcOption.SetUseAuth(true);
+            grpcOption.SetUseAuth(appConfig.GetDomainsConfig().GetSecurityConfig().GetEnforceUserTokenRequirement()); // In real life UseAuth is initialized with EnforceUserTokenRequirement. To avoid incorrect tests we must do the same.
         }
         grpcOption.SetPort(grpc);
         if (TestSettings::SSL) {
@@ -124,14 +158,14 @@ public:
             sslData.Cert = TestSettings::GetServerCrt();
             sslData.Key = TestSettings::GetServerKey();
             sslData.Root =TestSettings::GetCaCrt();
-            sslData.DoRequestClientCertificate = appConfig.GetFeatureFlags().GetEnableDynamicNodeAuthorization() && appConfig.GetClientCertificateAuthorization().HasDynamicNodeAuthorization();
+            sslData.DoRequestClientCertificate = appConfig.GetClientCertificateAuthorization().GetRequestClientCertificate();
 
             grpcOption.SetSslData(sslData);
         }
         Server_->EnableGRpc(grpcOption);
 
         TClient annoyingClient(*ServerSettings);
-        if (ServerSettings->AppConfig.GetDomainsConfig().GetSecurityConfig().GetEnforceUserTokenRequirement()) {
+        if (ServerSettings->AppConfig->GetDomainsConfig().GetSecurityConfig().GetEnforceUserTokenRequirement()) {
             annoyingClient.SetSecurityToken("root@builtin");
         }
         annoyingClient.InitRootScheme("Root");
@@ -166,6 +200,7 @@ public:
 private:
     TPortManager PortManager;
     ui16 GRpcPort_;
+    TTempFileHandle ServerCertificateFile;
 };
 
 struct TTestOlap {
@@ -321,5 +356,12 @@ using TKikimrWithGrpcAndRootSchema = TBasicKikimrWithGrpcAndRootSchema<TKikimrTe
 using TKikimrWithGrpcAndRootSchemaWithAuth = TBasicKikimrWithGrpcAndRootSchema<TKikimrTestWithAuth>;
 using TKikimrWithGrpcAndRootSchemaWithAuthAndSsl = TBasicKikimrWithGrpcAndRootSchema<TKikimrTestWithAuthAndSsl>;
 using TKikimrWithGrpcAndRootSchemaNoSystemViews = TBasicKikimrWithGrpcAndRootSchema<TKikimrTestNoSystemViews>;
+
+Ydb::StatusIds::StatusCode WaitForStatus(
+    std::shared_ptr<grpc::Channel> channel, const TString& opId,
+    TString* error = nullptr,
+    int retries = 10,
+    TDuration sleepDuration = NYdb::ITERATION_DURATION
+);
 
 }

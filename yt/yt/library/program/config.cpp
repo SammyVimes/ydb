@@ -1,25 +1,25 @@
 #include "config.h"
 
+#include <yt/yt/core/concurrency/fiber_scheduler_thread.h>
+
 namespace NYT {
 
 using namespace NYTree;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-void TRpcConfig::Register(TRegistrar registrar)
-{
-    registrar.Parameter("tracing", &TThis::Tracing)
-        .Default();
-}
-
-////////////////////////////////////////////////////////////////////////////////
-
-void THeapSizeLimit::Register(TRegistrar registrar)
+void THeapSizeLimitConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("container_memory_ratio", &TThis::ContainerMemoryRatio)
         .Optional();
-    registrar.Parameter("is_hard", &TThis::IsHard)
+    registrar.Parameter("hard", &TThis::Hard)
         .Default(false);
+    registrar.Parameter("dump_memory_profile_on_violation", &TThis::DumpMemoryProfileOnViolation)
+        .Default(false);
+    registrar.Parameter("dump_memory_profile_timeout", &TThis::DumpMemoryProfileTimeout)
+        .Default(TDuration::Minutes(10));
+    registrar.Parameter("dump_memory_profile_path", &TThis::DumpMemoryProfilePath)
+        .Default();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -63,6 +63,8 @@ void TStockpileConfig::Register(TRegistrar registrar)
 
 void THeapProfilerConfig::Register(TRegistrar registrar)
 {
+    registrar.Parameter("sampling_rate", &TThis::SamplingRate)
+        .Default();
     registrar.Parameter("snapshot_update_period", &TThis::SnapshotUpdatePeriod)
         .Default(TDuration::Seconds(5));
 }
@@ -81,6 +83,8 @@ void TSingletonsConfig::Register(TRegistrar registrar)
         .DefaultNew();
     registrar.Parameter("tcp_dispatcher", &TThis::TcpDispatcher)
         .DefaultNew();
+    registrar.Parameter("io_dispatcher", &TThis::IODispatcher)
+        .DefaultNew();
     registrar.Parameter("rpc_dispatcher", &TThis::RpcDispatcher)
         .DefaultNew();
     registrar.Parameter("grpc_dispatcher", &TThis::GrpcDispatcher)
@@ -90,10 +94,11 @@ void TSingletonsConfig::Register(TRegistrar registrar)
     registrar.Parameter("solomon_exporter", &TThis::SolomonExporter)
         .DefaultNew();
     registrar.Parameter("logging", &TThis::Logging)
-        .DefaultCtor([] () { return NLogging::TLogManagerConfig::CreateDefault(); });
+        .DefaultCtor([] { return NLogging::TLogManagerConfig::CreateDefault(); })
+        .ResetOnLoad();
     registrar.Parameter("jaeger", &TThis::Jaeger)
         .DefaultNew();
-    registrar.Parameter("rpc", &TThis::Rpc)
+    registrar.Parameter("tracing_transport", &TThis::TracingTransport)
         .DefaultNew();
     registrar.Parameter("tcmalloc", &TThis::TCMalloc)
         .DefaultNew();
@@ -106,6 +111,8 @@ void TSingletonsConfig::Register(TRegistrar registrar)
     registrar.Parameter("resource_tracker_vcpu_factor", &TThis::ResourceTrackerVCpuFactor)
         .Optional();
     registrar.Parameter("heap_profiler", &TThis::HeapProfiler)
+        .DefaultNew();
+    registrar.Parameter("protobuf_interop", &TThis::ProtobufInterop)
         .DefaultNew();
 
     registrar.Postprocessor([] (TThis* config) {
@@ -121,18 +128,22 @@ void TSingletonsDynamicConfig::Register(TRegistrar registrar)
 {
     registrar.Parameter("spin_lock_slow_path_logging_threshold", &TThis::SpinWaitSlowPathLoggingThreshold)
         .Optional();
+    registrar.Parameter("max_idle_fibers", &TThis::MaxIdleFibers)
+        .Default(NConcurrency::DefaultMaxIdleFibers);
     registrar.Parameter("yt_alloc", &TThis::YTAlloc)
         .Optional();
     registrar.Parameter("tcp_dispatcher", &TThis::TcpDispatcher)
         .DefaultNew();
+    registrar.Parameter("io_dispatcher", &TThis::IODispatcher)
+        .Optional();
     registrar.Parameter("rpc_dispatcher", &TThis::RpcDispatcher)
         .DefaultNew();
     registrar.Parameter("logging", &TThis::Logging)
         .DefaultNew();
     registrar.Parameter("jaeger", &TThis::Jaeger)
         .DefaultNew();
-    registrar.Parameter("rpc", &TThis::Rpc)
-        .DefaultNew();
+    registrar.Parameter("tracing_transport", &TThis::TracingTransport)
+        .Optional();
     registrar.Parameter("tcmalloc", &TThis::TCMalloc)
         .Optional();
     registrar.Parameter("protobuf_interop", &TThis::ProtobufInterop)
@@ -169,13 +180,6 @@ void WarnForUnrecognizedOptions(
     WarnForUnrecognizedOptionsImpl(logger, config->GetRecursiveUnrecognized());
 }
 
-void WarnForUnrecognizedOptions(
-    const NLogging::TLogger& logger,
-    const NYTree::TYsonSerializablePtr& config)
-{
-    WarnForUnrecognizedOptionsImpl(logger, config->GetUnrecognizedRecursively());
-}
-
 void AbortOnUnrecognizedOptionsImpl(
     const NLogging::TLogger& logger,
     const IMapNodePtr& unrecognized)
@@ -193,13 +197,6 @@ void AbortOnUnrecognizedOptions(
     const NYTree::TYsonStructPtr& config)
 {
     AbortOnUnrecognizedOptionsImpl(logger, config->GetRecursiveUnrecognized());
-}
-
-void AbortOnUnrecognizedOptions(
-    const NLogging::TLogger& logger,
-    const NYTree::TYsonSerializablePtr& config)
-{
-    AbortOnUnrecognizedOptionsImpl(logger, config->GetUnrecognizedRecursively());
 }
 
 ////////////////////////////////////////////////////////////////////////////////

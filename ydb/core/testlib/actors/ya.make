@@ -1,10 +1,14 @@
 LIBRARY()
 
 SRCS(
+    block_events.cpp
+    block_events.h
     test_runtime.cpp
+    test_runtime.h
 )
 
 PEERDIR(
+    ydb/apps/version
     ydb/library/actors/testlib
     library/cpp/testing/unittest
     ydb/core/base

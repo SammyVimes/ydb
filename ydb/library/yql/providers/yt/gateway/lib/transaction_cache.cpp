@@ -144,7 +144,7 @@ void TTransactionCache::TEntry::UpdateColumnarStat(NYT::TRichYPath ytPath, const
 ITransactionPtr TTransactionCache::TEntry::GetSnapshotTx(bool createTx) {
     auto guard = Guard(Lock_);
     if (createTx || !LastSnapshotTx) {
-        LastSnapshotTx = Tx->StartTransaction(TStartTransactionOptions().Attributes(TransactionSpec));
+        LastSnapshotTx = Tx->StartTransaction(TStartTransactionOptions().Attributes(TransactionSpec).PingAncestors(true));
         SnapshotTxs.emplace(LastSnapshotTx->GetId(), LastSnapshotTx);
     }
     return LastSnapshotTx;
@@ -406,49 +406,43 @@ void TTransactionCache::AbortAll() {
     with_lock(Lock_) {
         txMap.swap(TxMap_);
     }
+
+    TString error;
+    auto abortTx = [&] (const ITransactionPtr& tx) {
+        try {
+            tx->Abort();
+        } catch (...) {
+            YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
+
+            // Store first abort error.
+            if (error.empty()) {
+                error = "Failed to abort transaction " + GetGuidAsString(tx->GetId()) + ": " + CurrentExceptionMessage();
+            }
+        }
+    };
+
     for (auto& item : txMap) {
         auto entry = item.second;
 
         for (auto& item: entry->SnapshotTxs) {
-            try {
-                YQL_CLOG(DEBUG, ProviderYt) << "AbortAll(): Aborting Snapshot tx " << GetGuidAsString(item.second->GetId());
-                item.second->Abort();
-            } catch (...) {
-                YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
-            }
+            YQL_CLOG(DEBUG, ProviderYt) << "AbortAll(): Aborting Snapshot tx " << GetGuidAsString(item.second->GetId());
+            abortTx(item.second);
         }
         for (auto& item : entry->CheckpointTxs) {
-            try {
-                YQL_CLOG(DEBUG, ProviderYt) << "AbortAll(): Aborting Checkpoint tx " << GetGuidAsString(item.second->GetId());
-                item.second->Abort();
-            } catch (...) {
-                YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
-            }
+            YQL_CLOG(DEBUG, ProviderYt) << "AbortAll(): Aborting Checkpoint tx " << GetGuidAsString(item.second->GetId());
+            abortTx(item.second);
         }
         for (auto& item: entry->WriteTxs) {
-            try {
-                YQL_CLOG(DEBUG, ProviderYt) << "AbortAll(): Aborting Write tx " << GetGuidAsString(item.second->GetId());
-                item.second->Abort();
-            } catch (...) {
-                YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
-            }
+            YQL_CLOG(DEBUG, ProviderYt) << "AbortAll(): Aborting Write tx " << GetGuidAsString(item.second->GetId());
+            abortTx(item.second);
         }
         if (entry->BinarySnapshotTx) {
             YQL_CLOG(INFO, ProviderYt) << "AbortAll(): Aborting BinarySnapshot tx " << GetGuidAsString(entry->BinarySnapshotTx->GetId());
-            try {
-                entry->BinarySnapshotTx->Abort();
-            } catch (...) {
-                YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
-            }
+            abortTx(entry->BinarySnapshotTx);
         }
-
         if (entry->Tx) {
             YQL_CLOG(INFO, ProviderYt) << "Aborting tx " << GetGuidAsString(entry->Tx->GetId())  << " on " << item.first;
-            try {
-                entry->Tx->Abort();
-            } catch (...) {
-                YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
-            }
+            abortTx(entry->Tx);
         }
 
         if (entry->Client) {
@@ -456,9 +450,48 @@ void TTransactionCache::AbortAll() {
             try {
                 entry->Client->Shutdown();
             } catch (...) {
-                YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
+                if (!error) {
+                    error = "Failed to shut down client: " + CurrentExceptionMessage();
+                }
             }
         }
+    }
+
+    if (error) {
+        ythrow yexception() << error;
+    }
+}
+
+void TTransactionCache::DetachSnapshotTxs() {
+    TString error;
+    auto detachTx = [&] (const ITransactionPtr& tx) {
+        try {
+            tx->Detach();
+        } catch (...) {
+            YQL_CLOG(ERROR, ProviderYt) << CurrentExceptionMessage();
+
+            // Store first detach error.
+            if (error.empty()) {
+                error = "Failed to detach transaction " + GetGuidAsString(tx->GetId()) + ": " + CurrentExceptionMessage();
+            }
+        }
+    };
+
+    for (auto& item : TxMap_) {
+        auto entry = item.second;
+
+        for (auto& item : entry->SnapshotTxs) {
+            YQL_CLOG(DEBUG, ProviderYt) << "DetachSnapshotTxs(): Detaching Snapshot tx " << GetGuidAsString(item.second->GetId());
+            detachTx(item.second);
+        }
+        if (entry->Tx) {
+            YQL_CLOG(INFO, ProviderYt) << "Detaching tx " << GetGuidAsString(entry->Tx->GetId())  << " on " << item.first;
+            detachTx(entry->Tx);
+        }
+    }
+
+    if (error) {
+        ythrow yexception() << error;
     }
 }
 

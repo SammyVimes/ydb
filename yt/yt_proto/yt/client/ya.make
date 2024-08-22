@@ -14,6 +14,8 @@ SRCS(
     api/rpc_proxy/proto/api_service.proto
     api/rpc_proxy/proto/discovery_service.proto
 
+    bundle_controller/proto/bundle_controller_service.proto
+
     cell_master/proto/cell_directory.proto
 
     chaos_client/proto/replication_card.proto
@@ -35,6 +37,8 @@ SRCS(
     table_chunk_format/proto/chunk_meta.proto
     table_chunk_format/proto/column_meta.proto
     table_chunk_format/proto/wire_protocol.proto
+
+    tablet_client/proto/lock_mask.proto
 
     transaction_client/proto/timestamp_service.proto
 

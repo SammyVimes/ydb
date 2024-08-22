@@ -3,11 +3,13 @@
 #include "yql_yt_gateway.h"
 #include "yql_yt_op_settings.h"
 #include "yql_yt_helpers.h"
+#include "yql_yt_io_discovery_walk_folders.h"
 
 #include <ydb/library/yql/providers/yt/expr_nodes/yql_yt_expr_nodes.h>
 #include <ydb/library/yql/providers/yt/common/yql_names.h>
 #include <ydb/library/yql/providers/common/provider/yql_provider_names.h>
 #include <ydb/library/yql/providers/common/provider/yql_provider.h>
+#include <ydb/library/yql/core/services/yql_eval_expr.h>
 #include <ydb/library/yql/core/yql_expr_optimize.h>
 #include <ydb/library/yql/core/yql_expr_type_annotation.h>
 #include <ydb/library/yql/core/yql_expr_constraint.h>
@@ -175,67 +177,54 @@ public:
             return status;
         }
 
-        status = OptimizeExpr(output, output, [&](const TExprNode::TPtr& node, TExprContext& ctx) -> TExprNode::TPtr {
-            if (auto maybeRead = TMaybeNode<TYtRead>(node)) {
-                if (!maybeRead.DataSource()) { // Validates provider
-                    return node;
-                }
-                auto read = maybeRead.Cast();
-                auto ds = read.DataSource();
-                if (!EnsureArgsCount(read.Ref(), 5, ctx)) {
-                    return {};
-                }
-
-                TYtInputKeys keys;
-                if (!keys.Parse(read.Arg(2).Ref(), ctx)) {
-                    return {};
-                }
-
-                if (keys.IsProcessed()) {
-                    // Already processed
-                    return node;
-                }
-
-                if (keys.GetKeys().empty()) {
-                    ctx.AddError(TIssue(ctx.GetPosition(read.Arg(2).Pos()), "The list of tables is empty"));
-                    return {};
-                }
-
-                if (keys.GetType() != TYtKey::EType::TableScheme) {
-                    auto cluster = TString{ds.Cluster().Value()};
-                    for (auto& key: keys.GetKeys()) {
-                        auto keyPos = ctx.GetPosition(key.GetNode()->Pos());
-                        if (key.GetRange()) {
-                            PendingRanges_.emplace(std::make_pair(cluster, *key.GetRange()), std::make_pair(keyPos, NThreading::TFuture<IYtGateway::TTableRangeResult>()));
-                        }
-                        else if (key.GetFolder()) {
-                            PendingFolders_.emplace(std::make_pair(cluster, *key.GetFolder()), std::make_pair(keyPos, NThreading::TFuture<IYtGateway::TFolderResult>()));
-                        }
-                        else if (!key.IsAnonymous()) {
-                            if (PendingCanonizations_.insert(std::make_pair(std::make_pair(cluster, key.GetPath()), paths.size())).second) {
-                                paths.push_back(IYtGateway::TCanonizeReq()
-                                    .Cluster(cluster)
-                                    .Path(key.GetPath())
-                                    .Pos(keyPos)
-                                );
-                            }
+        status = VisitInputKeys(output, ctx, [this, &ctx, &paths] (TYtRead readNode, TYtInputKeys&& keys) -> TExprNode::TPtr {
+            if (keys.GetType() != TYtKey::EType::TableScheme) {
+                const auto cluster = TString{readNode.DataSource().Cluster().Value()};
+                for (auto&& key: keys.ExtractKeys()) {
+                    auto keyPos = ctx.GetPosition(key.GetNode()->Pos());
+                    if (key.GetRange()) {
+                        PendingRanges_.emplace(std::make_pair(cluster, *key.GetRange()), std::make_pair(keyPos, NThreading::TFuture<IYtGateway::TTableRangeResult>()));
+                    }
+                    else if (key.GetFolder()) {
+                        PendingFolders_.emplace(std::make_pair(cluster, *key.GetFolder()), std::make_pair(keyPos, NThreading::TFuture<IYtGateway::TFolderResult>()));
+                    }
+                    else if (key.GetWalkFolderArgs()) {
+                        return ctx.ChangeChild(readNode.Ref(), 2, InitializeWalkFolders(std::move(key), cluster, keyPos, ctx));
+                    }
+                    else if (key.GetWalkFolderImplArgs()) {
+                        PendingWalkFoldersKeys_.insert(key.GetWalkFolderImplArgs()->StateKey);
+                    }
+                    else if (!key.IsAnonymous()) {
+                        if (PendingCanonizations_.insert(std::make_pair(std::make_pair(cluster, key.GetPath()), paths.size())).second) {
+                            paths.push_back(IYtGateway::TCanonizeReq()
+                                .Cluster(cluster)
+                                .Path(key.GetPath())
+                                .Pos(keyPos)
+                            );
                         }
                     }
                 }
-                return node;
             }
+            return readNode.Ptr();
+        }, /* visitChanges */ true);
 
-            return node;
-        }, ctx, TOptimizeExprSettings(nullptr));
-
-        if (status.Level != TStatus::Ok) {
+        if (status.Level == TStatus::Error) {
             PendingCanonizations_.clear();
             PendingFolders_.clear();
             PendingRanges_.clear();
+
+            for (const auto& key : PendingWalkFoldersKeys_) {
+                State_->WalkFoldersState.erase(key);
+            }
+            PendingWalkFoldersKeys_.clear();
+
+            YQL_CLOG(INFO, ProviderYt) << "YtIODiscovery - finish, status: " << (TStatus::ELevel)status.Level;
             return status;
         }
-
-        if (PendingRanges_.empty() && PendingFolders_.empty() && PendingCanonizations_.empty()) {
+        
+        if (PendingRanges_.empty() && PendingFolders_.empty() 
+            && PendingCanonizations_.empty() && PendingWalkFoldersKeys_.empty()) {
+            YQL_CLOG(INFO, ProviderYt) << "YtIODiscovery - finish, status: " << (TStatus::ELevel)status.Level;
             return status;
         }
 
@@ -333,16 +322,24 @@ public:
             x.second.second = result;
         }
 
-        AllFuture_ = NThreading::WaitExceptionOrAll(allFutures);
+        CanonizationRangesFoldersFuture_ = NThreading::WaitExceptionOrAll(allFutures);
         return TStatus::Async;
     }
 
     NThreading::TFuture<void> DoGetAsyncFuture(const TExprNode& input) final {
         Y_UNUSED(input);
-        return AllFuture_;
+        if (auto walkFoldersFuture = MaybeGetWalkFoldersFuture()) {
+            if (PendingCanonizations_.empty() && PendingRanges_.empty() && PendingFolders_.empty()) {
+                return walkFoldersFuture.GetRef();
+            }
+            return NThreading::WaitExceptionOrAll(walkFoldersFuture.GetRef(), CanonizationRangesFoldersFuture_);
+        }
+
+        return CanonizationRangesFoldersFuture_;
     }
 
     TStatus DoApplyAsyncChanges(TExprNode::TPtr input, TExprNode::TPtr& output, TExprContext& ctx) final {
+        YQL_CLOG(INFO, ProviderYt) << "YtIODiscovery - DoApplyAsyncChanges start";
         output = input;
 
         if (!PendingCanonizations_.empty()) {
@@ -353,7 +350,12 @@ public:
                 PendingCanonizations_.clear();
                 PendingRanges_.clear();
                 CanonizeFuture_ = {};
-                AllFuture_ = {};
+                CanonizationRangesFoldersFuture_ = {};
+
+                for (const auto& key : PendingWalkFoldersKeys_) {
+                    State_->WalkFoldersState.erase(key);
+                }
+                PendingWalkFoldersKeys_.clear();
 
                 return TStatus::Error;
             }
@@ -415,12 +417,12 @@ public:
                 YQL_CLOG(INFO, ProviderYt) << "Got " << items.size() << " items for " << " GetFolder";
                 TVector<TExprBase> listItems;
                 for (auto& item: items) {
-                    listItems.push_back(BuildFolderListItemExpr(ctx, node->Pos(), item));
+                    listItems.push_back(BuildFolderListItemExpr(ctx, node->Pos(), item.Path, item.Type, item.Attributes));
                 }
 
                 return BuildFolderTableResExpr(ctx, node->Pos(), read.World(), BuildFolderListExpr(ctx, node->Pos(), listItems).Ptr()).Ptr();
             }
-
+            
             if (keys.GetType() != TYtKey::EType::Table) {
                 return node;
             }
@@ -514,6 +516,7 @@ public:
                         pathInfo.Ranges = MakeIntrusive<TYtRangesInfo>();
                         pathInfo.Ranges->Parse(*oneTable.Ranges, ctx, key.GetNode()->Pos());
                     }
+                    pathInfo.AdditionalAttributes = oneTable.AdditionalAttributes;
                     tables.push_back(pathInfo.ToExprNode(ctx, key.GetNode()->Pos(), tableInfo.ToExprNode(ctx, key.GetNode()->Pos())));
                 }
             }
@@ -546,17 +549,26 @@ public:
         PendingRanges_.clear();
         PendingFolders_.clear();
         CanonizeFuture_ = {};
-        AllFuture_ = {};
+        CanonizationRangesFoldersFuture_ = {};
 
+        if (status == TStatus::Ok && !PendingWalkFoldersKeys_.empty()) {
+            const auto walkFoldersStatus = RewriteWalkFoldersOnAsyncOrEvalChanges(output, ctx);
+            return walkFoldersStatus;
+        }
+
+        YQL_CLOG(INFO, ProviderYt) << "YtIODiscovery DoApplyAsyncChanges - finish";
         return status;
     }
 
     void Rewind() final {
+        YQL_CLOG(INFO, ProviderYt) << "Rewinding YtIODiscovery";
         PendingRanges_.clear();
         PendingFolders_.clear();
         PendingCanonizations_.clear();
+        PendingWalkFoldersKeys_.clear();
+
         CanonizeFuture_ = {};
-        AllFuture_ = {};
+        CanonizationRangesFoldersFuture_ = {};
     }
 
 private:
@@ -661,83 +673,167 @@ private:
         res->ChildRef(4) = Build<TCoNameValueTupleList>(ctx, read.Pos()).Add(readSettings).Done().Ptr();
         return res;
     }
+    
+    [[nodiscard]]
+    TExprNode::TPtr InitializeWalkFolders(TYtKey&& key, const TString& cluster, TPosition pos, TExprContext& ctx) {
+        auto& args = key.GetWalkFolderArgs().GetRef();
 
-    TExprBase BuildFolderListItemExpr(TExprContext& ctx, NYql::TPositionHandle pos, const IYtGateway::TFolderResult::TFolderItem& folderItem)  {
-        return Build<TCoAsStruct>(ctx, pos)
-            .Add()
-                .Add<TCoAtom>()
-                    .Value("Path")
-                .Build()
-                .Add<TCoString>()
-                    .Literal()
-                        .Value(folderItem.Path)
-                    .Build()
-                .Build()
-            .Build()
-            .Add()
-                .Add<TCoAtom>()
-                    .Value("Type")
-                .Build()
-                .Add<TCoString>()
-                    .Literal()
-                        .Value(folderItem.Type)
-                    .Build()
-                .Build()
-            .Build()
-            .Add()
-                .Add<TCoAtom>()
-                    .Value("Attributes")
-                .Build()
-                .Add<TCoYson>()
-                    .Literal()
-                        .Value(folderItem.Attributes)
-                    .Build()
-                .Build()
-            .Build()
-            .Done();
-    }
+        TWalkFoldersImpl walkFolders {State_->SessionId, cluster, State_->Configuration->Snapshot(), 
+                         pos, args, State_->Gateway};
+        YQL_CLOG(INFO, ProviderYt) << "Initialized WalkFolders from " << cluster << ".`" 
+            << args.InitialFolder.Prefix << "`" << " with root attributes cnt: " 
+            << args.InitialFolder.Attributes.size();
+        const auto instanceKey = ctx.NextUniqueId;
+        State_->WalkFoldersState.emplace(instanceKey, std::move(walkFolders));
+        PendingWalkFoldersKeys_.insert(instanceKey);
 
-    TCoList BuildFolderListExpr(TExprContext& ctx, NYql::TPositionHandle pos, const TVector<TExprBase>& folderItems) {
-        return Build<TCoList>(ctx, pos)
-            .ListType<TCoListType>()
-                .ItemType<TCoStructType>()
-                    .Add<TExprList>()
-                        .Add<TCoAtom>()
-                            .Value("Path")
-                        .Build()
-                        .Add<TCoDataType>()
-                            .Type()
-                                .Value("String")
-                            .Build()
-                        .Build()
-                    .Build()
-                    .Add<TExprList>()
-                        .Add<TCoAtom>()
-                            .Value("Type")
-                        .Build()
-                        .Add<TCoDataType>()
-                            .Type()
-                                .Value("String")
-                            .Build()
-                        .Build()
-                    .Build()
-                    .Add<TExprList>()
-                        .Add<TCoAtom>()
-                            .Value("Attributes")
-                        .Build()
-                        .Add<TCoDataType>()
-                            .Type()
-                                .Value("Yson")
-                            .Build()
-                        .Build()
-                    .Build()
-                .Build()
+        auto walkFoldersImplNode = Build<TYtWalkFoldersImpl>(ctx, key.GetNode()->Pos())
+            .ProcessStateKey()
+                .Value(instanceKey)
             .Build()
-            .FreeArgs()
-                .Add(folderItems)
-            .Build()
+            .PickledUserState(args.PickledUserState)
+            .UserStateType(args.UserStateType)
         .Build()
-        .Value();
+        .Value()
+        .Ptr();
+
+        return walkFoldersImplNode;
+    }
+    
+    TStatus RewriteWalkFoldersOnAsyncOrEvalChanges(TExprNode::TPtr& output, TExprContext& ctx) {
+        TStatus walkFoldersStatus = IGraphTransformer::TStatus::Ok;
+
+        auto status = VisitInputKeys(output, ctx, [this, &ctx, &walkFoldersStatus] (TYtRead readNode, TYtInputKeys&& keys) -> TExprNode::TPtr {
+            if (keys.GetType() == TYtKey::EType::WalkFoldersImpl) {
+                YQL_CLOG(INFO, ProviderYt) << "YtIODiscovery - DoApplyAsyncChanges WalkFoldersImpl handling start";
+
+                auto parsedKey = keys.ExtractKeys().front();
+                if (!parsedKey.GetWalkFolderImplArgs()) {
+                    YQL_CLOG(ERROR, ProviderYt) << "Failed to parse WalkFolderImpl args";
+                    return {};
+                }
+                const ui64 instanceKey = parsedKey.GetWalkFolderImplArgs()->StateKey;
+                if (*PendingWalkFoldersKeys_.begin() != instanceKey) {
+                    return readNode.Ptr();
+                }
+
+                auto walkFoldersInstanceIt = this->State_->WalkFoldersState.find(instanceKey);
+                YQL_ENSURE(!walkFoldersInstanceIt.IsEnd());
+                auto& walkFoldersImpl = walkFoldersInstanceIt->second;
+
+                Y_ENSURE(walkFoldersImpl.GetAnyOpFuture().HasValue(), 
+                    "Called RewriteWalkFoldersOnAsyncChanges, but impl future is not ready");
+
+                auto nextState = parsedKey.GetWalkFolderImplArgs()->UserStateExpr;
+                walkFoldersStatus = walkFoldersImpl.GetNextStateExpr(ctx, std::move(parsedKey.GetWalkFolderImplArgs().GetRef()), nextState);
+
+                if (walkFoldersStatus == TStatus::Error) {
+                    return {};
+                }
+
+                if (walkFoldersImpl.IsFinished()) {
+                    YQL_CLOG(INFO, ProviderYt) << "Building result expr for WalkFolders with key: " << instanceKey;
+                    this->State_->WalkFoldersState.erase(instanceKey);
+                    PendingWalkFoldersKeys_.erase(instanceKey);
+
+                    auto type = Build<TCoStructType>(ctx, readNode.Pos())
+                        .Add<TExprList>()
+                            .Add<TCoAtom>()
+                                .Value("State")
+                            .Build()
+                            .Add(parsedKey.GetWalkFolderImplArgs()->UserStateType)
+                        .Build()
+                    .DoBuild();
+
+                    auto resList = Build<TCoList>(ctx, readNode.Pos())
+                        .ListType<TCoListType>()
+                            .ItemType<TCoStructType>()
+                                .InitFrom(type)
+                            .Build()
+                        .Build()
+                        .FreeArgs()
+                            .Add<TCoAsStruct>()
+                                .Add()
+                                    .Add<TCoAtom>()
+                                        .Value("State")
+                                    .Build()
+                                    .Add(nextState)
+                                .Build()
+                            .Build()
+                        .Build()
+                    .DoBuild();
+
+                    return Build<TCoCons>(ctx, readNode.Pos())
+                        .World(readNode.World())
+                        .Input<TCoAssumeColumnOrder>()
+                            .Input(resList)
+                        .ColumnOrder<TCoAtomList>()
+                                .Add()
+                                    .Value("State")
+                                .Build()
+                            .Build()
+                        .Build()
+                    .Done()
+                    .Ptr();
+                }
+
+                if (nextState == parsedKey.GetWalkFolderImplArgs()->UserStateExpr) {
+                    return readNode.Ptr();
+                }
+
+                YQL_CLOG(TRACE, ProviderYt) << "State expr ast: " << ConvertToAst(*nextState, ctx, {}).Root->ToString();
+
+                auto walkFoldersImplNode = ctx.ChangeChild(*parsedKey.GetNode(), 0, std::move(nextState));
+                return ctx.ChangeChild(readNode.Ref(), 2, std::move(walkFoldersImplNode));
+            }
+            return readNode.Ptr();
+        });
+        
+        if (status == TStatus::Error) {
+            YQL_CLOG(ERROR, ProviderYt) << "WalkFolders error transforming";
+            return status;
+        }
+
+        YQL_CLOG(INFO, ProviderYt) << "WalkFolders next status: " << walkFoldersStatus;
+        return walkFoldersStatus;
+    }
+    
+    IGraphTransformer::TStatus VisitInputKeys(TExprNode::TPtr& output,
+        TExprContext& ctx, std::function<TExprNode::TPtr(TYtRead node, TYtInputKeys&&)> processKeys, bool visitChanges = false) {
+        TOptimizeExprSettings settings(nullptr);
+        settings.VisitChanges = visitChanges;
+
+        const auto status = OptimizeExpr(output, output, [&](const TExprNode::TPtr& node, TExprContext& ctx) -> TExprNode::TPtr {
+            if (auto maybeRead = TMaybeNode<TYtRead>(node)) {
+                if (!maybeRead.DataSource()) { // Validates provider
+                    return node;
+                }
+                auto read = maybeRead.Cast();
+                auto ds = read.DataSource();
+                if (!EnsureArgsCount(read.Ref(), 5, ctx)) {
+                    return {};
+                }
+
+                TYtInputKeys keys;
+                auto& keysNode = read.Arg(2).Ref();
+                if (!keys.Parse(keysNode, ctx)) {
+                    return {};
+                }
+
+                if (keys.IsProcessed()) {
+                    // Already processed
+                    return node;
+                }
+
+                if (keys.GetKeys().empty()) {
+                    ctx.AddError(TIssue(ctx.GetPosition(read.Arg(2).Pos()), "The list of tables is empty"));
+                    return {};
+                }
+                return processKeys(read, std::move(keys));
+            } 
+            return node;
+        }, ctx, settings);
+        return status;
     }
 
     TCoCons BuildFolderTableResExpr(TExprContext& ctx, NYql::TPositionHandle pos, const TExprBase& world, const TExprNodePtr& folderList) {
@@ -770,6 +866,22 @@ private:
         }
         return res;
     }
+    
+    TWalkFoldersImpl& GetCurrentWalkFoldersInstance() const {
+        Y_ENSURE(!PendingWalkFoldersKeys_.empty());
+        const auto key = PendingWalkFoldersKeys_.begin();
+        auto stateIt = State_->WalkFoldersState.find(*key);
+        YQL_ENSURE(stateIt != State_->WalkFoldersState.end());
+        return stateIt->second; 
+    }
+    
+    TMaybe<NThreading::TFuture<void>> MaybeGetWalkFoldersFuture() const {
+        // inflight 1
+        if (!PendingWalkFoldersKeys_.empty()) {
+            return GetCurrentWalkFoldersInstance().GetAnyOpFuture();
+        }
+        return Nothing();
+    }
 
 private:
     TYtState::TPtr State_;
@@ -777,8 +889,9 @@ private:
     THashMap<std::pair<TString, TYtKey::TRange>, std::pair<TPosition, NThreading::TFuture<IYtGateway::TTableRangeResult>>> PendingRanges_;
     THashMap<std::pair<TString, TYtKey::TFolderList>, std::pair<TPosition, NThreading::TFuture<IYtGateway::TFolderResult>>> PendingFolders_;
     THashMap<std::pair<TString, TString>, size_t> PendingCanonizations_; // cluster, original table path -> positions in canon result
+    TSet<ui64> PendingWalkFoldersKeys_;
     NThreading::TFuture<IYtGateway::TCanonizePathsResult> CanonizeFuture_;
-    NThreading::TFuture<void> AllFuture_;
+    NThreading::TFuture<void> CanonizationRangesFoldersFuture_;
 
     THashMap<TString, TString> FolderFileToAlias_;
 };

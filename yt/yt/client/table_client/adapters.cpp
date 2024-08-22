@@ -1,4 +1,5 @@
 #include "adapters.h"
+
 #include "row_batch.h"
 
 #include <yt/yt/client/api/table_writer.h>
@@ -11,6 +12,11 @@ namespace NYT::NTableClient {
 
 using namespace NApi;
 using namespace NConcurrency;
+using namespace NCrypto;
+
+////////////////////////////////////////////////////////////////////////////////
+
+const NLogging::TLogger Logger("TableClientAdapters");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -92,6 +98,11 @@ public:
         return UnderlyingWriter_->GetSchema();
     }
 
+    std::optional<TMD5Hash> GetDigest() const override
+    {
+        return std::nullopt;
+    }
+
 private:
     const NApi::ITableWriterPtr UnderlyingWriter_;
 };
@@ -118,33 +129,43 @@ void PipeReaderToWriter(
     while (auto batch = reader->Read(readOptions)) {
         yielder.TryYield();
 
-        if (batch->IsEmpty()) {
-            WaitFor(reader->GetReadyEvent())
-                .ThrowOnError();
-            continue;
-        }
+        TSharedRange<TUnversionedRow> rows;
 
-        auto rows = batch->MaterializeRows();
+        try {
+            if (batch->IsEmpty()) {
+                WaitFor(reader->GetReadyEvent())
+                    .ThrowOnError();
+                continue;
+            }
 
-        if (options.ValidateValues) {
-            for (auto row : rows) {
-                for (const auto& value : row) {
-                    ValidateStaticValue(value);
+            rows = batch->MaterializeRows();
+
+            if (options.ValidateValues) {
+                for (auto row : rows) {
+                    for (const auto& value : row) {
+                        ValidateStaticValue(value);
+                    }
                 }
             }
-        }
 
-        if (options.Throttler) {
-            i64 dataWeight = 0;
-            for (auto row : rows) {
-                dataWeight += GetDataWeight(row);
+            if (options.Throttler) {
+                i64 dataWeight = 0;
+                for (auto row : rows) {
+                    dataWeight += GetDataWeight(row);
+                }
+                WaitFor(options.Throttler->Throttle(dataWeight))
+                    .ThrowOnError();
             }
-            WaitFor(options.Throttler->Throttle(dataWeight))
-                .ThrowOnError();
-        }
 
-        if (!rows.empty() && options.PipeDelay) {
-            TDelayedExecutor::WaitForDuration(options.PipeDelay);
+            if (!rows.empty() && options.PipeDelay) {
+                TDelayedExecutor::WaitForDuration(options.PipeDelay);
+            }
+        } catch (const std::exception& ex) {
+            if (options.ReaderErrorWrapper) {
+                THROW_ERROR options.ReaderErrorWrapper(ex);
+            } else {
+                throw;
+            }
         }
 
         if (!writer->Write(rows)) {
@@ -160,8 +181,9 @@ void PipeReaderToWriter(
 void PipeReaderToWriterByBatches(
     const ITableReaderPtr& reader,
     const NFormats::ISchemalessFormatWriterPtr& writer,
-    const TRowBatchReadOptions& options)
-{
+    const TRowBatchReadOptions& options,
+    TDuration pipeDelay)
+try {
     TPeriodicYielder yielder(TDuration::Seconds(1));
 
     while (auto batch = reader->Read(options)) {
@@ -173,6 +195,10 @@ void PipeReaderToWriterByBatches(
             continue;
         }
 
+        if (!batch->IsEmpty() && pipeDelay != TDuration::Zero()) {
+            TDelayedExecutor::WaitForDuration(pipeDelay);
+        }
+
         if (!writer->WriteBatch(batch)) {
             WaitFor(writer->GetReadyEvent())
                 .ThrowOnError();
@@ -181,6 +207,50 @@ void PipeReaderToWriterByBatches(
 
     WaitFor(writer->Close())
         .ThrowOnError();
+} catch (const std::exception& ex) {
+    YT_LOG_ERROR(ex, "PipeReaderToWriterByBatches failed");
+
+    THROW_ERROR_EXCEPTION(ex);
+}
+
+void PipeReaderToAdaptiveWriterByBatches(
+    const ITableReaderPtr& reader,
+    const NFormats::ISchemalessFormatWriterPtr& writer,
+    TRowBatchReadOptions options,
+    TCallback<void(TRowBatchReadOptions* mutableOptions, TDuration timeForBatch)> optionsUpdater,
+    TDuration pipeDelay)
+try {
+    TPeriodicYielder yielder(TDuration::Seconds(1));
+
+    while (auto batch = reader->Read(options)) {
+        yielder.TryYield();
+
+        if (batch->IsEmpty()) {
+            WaitFor(reader->GetReadyEvent())
+                .ThrowOnError();
+            continue;
+        }
+
+        if (!batch->IsEmpty() && pipeDelay != TDuration::Zero()) {
+            TDelayedExecutor::WaitForDuration(pipeDelay);
+        }
+
+        NProfiling::TWallTimer timer;
+
+        if (!writer->WriteBatch(batch)) {
+            WaitFor(writer->GetReadyEvent())
+                .ThrowOnError();
+        }
+
+        optionsUpdater(&options, timer.GetElapsedTime());
+    }
+
+    WaitFor(writer->Close())
+        .ThrowOnError();
+} catch (const std::exception& ex) {
+    YT_LOG_ERROR(ex, "PipeReaderToAdaptiveWriterByBatches failed");
+
+    THROW_ERROR_EXCEPTION(ex);
 }
 
 void PipeInputToOutput(
@@ -224,6 +294,24 @@ void PipeInputToOutput(
         }
 
         output->Write(buffer.Begin(), length);
+    }
+
+    output->Finish();
+}
+
+void PipeInputToOutput(
+    const NConcurrency::IAsyncZeroCopyInputStreamPtr& input,
+    IOutputStream* output)
+{
+    while (true) {
+        auto data = WaitFor(input->Read())
+            .ValueOrThrow();
+
+        if (!data) {
+            break;
+        }
+
+        output->Write(data.Begin(), data.Size());
     }
 
     output->Finish();

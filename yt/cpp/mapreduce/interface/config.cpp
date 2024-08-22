@@ -68,7 +68,7 @@ EEncoding TConfig::GetEncoding(const char* var)
     }
 }
 
- EUploadDeduplicationMode TConfig::GetUploadingDeduplicationMode(
+EUploadDeduplicationMode TConfig::GetUploadingDeduplicationMode(
         const char* var,
         EUploadDeduplicationMode defaultValue)
 {
@@ -193,13 +193,14 @@ void TConfig::Reset()
     Prefix = GetEnv("YT_PREFIX");
     ApiVersion = GetEnv("YT_VERSION", "v3");
     LogLevel = GetEnv("YT_LOG_LEVEL", "error");
+    LogPath = GetEnv("YT_LOG_PATH");
 
     ContentEncoding = GetEncoding("YT_CONTENT_ENCODING");
     AcceptEncoding = GetEncoding("YT_ACCEPT_ENCODING");
 
     GlobalTxId = GetEnv("YT_TRANSACTION", "");
 
-    UseAsyncTxPinger = false;
+    UseAsyncTxPinger = true;
     AsyncHttpClientThreads = 1;
     AsyncTxPingerPoolThreads = 1;
 
@@ -212,6 +213,7 @@ void TConfig::Reset()
     LoadTimings();
 
     CacheUploadDeduplicationMode = GetUploadingDeduplicationMode("YT_UPLOAD_DEDUPLICATION", EUploadDeduplicationMode::Host);
+    CacheUploadDeduplicationThreshold = 10_MB;
 
     RetryCount = Max(GetInt("YT_RETRY_COUNT", 10), 1);
     ReadRetryCount = Max(GetInt("YT_READ_RETRY_COUNT", 30), 1);

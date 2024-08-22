@@ -314,10 +314,10 @@ class ConsoleInputReader:
 
                 # Process if this is a key event. (We also have mouse, menu and
                 # focus events.)
-                if type(ev) == KEY_EVENT_RECORD and ev.KeyDown:
+                if isinstance(ev, KEY_EVENT_RECORD) and ev.KeyDown:
                     yield from self._event_to_key_presses(ev)
 
-                elif type(ev) == MOUSE_EVENT_RECORD:
+                elif isinstance(ev, MOUSE_EVENT_RECORD):
                     yield from self._handle_mouse(ev)
 
     @staticmethod
@@ -329,8 +329,8 @@ class ConsoleInputReader:
         buffered_high_surrogate = None
         for key in key_presses:
             is_text = not isinstance(key.key, Keys)
-            is_high_surrogate = is_text and "\uD800" <= key.key <= "\uDBFF"
-            is_low_surrogate = is_text and "\uDC00" <= key.key <= "\uDFFF"
+            is_high_surrogate = is_text and "\ud800" <= key.key <= "\udbff"
+            is_low_surrogate = is_text and "\udc00" <= key.key <= "\udfff"
 
             if buffered_high_surrogate:
                 if is_low_surrogate:
@@ -379,7 +379,7 @@ class ConsoleInputReader:
         """
         For this `KEY_EVENT_RECORD`, return a list of `KeyPress` instances.
         """
-        assert type(ev) == KEY_EVENT_RECORD and ev.KeyDown
+        assert isinstance(ev, KEY_EVENT_RECORD) and ev.KeyDown
 
         result: KeyPress | None = None
 

@@ -16,7 +16,7 @@ class TTracingExt;
 
 DECLARE_REFCOUNTED_CLASS(TTraceContext)
 
-DECLARE_REFCOUNTED_CLASS(TTracingConfig)
+DECLARE_REFCOUNTED_CLASS(TTracingTransportConfig)
 
 DECLARE_REFCOUNTED_CLASS(TAllocationTags)
 
@@ -25,6 +25,8 @@ constexpr TTraceId InvalidTraceId = {};
 
 using TSpanId = ui64;
 constexpr TSpanId InvalidSpanId = 0;
+
+struct TTracingAttributes;
 
 // Request ids come from RPC infrastructure but
 // we should avoid include-dependencies here.

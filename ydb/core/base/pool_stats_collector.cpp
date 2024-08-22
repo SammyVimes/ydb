@@ -9,6 +9,9 @@
 #include <ydb/library/actors/core/actor_bootstrapped.h>
 #include <ydb/library/actors/helpers/pool_stats_collector.h>
 
+#include <ydb/core/graph/api/service.h>
+#include <ydb/core/graph/api/events.h>
+
 namespace NKikimr {
 
 // Periodically collects stats from executor threads and exposes them as mon counters
@@ -43,9 +46,9 @@ private:
     void OnWakeup(const TActorContext &ctx) override {
         MiniKQLPoolStats.Update();
 
-        TVector<std::tuple<TString, double, ui32>> pools;
+        TVector<std::tuple<TString, double, ui32, ui32>> pools;
         for (const auto& pool : PoolCounters) {
-            pools.emplace_back(pool.Name, pool.Usage, pool.Threads);
+            pools.emplace_back(pool.Name, pool.Usage, pool.Threads, pool.LimitThreads);
         }
 
         ctx.Send(NNodeWhiteboard::MakeNodeWhiteboardServiceId(ctx.SelfID.NodeId()), new NNodeWhiteboard::TEvWhiteboard::TEvSystemStateUpdate(pools));

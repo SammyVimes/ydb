@@ -7,7 +7,7 @@
 #include <yt/yt/core/net/local_address.h>
 
 #include <yt/yt/core/misc/checksum.h>
-#include <yt/yt/core/misc/memory_reference_tracker.h>
+#include <yt/yt/core/misc/memory_usage_tracker.h>
 
 #include <yt/yt/core/profiling/timing.h>
 
@@ -27,7 +27,7 @@ using NYT::ToProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const auto& Logger = RpcClientLogger;
+static constexpr auto& Logger = RpcClientLogger;
 static const auto LightInvokerDurationWarningThreshold = TDuration::MilliSeconds(10);
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -40,7 +40,8 @@ TClientContext::TClientContext(
     TFeatureIdFormatter featureIdFormatter,
     bool responseIsHeavy,
     TAttachmentsOutputStreamPtr requestAttachmentsStream,
-    TAttachmentsInputStreamPtr responseAttachmentsStream)
+    TAttachmentsInputStreamPtr responseAttachmentsStream,
+    IMemoryUsageTrackerPtr memoryUsageTracker)
     : RequestId_(requestId)
     , TraceContext_(std::move(traceContext))
     , Service_(std::move(service))
@@ -49,6 +50,7 @@ TClientContext::TClientContext(
     , ResponseHeavy_(responseIsHeavy)
     , RequestAttachmentsStream_(std::move(requestAttachmentsStream))
     , ResponseAttachmentsStream_(std::move(responseAttachmentsStream))
+    , MemoryUsageTracker_(std::move(memoryUsageTracker))
 { }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -81,6 +83,7 @@ TClientRequest::TClientRequest(const TClientRequest& other)
     , RequestCodec_(other.RequestCodec_)
     , ResponseCodec_(other.ResponseCodec_)
     , GenerateAttachmentChecksums_(other.GenerateAttachmentChecksums_)
+    , MemoryUsageTracker_(other.MemoryUsageTracker_)
     , Channel_(other.Channel_)
     , StreamingEnabled_(other.StreamingEnabled_)
     , SendBaggage_(other.SendBaggage_)
@@ -103,7 +106,7 @@ TSharedRefArray TClientRequest::Serialize()
 
     if (!retry) {
         auto output = CreateRequestMessage(Header_, headerlessMessage);
-        return TrackMemory(std::move(output));
+        return std::move(output);
     }
 
     if (StreamingEnabled_) {
@@ -114,7 +117,7 @@ TSharedRefArray TClientRequest::Serialize()
     patchedHeader.set_retry(true);
 
     auto output = CreateRequestMessage(patchedHeader, headerlessMessage);
-    return TrackMemory(std::move(output));
+    return std::move(output);
 }
 
 IClientRequestControlPtr TClientRequest::Send(IClientResponseHandlerPtr responseHandler)
@@ -347,7 +350,8 @@ TClientContextPtr TClientRequest::CreateClientContext()
         FeatureIdFormatter_,
         ResponseHeavy_,
         RequestAttachmentsStream_,
-        ResponseAttachmentsStream_);
+        ResponseAttachmentsStream_,
+        MemoryUsageTracker_ ? MemoryUsageTracker_ : Channel_->GetChannelMemoryTracker());
 }
 
 void TClientRequest::OnPullRequestAttachmentsStream()
@@ -443,7 +447,7 @@ void TClientRequest::PrepareHeader()
         return;
     }
 
-    // COMPAT(kiselyovp): legacy RPC codecs
+    // COMPAT(danilalexeev): legacy RPC codecs
     if (!EnableLegacyRpcCodecs_) {
         Header_.set_request_codec(ToProto<int>(RequestCodec_));
         Header_.set_response_codec(ToProto<int>(ResponseCodec_));
@@ -491,11 +495,6 @@ bool IsRequestSticky(const IClientRequestPtr& request)
     return balancingExt.enable_stickiness();
 }
 
-TSharedRefArray TClientRequest::TrackMemory(TSharedRefArray array) const
-{
-    return NYT::TrackMemory(MemoryReferenceTracker_, std::move(array));
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
 TClientResponse::TClientResponse(TClientContextPtr clientContext)
@@ -525,7 +524,7 @@ size_t TClientResponse::GetTotalSize() const
     return ResponseMessage_.ByteSize();
 }
 
-void TClientResponse::HandleError(const TError& error)
+void TClientResponse::HandleError(TError error)
 {
     auto prevState = State_.exchange(EState::Done);
     if (prevState == EState::Done) {
@@ -534,22 +533,15 @@ void TClientResponse::HandleError(const TError& error)
         return;
     }
 
-    auto invokeHandler = [&] (const TError& error) {
-        GetInvoker()->Invoke(
-            BIND(&TClientResponse::DoHandleError, MakeStrong(this), error));
-    };
-
-    auto optionalEnrichedError = TryEnrichClientRequestError(
-        error,
+    EnrichClientRequestError(
+        &error,
         ClientContext_->GetFeatureIdFormatter());
-    if (optionalEnrichedError) {
-        invokeHandler(*optionalEnrichedError);
-    } else {
-        invokeHandler(error);
-    }
+
+    GetInvoker()->Invoke(
+        BIND(&TClientResponse::DoHandleError, MakeStrong(this), std::move(error)));
 }
 
-void TClientResponse::DoHandleError(const TError& error)
+void TClientResponse::DoHandleError(TError error)
 {
     NProfiling::TWallTimer timer;
 
@@ -613,7 +605,7 @@ void TClientResponse::Deserialize(TSharedRefArray responseMessage)
         THROW_ERROR_EXCEPTION(NRpc::EErrorCode::ProtocolError, "Error deserializing response header");
     }
 
-    // COMPAT(kiselyovp): legacy RPC codecs
+    // COMPAT(danilalexeev): legacy RPC codecs
     std::optional<NCompression::ECodec> bodyCodecId;
     NCompression::ECodec attachmentCodecId;
     if (Header_.has_codec()) {
@@ -627,18 +619,17 @@ void TClientResponse::Deserialize(TSharedRefArray responseMessage)
         THROW_ERROR_EXCEPTION(NRpc::EErrorCode::ProtocolError, "Error deserializing response body");
     }
 
-    auto compressedAttachments = MakeRange(ResponseMessage_.Begin() + 2, ResponseMessage_.End());
+    auto compressedAttachments = TRange(ResponseMessage_.Begin() + 2, ResponseMessage_.End());
+    auto memoryUsageTracker = ClientContext_->GetMemoryUsageTracker();
+
     if (attachmentCodecId == NCompression::ECodec::None) {
-        Attachments_.clear();
-        Attachments_.reserve(compressedAttachments.Size());
-        for (auto& attachment : compressedAttachments) {
-            struct TCopiedAttachmentTag
-            { };
-            auto copiedAttachment = TSharedMutableRef::MakeCopy<TCopiedAttachmentTag>(attachment);
-            Attachments_.push_back(std::move(copiedAttachment));
-        }
+        Attachments_ = compressedAttachments.ToVector();
     } else {
         Attachments_ = DecompressAttachments(compressedAttachments, attachmentCodecId);
+    }
+
+    for (auto& attachment : Attachments_) {
+        attachment = TrackMemory(memoryUsageTracker, attachment);
     }
 }
 

@@ -230,6 +230,7 @@ public:
             colDescr->SetDeleteVersion(column.DeleteVersion);
             colDescr->SetFamily(column.Family);
             colDescr->SetNotNull(column.NotNull);
+            colDescr->SetIsBuildInProgress(column.IsBuildInProgress);
             if (column.DefaultKind != ETableColumnDefaultKind::None) {
                 colDescr->SetDefaultKind(ui32(column.DefaultKind));
                 colDescr->SetDefaultValue(column.DefaultValue);
@@ -305,6 +306,8 @@ public:
             case NKikimrSchemeOp::EPathType::EPathTypeDir:
             case NKikimrSchemeOp::EPathType::EPathTypeExternalTable:
             case NKikimrSchemeOp::EPathType::EPathTypeExternalDataSource:
+            case NKikimrSchemeOp::EPathType::EPathTypeView:
+            case NKikimrSchemeOp::EPathType::EPathTypeResourcePool:
                 Y_ABORT_UNLESS(!path.Base()->IsRoot());
                 //no shards
                 break;

@@ -17,13 +17,15 @@ namespace NYT::NYTree {
 ////////////////////////////////////////////////////////////////////////////////
 
 class TYPathRequest
-   : public NRpc::IClientRequest
+    : public NRpc::IClientRequest
 {
 public:
     //! Enables tagging requests with arbitrary payload.
     //! These tags are propagated to the respective responses (if a particular implementation supports this).
     //! This simplifies correlating requests with responses within a batch.
     DEFINE_BYREF_RW_PROPERTY(std::any, Tag);
+
+    DEFINE_BYREF_RW_PROPERTY(std::vector<TSharedRef>, Attachments);
 
 public:
     NRpc::TRequestId GetRequestId() const override;
@@ -81,7 +83,6 @@ protected:
         bool mutating);
 
     NRpc::NProto::TRequestHeader Header_;
-    std::vector<TSharedRef> Attachments_;
 
     virtual TSharedRef SerializeBody() const = 0;
 };
@@ -117,7 +118,13 @@ public:
 protected:
     TSharedRef SerializeBody() const override
     {
-        return SerializeProtoToRefWithEnvelope(*this);
+        // COPMAT(danilalexeev): legacy RPC codecs
+        if (Header_.has_request_codec()) {
+            YT_VERIFY(Header_.request_codec() == NYT::ToProto<int>(NCompression::ECodec::None));
+            return SerializeProtoToRefWithCompression(*this);
+        } else {
+            return SerializeProtoToRefWithEnvelope(*this);
+        }
     }
 };
 
@@ -193,19 +200,12 @@ protected:
 // it would be TYPathBuf, but for now it breaks the advantages for CoW of the
 // TString. Rethink it if and when YT will try to use std::string or non-CoW
 // TString everywhere.
-#ifdef YT_USE_VANILLA_PROTOBUF
+using TYPathMaybeRef = std::conditional_t<IsArcadiaProtobuf, const TYPath&, TYPath>;
 
-TYPath GetRequestTargetYPath(const NRpc::NProto::TRequestHeader& header);
-TYPath GetOriginalRequestTargetYPath(const NRpc::NProto::TRequestHeader& header);
+TYPathMaybeRef GetRequestTargetYPath(const NRpc::NProto::TRequestHeader& header);
+TYPathMaybeRef GetOriginalRequestTargetYPath(const NRpc::NProto::TRequestHeader& header);
 
-#else
-
-const TYPath& GetRequestTargetYPath(const NRpc::NProto::TRequestHeader& header);
-const TYPath& GetOriginalRequestTargetYPath(const NRpc::NProto::TRequestHeader& header);
-
-#endif
-
-void SetRequestTargetYPath(NRpc::NProto::TRequestHeader* header, TYPath path);
+void SetRequestTargetYPath(NRpc::NProto::TRequestHeader* header, TYPathBuf path);
 
 bool IsRequestMutating(const NRpc::NProto::TRequestHeader& header);
 

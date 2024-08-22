@@ -1202,7 +1202,7 @@ struct TRawMapReduceOperationSpec
 ///
 /// @brief Schema inference mode.
 ///
-/// @see https://ytsaurus.tech/docs/en/user-guide/storage/static_schema.html#schema_inference
+/// @see https://ytsaurus.tech/docs/en/user-guide/storage/static-schema.html#schema_inference
 enum class ESchemaInferenceMode : int
 {
     FromInput   /* "from_input" */,
@@ -1258,7 +1258,7 @@ struct TSortOperationSpec
     ///
     /// @brief Inference mode for output table schema.
     ///
-    /// @see https://ytsaurus.tech/docs/en/user-guide/storage/static_schema.html#schema_inference
+    /// @see https://ytsaurus.tech/docs/en/user-guide/storage/static-schema.html#schema_inference
     FLUENT_FIELD_OPTION(ESchemaInferenceMode, SchemaInferenceMode);
 
     ///
@@ -1332,7 +1332,7 @@ struct TMergeOperationSpec
     ///
     /// @brief Inference mode for output table schema.
     ///
-    /// @see https://ytsaurus.tech/docs/en/user-guide/storage/static_schema.html#schema_inference
+    /// @see https://ytsaurus.tech/docs/en/user-guide/storage/static-schema.html#schema_inference
     FLUENT_FIELD_OPTION(ESchemaInferenceMode, SchemaInferenceMode);
 };
 
@@ -1358,7 +1358,7 @@ struct TEraseOperationSpec
     ///
     /// @brief Inference mode for output table schema.
     ///
-    /// @see https://ytsaurus.tech/docs/en/user-guide/storage/static_schema.html#schema_inference
+    /// @see https://ytsaurus.tech/docs/en/user-guide/storage/static-schema.html#schema_inference
     FLUENT_FIELD_OPTION(ESchemaInferenceMode, SchemaInferenceMode);
 };
 
@@ -1392,7 +1392,7 @@ struct TRemoteCopyOperationSpec
     ///
     /// @brief Inference mode for output table schema.
     ///
-    /// @see https://ytsaurus.tech/docs/en/user-guide/storage/static_schema.html#schema_inference
+    /// @see https://ytsaurus.tech/docs/en/user-guide/storage/static-schema.html#schema_inference
     FLUENT_FIELD_OPTION(ESchemaInferenceMode, SchemaInferenceMode);
 
     ///
@@ -1990,6 +1990,19 @@ public:
     virtual void Load(IInputStream& stream) override { Load(&stream); } \
     Y_PASS_VA_ARGS(Y_SAVELOAD_DEFINE(__VA_ARGS__))
 
+///
+/// @brief Same as the macro above, but also calls Base class's SaveLoad methods.
+#define Y_SAVELOAD_JOB_DERIVED(Base, ...) \
+    virtual void Save(IOutputStream& stream) const override { \
+        Base::Save(stream); \
+        Save(&stream); \
+    } \
+    virtual void Load(IInputStream& stream) override { \
+        Base::Load(stream); \
+        Load(&stream); \
+    } \
+    Y_PASS_VA_ARGS(Y_SAVELOAD_DEFINE(__VA_ARGS__))
+
 ////////////////////////////////////////////////////////////////////////////////
 
 ///
@@ -2219,7 +2232,7 @@ private:
 ///
 /// @see https://ytsaurus.tech/docs/en/user-guide/data-processing/operations/vanilla
 class IVanillaJobBase
-   : public virtual IStructuredJob
+    : public virtual IStructuredJob
 {
 public:
     /// Type of job implemented by this class.
@@ -2828,6 +2841,10 @@ struct TListJobsOptions
     ///
     /// @brief Return only jobs whose fail context has been saved.
     FLUENT_FIELD_OPTION(bool, WithFailContext);
+
+    ///
+    /// @brief Return only jobs with monitoring descriptor.
+    FLUENT_FIELD_OPTION(bool, WithMonitoringDescriptor);
 
     /// @}
 

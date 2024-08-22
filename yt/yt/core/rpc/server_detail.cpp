@@ -12,6 +12,8 @@
 
 #include <yt/yt/core/misc/protobuf_helpers.h>
 
+#include <yt/yt/core/ytree/ypath_client.h>
+
 namespace NYT::NRpc {
 
 using namespace NConcurrency;
@@ -27,10 +29,14 @@ using NYT::FromProto;
 TServiceContextBase::TServiceContextBase(
     std::unique_ptr<TRequestHeader> header,
     TSharedRefArray requestMessage,
+    TMemoryUsageTrackerGuard memoryGuard,
+    IMemoryUsageTrackerPtr memoryUsageTracker,
     NLogging::TLogger logger,
     NLogging::ELogLevel logLevel)
     : RequestHeader_(std::move(header))
     , RequestMessage_(std::move(requestMessage))
+    , RequestMemoryGuard_(std::move(memoryGuard))
+    , MemoryUsageTracker_(std::move(memoryUsageTracker))
     , Logger(std::move(logger))
     , LogLevel_(logLevel)
 {
@@ -39,14 +45,18 @@ TServiceContextBase::TServiceContextBase(
 
 TServiceContextBase::TServiceContextBase(
     TSharedRefArray requestMessage,
+    TMemoryUsageTrackerGuard memoryGuard,
+    IMemoryUsageTrackerPtr memoryUsageTracker,
     NLogging::TLogger logger,
     NLogging::ELogLevel logLevel)
     : RequestHeader_(new TRequestHeader())
     , RequestMessage_(std::move(requestMessage))
+    , RequestMemoryGuard_(std::move(memoryGuard))
+    , MemoryUsageTracker_(std::move(memoryUsageTracker))
     , Logger(std::move(logger))
     , LogLevel_(logLevel)
 {
-    YT_VERIFY(ParseRequestHeader(RequestMessage_, RequestHeader_.get()));
+    YT_VERIFY(TryParseRequestHeader(RequestMessage_, RequestHeader_.get()));
     Initialize();
 }
 
@@ -67,6 +77,10 @@ void TServiceContextBase::Initialize()
     RequestAttachments_ = std::vector<TSharedRef>(
         RequestMessage_.Begin() + 2,
         RequestMessage_.End());
+    TotalSize_ = TypicalRequestSize +
+        GetMessageHeaderSize(RequestMessage_) +
+        GetMessageBodySize(RequestMessage_) +
+        GetTotalMessageAttachmentSize(RequestMessage_);
 }
 
 void TServiceContextBase::Reply(const TError& error)
@@ -97,6 +111,14 @@ void TServiceContextBase::Reply(const TSharedRefArray& responseMessage)
         ResponseAttachments_ = std::vector<TSharedRef>(
             responseMessage.Begin() + 2,
             responseMessage.End());
+
+        if (header.has_codec()) {
+            YT_VERIFY(TryEnumCast(header.codec(), &ResponseCodec_));
+            SetResponseBodySerializedWithCompression();
+        }
+        if (header.has_format()) {
+            RequestHeader_->set_response_format(header.format());
+        }
     } else {
         ResponseBody_.Reset();
         ResponseAttachments_.clear();
@@ -112,7 +134,7 @@ void TServiceContextBase::ReplyEpilogue()
         LoggingEnabled_ &&
         TDispatcher::Get()->ShouldAlertOnMissingRequestInfo())
     {
-        static const auto& Logger = RpcServerLogger;
+        static constexpr auto& Logger = RpcServerLogger;
         YT_LOG_ALERT("Missing request info (RequestId: %v, Method: %v.%v)",
             RequestId_,
             RequestHeader_->service(),
@@ -181,9 +203,14 @@ TSharedRefArray TServiceContextBase::BuildResponseMessage()
         header.set_format(RequestHeader_->response_format());
     }
 
-    // COMPAT(kiselyovp)
-    if (RequestHeader_->has_response_codec()) {
-        header.set_codec(static_cast<int>(ResponseCodec_));
+    // COMPAT(danilalexeev): legacy RPC codecs.
+    if (IsResponseBodySerializedWithCompression()) {
+        if (RequestHeader_->has_response_codec()) {
+            header.set_codec(static_cast<int>(ResponseCodec_));
+        } else {
+            ResponseBody_ = PushEnvelope(ResponseBody_, ResponseCodec_);
+            ResponseAttachments_ = DecompressAttachments(ResponseAttachments_, ResponseCodec_);
+        }
     }
 
     auto message = Error_.IsOK()
@@ -284,6 +311,11 @@ TSharedRefArray TServiceContextBase::GetRequestMessage() const
 TRequestId TServiceContextBase::GetRequestId() const
 {
     return RequestId_;
+}
+
+i64 TServiceContextBase::GetTotalSize() const
+{
+    return TotalSize_;
 }
 
 TBusNetworkStatistics TServiceContextBase::GetBusNetworkStatistics() const
@@ -437,6 +469,11 @@ void TServiceContextBase::SetRawResponseInfo(TString info, bool incremental)
     }
 }
 
+const IMemoryUsageTrackerPtr& TServiceContextBase::GetMemoryUsageTracker() const
+{
+    return MemoryUsageTracker_;
+}
+
 const NLogging::TLogger& TServiceContextBase::GetLogger() const
 {
     return Logger;
@@ -460,6 +497,16 @@ NCompression::ECodec TServiceContextBase::GetResponseCodec() const
 void TServiceContextBase::SetResponseCodec(NCompression::ECodec codec)
 {
     ResponseCodec_ = codec;
+}
+
+bool TServiceContextBase::IsResponseBodySerializedWithCompression() const
+{
+    return ResponseBodySerializedWithCompression_;
+}
+
+void TServiceContextBase::SetResponseBodySerializedWithCompression()
+{
+    ResponseBodySerializedWithCompression_ = true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -566,6 +613,11 @@ std::string TServiceContextWrapper::GetMethod() const
 TRealmId TServiceContextWrapper::GetRealmId() const
 {
     return UnderlyingContext_->GetRealmId();
+}
+
+i64 TServiceContextWrapper::GetTotalSize() const
+{
+    return UnderlyingContext_->GetTotalSize();
 }
 
 const TAuthenticationIdentity& TServiceContextWrapper::GetAuthenticationIdentity() const
@@ -701,6 +753,11 @@ void TServiceContextWrapper::SetRawResponseInfo(TString info, bool incremental)
     UnderlyingContext_->SetRawResponseInfo(std::move(info), incremental);
 }
 
+const IMemoryUsageTrackerPtr& TServiceContextWrapper::GetMemoryUsageTracker() const
+{
+    return UnderlyingContext_->GetMemoryUsageTracker();
+}
+
 const NLogging::TLogger& TServiceContextWrapper::GetLogger() const
 {
     return UnderlyingContext_->GetLogger();
@@ -726,6 +783,16 @@ void TServiceContextWrapper::SetResponseCodec(NCompression::ECodec codec)
     UnderlyingContext_->SetResponseCodec(codec);
 }
 
+bool TServiceContextWrapper::IsResponseBodySerializedWithCompression() const
+{
+    return UnderlyingContext_->IsResponseBodySerializedWithCompression();
+}
+
+void TServiceContextWrapper::SetResponseBodySerializedWithCompression()
+{
+    UnderlyingContext_->SetResponseBodySerializedWithCompression();
+}
+
 const IServiceContextPtr& TServiceContextWrapper::GetUnderlyingContext() const
 {
     return UnderlyingContext_;
@@ -743,12 +810,12 @@ void TServerBase::RegisterService(IServicePtr service)
         auto guard = WriterGuard(ServicesLock_);
         auto& serviceMap = RealmIdToServiceMap_[serviceId.RealmId];
         YT_VERIFY(serviceMap.emplace(serviceId.ServiceName, service).second);
-        if (Config_) {
-            auto it = Config_->Services.find(serviceId.ServiceName);
-            if (it != Config_->Services.end()) {
-                service->Configure(Config_, it->second);
+        if (AppliedConfig_) {
+            auto it = AppliedConfig_->Services.find(serviceId.ServiceName);
+            if (it != AppliedConfig_->Services.end()) {
+                service->Configure(AppliedConfig_, it->second);
             } else {
-                service->Configure(Config_, nullptr);
+                service->Configure(AppliedConfig_, nullptr);
             }
         }
         DoRegisterService(service);
@@ -841,24 +908,59 @@ IServicePtr TServerBase::GetServiceOrThrow(const TServiceId& serviceId) const
     return serviceIt->second;
 }
 
-void TServerBase::Configure(TServerConfigPtr config)
+void TServerBase::ApplyConfig()
 {
-    auto guard = WriterGuard(ServicesLock_);
+    VERIFY_SPINLOCK_AFFINITY(ServicesLock_);
 
-    // Future services will be configured appropriately.
-    Config_ = config;
+    auto newAppliedConfig = New<TServerConfig>();
+    newAppliedConfig->EnableErrorCodeCounter = DynamicConfig_->EnableErrorCodeCounter.value_or(StaticConfig_->EnableErrorCodeCounter);
+    newAppliedConfig->EnablePerUserProfiling = DynamicConfig_->EnablePerUserProfiling.value_or(StaticConfig_->EnablePerUserProfiling);
+    newAppliedConfig->TimeHistogram = DynamicConfig_->TimeHistogram.value_or(StaticConfig_->TimeHistogram);
+    newAppliedConfig->TracingMode = DynamicConfig_->TracingMode.value_or(StaticConfig_->TracingMode);
+    newAppliedConfig->Services = StaticConfig_->Services;
+
+    for (const auto& [name, node] : DynamicConfig_->Services) {
+        auto it = newAppliedConfig->Services.find(name);
+        if (it != newAppliedConfig->Services.end()) {
+            const auto& [_, staticConfigNode] = *it;
+            newAppliedConfig->Services[name] = NYTree::PatchNode(staticConfigNode, node);
+        } else {
+            newAppliedConfig->Services[name] = node;
+        }
+    }
+
+    AppliedConfig_ = newAppliedConfig;
 
     // Apply configuration to all existing services.
     for (const auto& [realmId, serviceMap] : RealmIdToServiceMap_) {
         for (const auto& [serviceName, service] : serviceMap) {
-            auto it = config->Services.find(serviceName);
-            if (it != config->Services.end()) {
-                service->Configure(config, it->second);
+            auto it = AppliedConfig_->Services.find(serviceName);
+            if (it != AppliedConfig_->Services.end()) {
+                service->Configure(AppliedConfig_, it->second);
             } else {
-                service->Configure(config, nullptr);
+                service->Configure(AppliedConfig_, nullptr);
             }
         }
     }
+}
+
+void TServerBase::Configure(const TServerConfigPtr& config)
+{
+    auto guard = WriterGuard(ServicesLock_);
+
+    // Future services will be configured appropriately.
+    StaticConfig_ = config;
+
+    ApplyConfig();
+}
+
+void TServerBase::OnDynamicConfigChanged(const TServerDynamicConfigPtr& config)
+{
+    auto guard = WriterGuard(ServicesLock_);
+
+    DynamicConfig_ = config;
+
+    ApplyConfig();
 }
 
 void TServerBase::Start()
@@ -879,7 +981,7 @@ TFuture<void> TServerBase::Stop(bool graceful)
     YT_LOG_INFO("Stopping RPC server (Graceful: %v)",
         graceful);
 
-    return DoStop(graceful).Apply(BIND([this, this_ = MakeStrong(this)] () {
+    return DoStop(graceful).Apply(BIND([this, this_ = MakeStrong(this)] {
         YT_LOG_INFO("RPC server stopped");
     }));
 }

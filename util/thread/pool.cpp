@@ -310,7 +310,7 @@ private:
     public:
         inline TAtforkQueueRestarter() {
 #if defined(_bionic_)
-//no pthread_atfork on android libc
+// no pthread_atfork on android libc
 #elif defined(_unix_)
             pthread_atfork(nullptr, nullptr, ProcessChildAction);
 #endif
@@ -431,7 +431,7 @@ public:
         , Free_(0)
         , IdleTime_(TDuration::Max())
     {
-        sprintf(Name_, "[mtp queue %ld]", ++MtpQueueCounter);
+        snprintf(Name_, sizeof(Name_), "[mtp queue %ld]", ++MtpQueueCounter);
     }
 
     inline ~TImpl() {

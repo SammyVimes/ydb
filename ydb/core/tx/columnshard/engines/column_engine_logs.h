@@ -3,14 +3,15 @@
 #include "defs.h"
 #include "column_engine.h"
 #include <ydb/core/tx/columnshard/common/scalars.h>
+#include <ydb/core/tx/columnshard/common/limits.h>
 #include <ydb/core/tx/columnshard/counters/engine_logs.h>
 #include <ydb/core/tx/columnshard/columnshard_ttl.h>
+
+#include "changes/actualization/controller/controller.h"
+
 #include "scheme/tier_info.h"
 #include "storage/granule.h"
 #include "storage/storage.h"
-#include "changes/indexation.h"
-#include "changes/ttl.h"
-#include "changes/with_appended.h"
 
 namespace NKikimr::NArrow {
 struct TSortDescription;
@@ -18,54 +19,18 @@ struct TSortDescription;
 
 namespace NKikimr::NOlap {
 
+class TCompactColumnEngineChanges;
+class TTTLColumnEngineChanges;
+class TChangesWithAppend;
+class TCompactColumnEngineChanges;
+class TCleanupPortionsColumnEngineChanges;
+class TCleanupTablesColumnEngineChanges;
+
+namespace NDataSharing {
+class TDestinationSession;
+}
+
 struct TReadMetadata;
-class TGranulesTable;
-class TColumnsTable;
-class TCountersTable;
-
-class TEvictionsController {
-public:
-    class TTieringWithPathId {
-    private:
-        const ui64 PathId;
-        TTiering TieringInfo;
-    public:
-        TTieringWithPathId(const ui64 pathId, TTiering&& tieringInfo)
-            : PathId(pathId)
-            , TieringInfo(std::move(tieringInfo))
-        {
-
-        }
-
-        ui64 GetPathId() const {
-            return PathId;
-        }
-
-        const TTiering& GetTieringInfo() const {
-            return TieringInfo;
-        }
-    };
-private:
-    THashMap<ui64, TTiering> OriginalTierings;
-    std::map<TMonotonic, std::vector<TTieringWithPathId>> NextCheckInstantForTierings;
-
-    std::map<TMonotonic, std::vector<TTieringWithPathId>> BuildNextInstantCheckers(THashMap<ui64, TTiering>&& info) {
-        std::map<TMonotonic, std::vector<TTieringWithPathId>> result;
-        std::vector<TTieringWithPathId> newTasks;
-        for (auto&& i : info) {
-            newTasks.emplace_back(i.first, std::move(i.second));
-        }
-        result.emplace(TMonotonic::Zero(), std::move(newTasks));
-        return result;
-    }
-public:
-    std::map<TMonotonic, std::vector<TTieringWithPathId>>& MutableNextCheckInstantForTierings() {
-        return NextCheckInstantForTierings;
-    }
-
-    void RefreshTierings(std::optional<THashMap<ui64, TTiering>>&& tierings, const NColumnShard::TTtl& ttl);
-};
-
 
 /// Engine with 2 tables:
 /// - Granules: PK -> granules (use part of PK)
@@ -77,27 +42,27 @@ class TColumnEngineForLogs : public IColumnEngine {
     friend class TTTLColumnEngineChanges;
     friend class TChangesWithAppend;
     friend class TCompactColumnEngineChanges;
-    friend class TCleanupColumnEngineChanges;
+    friend class TCleanupPortionsColumnEngineChanges;
+    friend class TCleanupTablesColumnEngineChanges;
+    friend class NDataSharing::TDestinationSession;
+
 private:
+    bool ActualizationStarted = false;
     const NColumnShard::TEngineLogsCounters SignalCounters;
     std::shared_ptr<TGranulesStorage> GranulesStorage;
     std::shared_ptr<IStoragesManager> StoragesManager;
-    TEvictionsController EvictionsController;
-    class TTieringProcessContext {
-    public:
-        bool AllowEviction = true;
-        bool AllowDrop = true;
-        const TInstant Now;
-        const ui64 MaxEvictBytes;
-        std::shared_ptr<TTTLColumnEngineChanges> Changes;
-        std::map<ui64, TDuration> DurationsForced;
-        const THashSet<TPortionAddress>& BusyPortions;
-        TTieringProcessContext(const ui64 maxEvictBytes, std::shared_ptr<TTTLColumnEngineChanges> changes, const THashSet<TPortionAddress>& busyPortions);
-    };
 
-    TDuration ProcessTiering(const ui64 pathId, const TTiering& tiering, TTieringProcessContext& context) const;
-    bool DrainEvictionQueue(std::map<TMonotonic, std::vector<TEvictionsController::TTieringWithPathId>>& evictionsQueue, TTieringProcessContext& context) const;
+    std::shared_ptr<NActualizer::TController> ActualizationController;
+
 public:
+    const std::shared_ptr<NActualizer::TController>& GetActualizationController() const {
+        return ActualizationController;
+    }
+
+    ui64* GetLastPortionPointer() {
+        return &LastPortion;
+    }
+
     enum ETableIdx {
         GRANULES = 0,
     };
@@ -115,9 +80,14 @@ public:
         ADD,
     };
 
-    TColumnEngineForLogs(ui64 tabletId, const TCompactionLimits& limits, const std::shared_ptr<IStoragesManager>& storagesManager);
+    TColumnEngineForLogs(ui64 tabletId, const std::shared_ptr<IStoragesManager>& storagesManager, const TSnapshot& snapshot, const NKikimrSchemeOp::TColumnTableSchema& schema);
+    TColumnEngineForLogs(ui64 tabletId, const std::shared_ptr<IStoragesManager>& storagesManager, const TSnapshot& snapshot, TIndexInfo&& schema);
 
-    virtual void OnTieringModified(std::shared_ptr<NColumnShard::TTiersManager> manager, const NColumnShard::TTtl& ttl) override;
+    virtual void OnTieringModified(const std::shared_ptr<NColumnShard::TTiersManager>& manager, const NColumnShard::TTtl& ttl, const std::optional<ui64> pathId) override;
+
+    virtual std::shared_ptr<TVersionedIndex> CopyVersionedIndexPtr() const override {
+        return std::make_shared<TVersionedIndex>(VersionedIndex);
+    }
 
     const TVersionedIndex& GetVersionedIndex() const override {
         return VersionedIndex;
@@ -125,46 +95,51 @@ public:
 
     const TMap<ui64, std::shared_ptr<TColumnEngineStats>>& GetStats() const override;
     const TColumnEngineStats& GetTotalStats() override;
-    ui64 MemoryUsage() const override;
-    TSnapshot LastUpdate() const override { return LastSnapshot; }
+    TSnapshot LastUpdate() const override {
+        return LastSnapshot;
+    }
 
     virtual void DoRegisterTable(const ui64 pathId) override;
+
 public:
     bool Load(IDbWrapper& db) override;
 
+    virtual bool IsOverloadedByMetadata(const ui64 limit) const override {
+        return limit < TGranulesStat::GetSumMetadataMemoryPortionsSize();
+    }
+
     std::shared_ptr<TInsertColumnEngineChanges> StartInsert(std::vector<TInsertedData>&& dataToIndex) noexcept override;
-    std::shared_ptr<TColumnEngineChanges> StartCompaction(const TCompactionLimits& limits, const THashSet<TPortionAddress>& busyPortions) noexcept override;
-    std::shared_ptr<TCleanupColumnEngineChanges> StartCleanup(const TSnapshot& snapshot, THashSet<ui64>& pathsToDrop, ui32 maxRecords) noexcept override;
-    std::shared_ptr<TTTLColumnEngineChanges> StartTtl(const THashMap<ui64, TTiering>& pathEviction, const THashSet<TPortionAddress>& busyPortions,
-                                                   ui64 maxEvictBytes = TCompactionLimits::DEFAULT_EVICTION_BYTES) noexcept override;
+    std::shared_ptr<TColumnEngineChanges> StartCompaction(const std::shared_ptr<NDataLocks::TManager>& dataLocksManager) noexcept override;
+    std::shared_ptr<TCleanupPortionsColumnEngineChanges> StartCleanupPortions(const TSnapshot& snapshot, const THashSet<ui64>& pathsToDrop, const std::shared_ptr<NDataLocks::TManager>& dataLocksManager) noexcept override;
+    std::shared_ptr<TCleanupTablesColumnEngineChanges> StartCleanupTables(const THashSet<ui64>& pathsToDrop) noexcept override;
+    std::vector<std::shared_ptr<TTTLColumnEngineChanges>> StartTtl(const THashMap<ui64, TTiering>& pathEviction, const std::shared_ptr<NDataLocks::TManager>& locksManager, const ui64 memoryUsageLimit) noexcept override;
 
-    bool ApplyChanges(IDbWrapper& db, std::shared_ptr<TColumnEngineChanges> indexChanges,
-                      const TSnapshot& snapshot) noexcept override;
+    void ReturnToIndexes(const THashMap<ui64, THashSet<ui64>>& portions) const {
+        return GranulesStorage->ReturnToIndexes(portions);
+    }
+    virtual bool ApplyChangesOnTxCreate(std::shared_ptr<TColumnEngineChanges> indexChanges, const TSnapshot& snapshot) noexcept override;
+    virtual bool ApplyChangesOnExecute(IDbWrapper& db, std::shared_ptr<TColumnEngineChanges> indexChanges, const TSnapshot& snapshot) noexcept override;
 
-    void UpdateDefaultSchema(const TSnapshot& snapshot, TIndexInfo&& info) override;
+    void RegisterSchemaVersion(const TSnapshot& snapshot, TIndexInfo&& info) override;
+    void RegisterSchemaVersion(const TSnapshot& snapshot, const NKikimrSchemeOp::TColumnTableSchema& schema) override;
 
-
-
-    std::shared_ptr<TSelectInfo> Select(ui64 pathId, TSnapshot snapshot,
-                                        const TPKRangesFilter& pkRangesFilter) const override;
+    std::shared_ptr<TSelectInfo> Select(ui64 pathId, TSnapshot snapshot, const TPKRangesFilter& pkRangesFilter) const override;
 
     bool IsPortionExists(const ui64 pathId, const ui64 portionId) const {
-        auto it = Tables.find(pathId);
-        if (it == Tables.end()) {
+        return !!GranulesStorage->GetPortionOptional(pathId, portionId);
+    }
+
+    virtual bool ErasePathId(const ui64 pathId) override {
+        if (HasDataInPathId(pathId)) {
             return false;
         }
-        return !!it->second->GetPortionPtr(portionId);
+        return GranulesStorage->EraseTable(pathId);
     }
+
 
     virtual bool HasDataInPathId(const ui64 pathId) const override {
         auto g = GetGranuleOptional(pathId);
-        if (!g) {
-            return false;
-        }
-        if (g->GetPortions().size()) {
-            return false;
-        }
-        return true;
+        return g && g->GetPortions().size();
     }
 
     bool IsGranuleExists(const ui64 pathId) const {
@@ -172,9 +147,7 @@ public:
     }
 
     const TGranuleMeta& GetGranuleVerified(const ui64 pathId) const {
-        auto it = Tables.find(pathId);
-        AFL_VERIFY(it != Tables.end())("path_id", pathId)("count", Tables.size());
-        return *it->second;
+        return *GetGranulePtrVerified(pathId);
     }
 
     std::shared_ptr<TGranuleMeta> GetGranulePtrVerified(const ui64 pathId) const {
@@ -184,43 +157,44 @@ public:
     }
 
     std::shared_ptr<TGranuleMeta> GetGranuleOptional(const ui64 pathId) const {
-        auto it = Tables.find(pathId);
-        if (it == Tables.end()) {
-            return nullptr;
-        }
-        return it->second;
+        return GranulesStorage->GetGranuleOptional(pathId);
+    }
+
+    std::vector<std::shared_ptr<TGranuleMeta>> GetTables(const std::optional<ui64> pathIdFrom, const std::optional<ui64> pathIdTo) const {
+        return GranulesStorage->GetTables(pathIdFrom, pathIdTo);
     }
 
     ui64 GetTabletId() const {
         return TabletId;
     }
 
+    void AddCleanupPortion(const TPortionInfo& info) {
+        CleanupPortions[info.GetRemoveSnapshotVerified().GetPlanInstant()].emplace_back(info);
+    }
+    void AddShardingInfo(const TGranuleShardingInfo& shardingInfo) {
+        VersionedIndex.AddShardingInfo(shardingInfo);
+    }
+
 private:
     TVersionedIndex VersionedIndex;
     ui64 TabletId;
-    std::shared_ptr<TColumnsTable> ColumnsTable;
-    std::shared_ptr<TCountersTable> CountersTable;
-    THashMap<ui64, std::shared_ptr<TGranuleMeta>> Tables; // pathId into Granule that equal to Table
-    TMap<ui64, std::shared_ptr<TColumnEngineStats>> PathStats; // per path_id stats sorted by path_id
-    std::map<TSnapshot, std::vector<TPortionInfo>> CleanupPortions;
+    TMap<ui64, std::shared_ptr<TColumnEngineStats>> PathStats;   // per path_id stats sorted by path_id
+    std::map<TInstant, std::vector<TPortionInfo>> CleanupPortions;
     TColumnEngineStats Counters;
     ui64 LastPortion;
     ui64 LastGranule;
     TSnapshot LastSnapshot = TSnapshot::Zero();
     bool Loaded = false;
+
 private:
     bool LoadColumns(IDbWrapper& db);
+    bool LoadShardingInfo(IDbWrapper& db);
     bool LoadCounters(IDbWrapper& db);
-
-    void EraseTable(const ui64 pathId);
 
     void UpsertPortion(const TPortionInfo& portionInfo, const TPortionInfo* exInfo = nullptr);
     bool ErasePortion(const TPortionInfo& portionInfo, bool updateStats = true);
-    void UpdatePortionStats(const TPortionInfo& portionInfo, EStatsUpdateType updateType = EStatsUpdateType::DEFAULT,
-                            const TPortionInfo* exPortionInfo = nullptr);
-    void UpdatePortionStats(TColumnEngineStats& engineStats, const TPortionInfo& portionInfo,
-                            EStatsUpdateType updateType,
-                            const TPortionInfo* exPortionInfo = nullptr) const;
+    void UpdatePortionStats(const TPortionInfo& portionInfo, EStatsUpdateType updateType = EStatsUpdateType::DEFAULT, const TPortionInfo* exPortionInfo = nullptr);
+    void UpdatePortionStats(TColumnEngineStats& engineStats, const TPortionInfo& portionInfo, EStatsUpdateType updateType, const TPortionInfo* exPortionInfo = nullptr) const;
 };
 
-} // namespace NKikimr::NOlap
+}   // namespace NKikimr::NOlap

@@ -24,7 +24,7 @@ namespace NSequenceProxy {
         TAllocateActor(const TActorId& owner, ui64 cookie, ui64 tabletId, const TPathId& pathId, ui64 cache)
             : Owner(owner)
             , Cookie(cookie)
-            , PipeCache(MakePipePeNodeCacheID(true))
+            , PipeCache(MakePipePerNodeCacheID(true))
             , TabletId(tabletId)
             , PathId(pathId)
             , Cache(cache)
@@ -142,6 +142,7 @@ namespace NSequenceProxy {
         auto& info = AllocateInFlight[cookie];
         info.Database = database;
         info.PathId = pathId;
+        Counters->SequenceShardAllocateCount->Collect(cache);
         Register(new TAllocateActor(SelfId(), cookie, tabletId, pathId, cache));
         return cookie;
     }

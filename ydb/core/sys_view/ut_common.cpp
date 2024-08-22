@@ -26,13 +26,15 @@ NKikimrSubDomains::TSubDomainSettings GetSubDomainDefaultSettings(const TString 
     return subdomain;
 }
 
-TTestEnv::TTestEnv(ui32 staticNodes, ui32 dynamicNodes, ui32 storagePools, ui32 pqTabletsN, bool enableSVP, bool disableSources) {
+TTestEnv::TTestEnv(ui32 staticNodes, ui32 dynamicNodes, ui32 storagePools, ui32 pqTabletsN, bool enableSVP) {
     auto mbusPort = PortManager.GetPort();
     auto grpcPort = PortManager.GetPort();
 
     TVector<NKikimrKqp::TKqpSetting> kqpSettings;
 
-    Settings = new Tests::TServerSettings(mbusPort);
+    NKikimrProto::TAuthConfig authConfig;
+    authConfig.SetUseBuiltinDomain(true);
+    Settings = new Tests::TServerSettings(mbusPort, authConfig);
     Settings->SetDomainName("Root");
     Settings->SetNodeCount(staticNodes);
     Settings->SetDynamicNodeCount(dynamicNodes);
@@ -41,18 +43,22 @@ TTestEnv::TTestEnv(ui32 staticNodes, ui32 dynamicNodes, ui32 storagePools, ui32 
     // in some tests we check data size, which depends on compaction,
     NKikimrConfig::TFeatureFlags featureFlags;
     featureFlags.SetEnableBackgroundCompaction(false);
+    featureFlags.SetEnableResourcePools(true);
     Settings->SetFeatureFlags(featureFlags);
 
     Settings->SetEnablePersistentQueryStats(enableSVP);
     Settings->SetEnableDbCounters(enableSVP);
+
+    NKikimrConfig::TAppConfig appConfig;
+    *appConfig.MutableFeatureFlags() = Settings->FeatureFlags;
+    Settings->SetAppConfig(appConfig);
 
     for (ui32 i : xrange(storagePools)) {
         TString poolName = Sprintf("test%d", i);
         Settings->AddStoragePool(poolName, TString("/Root:") + poolName, 2);
     }
 
-    Settings->AppConfig.MutableTableServiceConfig()->SetEnableKqpDataQuerySourceRead(!disableSources);
-    Settings->AppConfig.MutableHiveConfig()->AddBalancerIgnoreTabletTypes(NKikimrTabletBase::TTabletTypes::SysViewProcessor);
+    Settings->AppConfig->MutableHiveConfig()->AddBalancerIgnoreTabletTypes(NKikimrTabletBase::TTabletTypes::SysViewProcessor);
 
     Server = new Tests::TServer(*Settings);
     Server->EnableGRpc(grpcPort);

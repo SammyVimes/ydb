@@ -14,6 +14,8 @@
 #include <ydb/library/yql/minikql/invoke_builtins/mkql_builtins.h>
 #include <ydb/library/yql/utils/yql_panic.h>
 
+#include <library/cpp/testing/common/env.h>
+
 namespace NKikimr {
 namespace NKqp {
 
@@ -68,6 +70,7 @@ SIMPLE_MODULE(TTestUdfsModule, TTestFilter, TTestFilterTerminate, TRandString);
 NYql::NUdf::TUniquePtr<NYql::NUdf::IUdfModule> CreateJson2Module();
 NYql::NUdf::TUniquePtr<NYql::NUdf::IUdfModule> CreateRe2Module();
 NYql::NUdf::TUniquePtr<NYql::NUdf::IUdfModule> CreateStringModule();
+NYql::NUdf::TUniquePtr<NYql::NUdf::IUdfModule> CreateDateTime2Module();
 
 NMiniKQL::IFunctionRegistry* UdfFrFactory(const NScheme::TTypeRegistry& typeRegistry) {
     Y_UNUSED(typeRegistry);
@@ -76,6 +79,7 @@ NMiniKQL::IFunctionRegistry* UdfFrFactory(const NScheme::TTypeRegistry& typeRegi
     funcRegistry->AddModule("", "Json2", CreateJson2Module());
     funcRegistry->AddModule("", "Re2", CreateRe2Module());
     funcRegistry->AddModule("", "String", CreateStringModule());
+    funcRegistry->AddModule("", "DateTime", CreateDateTime2Module());
     NKikimr::NMiniKQL::FillStaticModules(*funcRegistry);
     return funcRegistry.Release();
 }
@@ -108,12 +112,15 @@ TKikimrRunner::TKikimrRunner(const TKikimrSettings& settings) {
 
     effectiveKqpSettings.insert(effectiveKqpSettings.end(), settings.KqpSettings.begin(), settings.KqpSettings.end());
 
-    ServerSettings.Reset(MakeHolder<Tests::TServerSettings>(mbusPort, NKikimrProto::TAuthConfig(), settings.PQConfig));
+    NKikimrProto::TAuthConfig authConfig;
+    authConfig.SetUseBuiltinDomain(true);
+    ServerSettings.Reset(MakeHolder<Tests::TServerSettings>(mbusPort, authConfig, settings.PQConfig));
     ServerSettings->SetDomainName(settings.DomainRoot);
     ServerSettings->SetKqpSettings(effectiveKqpSettings);
 
     NKikimrConfig::TAppConfig appConfig = settings.AppConfig;
     appConfig.MutableColumnShardConfig()->SetDisabledOnSchemeShard(false);
+    appConfig.MutableTableServiceConfig()->SetEnableRowsDuplicationCheck(true);
     ServerSettings->SetAppConfig(appConfig);
     ServerSettings->SetFeatureFlags(settings.FeatureFlags);
     ServerSettings->SetNodeCount(settings.NodeCount);
@@ -126,6 +133,7 @@ TKikimrRunner::TKikimrRunner(const TKikimrSettings& settings) {
     ServerSettings->SetEnableUniqConstraint(true);
     ServerSettings->SetUseRealThreads(settings.UseRealThreads);
     ServerSettings->SetEnableTablePgTypes(true);
+    ServerSettings->S3ActorsFactory = settings.S3ActorsFactory;
 
     if (settings.Storage) {
         ServerSettings->SetCustomDiskParams(*settings.Storage);
@@ -157,6 +165,8 @@ TKikimrRunner::TKikimrRunner(const TKikimrSettings& settings) {
         .SetDiscoveryMode(NYdb::EDiscoveryMode::Async)
         .SetAuthToken(settings.AuthToken);
     Driver.Reset(MakeHolder<NYdb::TDriver>(DriverConfig));
+
+    CountersRoot = settings.CountersRoot;
 
     Initialize(settings);
 }
@@ -440,30 +450,77 @@ void TKikimrRunner::CreateSampleTables() {
 
 }
 
+static TMaybe<NActors::NLog::EPriority> ParseLogLevel(const TString& level) {
+    static const THashMap<TString, NActors::NLog::EPriority> levels = {
+        { "TRACE", NActors::NLog::PRI_TRACE },
+        { "DEBUG", NActors::NLog::PRI_DEBUG },
+        { "INFO", NActors::NLog::PRI_INFO },
+        { "NOTICE", NActors::NLog::PRI_NOTICE },
+        { "WARN", NActors::NLog::PRI_WARN },
+        { "ERROR", NActors::NLog::PRI_ERROR },
+        { "CRIT", NActors::NLog::PRI_CRIT },
+        { "ALERT", NActors::NLog::PRI_ALERT },
+        { "EMERG", NActors::NLog::PRI_EMERG },
+    };
+
+    TString l = level;
+    l.to_upper();
+    const auto levelIt = levels.find(l);
+    if (levelIt != levels.end()) {
+        return levelIt->second;
+    } else {
+        Cerr << "Failed to parse test log level [" << level << "]" << Endl;
+        return Nothing();
+    }
+}
+
+void TKikimrRunner::SetupLogLevelFromTestParam(NKikimrServices::EServiceKikimr service) {
+    if (const TString paramForService = GetTestParam(TStringBuilder() << "KQP_LOG_" << NKikimrServices::EServiceKikimr_Name(service))) {
+        if (const TMaybe<NActors::NLog::EPriority> level = ParseLogLevel(paramForService)) {
+            Server->GetRuntime()->SetLogPriority(service, *level);
+            return;
+        }
+    }
+    if (const TString commonParam = GetTestParam("KQP_LOG")) {
+        if (const TMaybe<NActors::NLog::EPriority> level = ParseLogLevel(commonParam)) {
+            Server->GetRuntime()->SetLogPriority(service, *level);
+        }
+    }
+}
+
 void TKikimrRunner::Initialize(const TKikimrSettings& settings) {
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::FLAT_TX_SCHEMESHARD, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_YQL, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_YQL, NActors::NLog::PRI_INFO);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::TX_DATASHARD, NActors::NLog::PRI_TRACE);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::TX_COORDINATOR, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_COMPUTE, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_TASKS_RUNNER, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_EXECUTER, NActors::NLog::PRI_TRACE);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::TX_PROXY_SCHEME_CACHE, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::SCHEME_BOARD_REPLICA, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_WORKER, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_SESSION, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::TABLET_EXECUTOR, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_SLOW_LOG, NActors::NLog::PRI_TRACE);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_PROXY, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_COMPILE_SERVICE, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_COMPILE_ACTOR, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_COMPILE_REQUEST, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_GATEWAY, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::RPC_REQUEST, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_RESOURCE_MANAGER, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_NODE, NActors::NLog::PRI_DEBUG);
-    // Server->GetRuntime()->SetLogPriority(NKikimrServices::KQP_BLOBS_STORAGE, NActors::NLog::PRI_DEBUG);
+    // You can enable logging for these services in test using test option:
+    // `--test-param KQP_LOG=<level>`
+    // or `--test-param KQP_LOG_<service>=<level>`
+    // For example:
+    // --test-param KQP_LOG=TRACE
+    // --test-param KQP_LOG_FLAT_TX_SCHEMESHARD=debug
+    SetupLogLevelFromTestParam(NKikimrServices::FLAT_TX_SCHEMESHARD);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_YQL);
+    SetupLogLevelFromTestParam(NKikimrServices::TX_DATASHARD);
+    SetupLogLevelFromTestParam(NKikimrServices::TX_COORDINATOR);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_COMPUTE);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_TASKS_RUNNER);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_EXECUTER);
+    SetupLogLevelFromTestParam(NKikimrServices::TX_PROXY_SCHEME_CACHE);
+    SetupLogLevelFromTestParam(NKikimrServices::TX_PROXY);
+    SetupLogLevelFromTestParam(NKikimrServices::SCHEME_BOARD_REPLICA);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_WORKER);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_SESSION);
+    SetupLogLevelFromTestParam(NKikimrServices::TABLET_EXECUTOR);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_SLOW_LOG);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_PROXY);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_COMPILE_SERVICE);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_COMPILE_ACTOR);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_COMPILE_REQUEST);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_GATEWAY);
+    SetupLogLevelFromTestParam(NKikimrServices::RPC_REQUEST);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_RESOURCE_MANAGER);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_NODE);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_BLOBS_STORAGE);
+    SetupLogLevelFromTestParam(NKikimrServices::KQP_WORKLOAD_SERVICE);
+    SetupLogLevelFromTestParam(NKikimrServices::TX_COLUMNSHARD);
+    SetupLogLevelFromTestParam(NKikimrServices::LOCAL_PGWIRE);
 
     RunCall([this, domain = settings.DomainRoot]{
         this->Client->InitRootScheme(domain);
@@ -542,9 +599,9 @@ void PrintQueryStats(const TDataQueryResult& result) {
     }
 }
 
-void AssertTableStats(const TDataQueryResult& result, TStringBuf table, const TExpectedTableStats& expectedStats) {
-    auto stats = NYdb::TProtoAccessor::GetProto(*result.GetStats());
-
+void AssertTableStats(const Ydb::TableStats::QueryStats& stats, TStringBuf table,
+    const TExpectedTableStats& expectedStats)
+{
     ui64 actualReads = 0;
     ui64 actualUpdates = 0;
     ui64 actualDeletes = 0;
@@ -573,6 +630,11 @@ void AssertTableStats(const TDataQueryResult& result, TStringBuf table, const TE
         UNIT_ASSERT_EQUAL_C(*expectedStats.ExpectedDeletes, actualDeletes, "table: " << table
             << ", deletes expected " << *expectedStats.ExpectedDeletes << ", actual " << actualDeletes);
     }
+}
+
+void AssertTableStats(const TDataQueryResult& result, TStringBuf table, const TExpectedTableStats& expectedStats) {
+    auto stats = NYdb::TProtoAccessor::GetProto(*result.GetStats());
+    return AssertTableStats(stats, table, expectedStats);
 }
 
 TDataQueryResult ExecQueryAndTestResult(TSession& session, const TString& query, const NYdb::TParams& params,
@@ -765,8 +827,6 @@ TString StreamResultToYson(NYdb::NTable::TTablePartIterator& it, bool throwOnTim
     NYson::TYsonWriter writer(&out, NYson::EYsonFormat::Text, ::NYson::EYsonType::Node, true);
     writer.OnBeginList();
 
-    ui32 profileIndex = 0;
-
     for (;;) {
         auto streamPart = it.ReadNext().GetValueSync();
         if (!streamPart.IsSuccess()) {
@@ -783,8 +843,6 @@ TString StreamResultToYson(NYdb::NTable::TTablePartIterator& it, bool throwOnTim
 
         auto resultSet = streamPart.ExtractPart();
         PrintResultSet(resultSet, writer);
-
-        profileIndex++;
     }
 
     writer.OnEndList();
@@ -858,7 +916,16 @@ static void FillPlan(const NYdb::NScripting::TYqlResultPart& streamPart, TCollec
     }
 }
 
-static void FillPlan(const NYdb::NQuery::TExecuteQueryPart& /*streamPart*/, TCollectedStreamResult& /*res*/) {}
+static void FillPlan(const NYdb::NQuery::TExecuteQueryPart& streamPart, TCollectedStreamResult& res) {
+    if (streamPart.GetStats() ) {
+        res.QueryStats = NYdb::TProtoAccessor::GetProto(*streamPart.GetStats());
+
+        auto plan = res.QueryStats->query_plan();
+        if (!plan.empty()) {
+            res.PlanJson = plan;
+        }
+    }
+}
 
 template<typename TIterator>
 TCollectedStreamResult CollectStreamResultImpl(TIterator& it) {
@@ -1110,7 +1177,7 @@ std::vector<NJson::TJsonValue> FindPlanNodes(const NJson::TJsonValue& plan, cons
 
 std::vector<NJson::TJsonValue> FindPlanStages(const NJson::TJsonValue& plan) {
     std::vector<NJson::TJsonValue> stages;
-    FindPlanStagesImpl(plan, stages);
+    FindPlanStagesImpl(plan.GetMapSafe().at("Plan"), stages);    
     return stages;
 }
 
@@ -1223,7 +1290,6 @@ THolder<NSchemeCache::TSchemeCacheNavigate> Navigate(TTestActorRuntime& runtime,
 {
     auto &runtime = *server->GetRuntime();
     TAutoPtr<IEventHandle> handle;
-    TVector<ui64> shards;
 
     auto request = MakeHolder<TEvTxUserProxy::TEvNavigate>();
     request->Record.MutableDescribePath()->SetPath(path);
@@ -1246,6 +1312,18 @@ TVector<ui64> GetTableShards(Tests::TServer* server,
     return shards;
 }
 
+TVector<ui64> GetColumnTableShards(Tests::TServer* server,
+                                   TActorId sender,
+                                   const TString &path)
+{
+    TVector<ui64> shards;
+    auto lsResult = DescribeTable(server, sender, path);
+    for (auto &part : lsResult.GetPathDescription().GetColumnTableDescription().GetSharding().GetColumnShards())
+        shards.push_back(part);
+
+    return shards;
+}
+
 TVector<ui64> GetTableShards(Tests::TServer::TPtr server,
                                 TActorId sender,
                                 const TString &path) {
@@ -1260,6 +1338,96 @@ void WaitForZeroSessions(const NKqp::TKqpCounters& counters) {
     }
 
     UNIT_ASSERT_C(count, "Unable to wait for proper active session count, it looks like cancelation doesn`t work");
+}
+
+NJson::TJsonValue SimplifyPlan(NJson::TJsonValue& opt) {
+    if (auto ops = opt.GetMapSafe().find("Operators"); ops != opt.GetMapSafe().end()) {
+        auto opName = ops->second.GetArraySafe()[0].GetMapSafe().at("Name").GetStringSafe();
+        if (opName.find("Join") != TString::npos || opName.find("Union") != TString::npos ) {
+            NJson::TJsonValue newChildren;
+
+            for (auto c : opt.GetMapSafe().at("Plans").GetArraySafe()) {
+                newChildren.AppendValue(SimplifyPlan(c));
+            }
+
+            opt["Plans"] = newChildren;
+            return opt;
+        }
+        else if (opName.find("Table") != TString::npos ) {
+            return opt;
+        }
+    }
+
+    auto firstPlan = opt.GetMapSafe().at("Plans").GetArraySafe()[0];
+    return SimplifyPlan(firstPlan);
+}
+
+bool JoinOrderAndAlgosMatch(const NJson::TJsonValue& opt, const NJson::TJsonValue& ref) {
+    auto op = opt.GetMapSafe().at("Operators").GetArraySafe()[0];
+    if (op.GetMapSafe().at("Name").GetStringSafe() != ref.GetMapSafe().at("op_name").GetStringSafe()) {
+        return false;
+    }
+
+    auto refMap = ref.GetMapSafe();
+    if (auto args = refMap.find("args"); args != refMap.end()){
+        if (!opt.GetMapSafe().contains("Plans")){
+            return false;
+        }
+        auto subplans = opt.GetMapSafe().at("Plans").GetArraySafe();
+        if (args->second.GetArraySafe().size() != subplans.size()) {
+            return false;
+        }
+        for (size_t i=0; i<subplans.size(); i++) {
+            if (!JoinOrderAndAlgosMatch(subplans[i],args->second.GetArraySafe()[i])) {
+                return false;
+            }
+        }
+        return true;
+    } else {
+        if (!op.GetMapSafe().contains("Table")) {
+            return false;
+        }
+        return op.GetMapSafe().at("Table").GetStringSafe() == refMap.at("table").GetStringSafe();
+    }
+}
+
+bool JoinOrderAndAlgosMatch(const TString& optimized, const TString& reference){
+    NJson::TJsonValue optRoot;
+    NJson::ReadJsonTree(optimized, &optRoot, true);
+    optRoot = SimplifyPlan(optRoot.GetMapSafe().at("SimplifiedPlan"));
+    
+    NJson::TJsonValue refRoot;
+    NJson::ReadJsonTree(reference, &refRoot, true);
+
+    return JoinOrderAndAlgosMatch(optRoot, refRoot);
+}
+
+/* Temporary solution to canonize tests */
+NJson::TJsonValue CanonizeJoinOrderImpl(const NJson::TJsonValue& opt) {
+    NJson::TJsonValue res;
+
+    auto op = opt.GetMapSafe().at("Operators").GetArraySafe()[0];
+    res["op_name"] = op.GetMapSafe().at("Name").GetStringSafe();
+
+
+    if (!opt.GetMapSafe().contains("Plans")) {
+        res["table"] = op.GetMapSafe().at("Table").GetStringSafe();
+        return res;
+    }
+    
+    auto subplans = opt.GetMapSafe().at("Plans").GetArraySafe();
+    for (size_t i = 0; i< subplans.size(); ++i) {
+        res["args"].AppendValue(CanonizeJoinOrderImpl(subplans[i]));
+    }
+    return res;
+}
+
+/* Temporary solution to canonize tests */
+NJson::TJsonValue CanonizeJoinOrder(const TString& deserializedPlan) {
+    NJson::TJsonValue optRoot;
+    NJson::ReadJsonTree(deserializedPlan, &optRoot, true);
+    optRoot = SimplifyPlan(optRoot.GetMapSafe().at("SimplifiedPlan"));
+    return CanonizeJoinOrderImpl(SimplifyPlan(optRoot));
 }
 
 } // namspace NKqp

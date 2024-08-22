@@ -2,6 +2,8 @@
 
 #include <ydb/core/base/path.h>
 #include <ydb/core/protos/flat_scheme_op.pb.h>
+#include <ydb/core/protos/subdomains.pb.h>
+#include <ydb/core/protos/index_builder.pb.h>
 #include <ydb/library/aclib/aclib.h>
 
 #include <util/string/builder.h>
@@ -38,6 +40,8 @@ TString DefineUserOperationName(const NKikimrSchemeOp::TModifyScheme& tx) {
                 return "ADD GROUP MEMBERSHIP";
             case NKikimrSchemeOp::TAlterLogin::kRemoveGroupMembership:
                 return "REMOVE GROUP MEMBERSHIP";
+            case NKikimrSchemeOp::TAlterLogin::kRenameGroup:
+                return "RENAME GROUP";
             case NKikimrSchemeOp::TAlterLogin::kRemoveGroup:
                 return "REMOVE GROUP";
             default:
@@ -72,10 +76,6 @@ TString DefineUserOperationName(const NKikimrSchemeOp::TModifyScheme& tx) {
         return "ALTER PERSISTENT QUEUE";
     case NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup:
         return "DROP PERSISTENT QUEUE";
-    case NKikimrSchemeOp::EOperationType::ESchemeOpAllocatePersQueueGroup:
-        return "ALLOCATE PERSISTENT QUEUE";
-    case NKikimrSchemeOp::EOperationType::ESchemeOpDeallocatePersQueueGroup:
-        return "DEALLOCATE PERSISTENT QUEUE";
     // database
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateSubDomain:
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateExtSubDomain:
@@ -199,6 +199,8 @@ TString DefineUserOperationName(const NKikimrSchemeOp::TModifyScheme& tx) {
         return "ALTER REPLICATION";
     case NKikimrSchemeOp::EOperationType::ESchemeOpDropReplication:
         return "DROP REPLICATION";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropReplicationCascade:
+        return "DROP REPLICATION CASCADE";
     // blob depot
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateBlobDepot:
         return "CREATE BLOB DEPOT";
@@ -220,6 +222,29 @@ TString DefineUserOperationName(const NKikimrSchemeOp::TModifyScheme& tx) {
         return "ALTER EXTERNAL DATA SOURCE";
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateColumnBuild:
         return "ALTER TABLE ADD COLUMN DEFAULT";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateView:
+        return "CREATE VIEW";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpAlterView:
+        return "ALTER VIEW";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropView:
+        return "DROP VIEW";
+    // continuous backup
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateContinuousBackup:
+        return "ALTER TABLE ADD CONTINUOUS BACKUP";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpAlterContinuousBackup:
+        return "ALTER TABLE ALTER CONTINUOUS BACKUP";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropContinuousBackup:
+        return "ALTER TABLE DROP CONTINUOUS BACKUP";
+    // resource pool
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateResourcePool:
+        return "CREATE RESOURCE POOL";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropResourcePool:
+        return "DROP RESOURCE POOL";
+    case NKikimrSchemeOp::EOperationType::ESchemeOpAlterResourcePool:
+        return "ALTER RESOURCE POOL";
+    // incremental backup
+    case NKikimrSchemeOp::EOperationType::ESchemeOpRestoreIncrementalBackup:
+        return "RESTORE";
     }
     Y_ABORT("switch should cover all operation types");
 }
@@ -237,17 +262,11 @@ TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) 
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreatePersQueueGroup:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreatePersQueueGroup().GetName()}));
         break;
-    case NKikimrSchemeOp::EOperationType::ESchemeOpAllocatePersQueueGroup:
-        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetAllocatePersQueueGroup().GetName()}));
-        break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpDropTable:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetDrop().GetName()}));
         break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetDrop().GetName()}));
-        break;
-    case NKikimrSchemeOp::EOperationType::ESchemeOpDeallocatePersQueueGroup:
-        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetDeallocatePersQueueGroup().GetName()}));
         break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpAlterTable:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetAlterTable().GetName()}));
@@ -466,6 +485,7 @@ TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) 
     case NKikimrSchemeOp::EOperationType::ESchemeOpAlterReplication:
         break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpDropReplication:
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropReplicationCascade:
         result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetDrop().GetName()}));
         break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateBlobDepot:
@@ -499,6 +519,39 @@ TVector<TString> ExtractChangingPaths(const NKikimrSchemeOp::TModifyScheme& tx) 
         break;
     case NKikimrSchemeOp::EOperationType::ESchemeOpCreateColumnBuild:
         result.emplace_back(tx.GetInitiateColumnBuild().GetTable());
+        break;
+
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateView:
+        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreateView().GetName()}));
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropView:
+        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetDrop().GetName()}));
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpAlterView:
+        // TODO: implement
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateContinuousBackup:
+        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetCreateContinuousBackup().GetTableName()}));
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpAlterContinuousBackup:
+        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetAlterContinuousBackup().GetTableName()}));
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropContinuousBackup:
+        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetDropContinuousBackup().GetTableName()}));
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpCreateResourcePool:
+        result.emplace_back(tx.GetCreateResourcePool().GetName());
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpDropResourcePool:
+        result.emplace_back(tx.GetDrop().GetName());
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpAlterResourcePool:
+        result.emplace_back(tx.GetCreateResourcePool().GetName());
+        break;
+    case NKikimrSchemeOp::EOperationType::ESchemeOpRestoreIncrementalBackup:
+        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetRestoreIncrementalBackup().GetSrcTableName()}));
+        result.emplace_back(NKikimr::JoinPath({tx.GetWorkingDir(), tx.GetRestoreIncrementalBackup().GetDstTableName()}));
+        break;
     }
 
     return result;
@@ -594,6 +647,9 @@ TChangeLogin ExtractLoginChange(const NKikimrSchemeOp::TModifyScheme& tx) {
                 result.LoginGroup = tx.GetAlterLogin().GetRemoveGroupMembership().GetGroup();
                 result.LoginMember = tx.GetAlterLogin().GetRemoveGroupMembership().GetMember();
                 break;
+            case NKikimrSchemeOp::TAlterLogin::kRenameGroup:
+                result.LoginGroup = tx.GetAlterLogin().GetRenameGroup().GetGroup();
+                break;
             case NKikimrSchemeOp::TAlterLogin::kRemoveGroup:
                 result.LoginGroup = tx.GetAlterLogin().GetRemoveGroup().GetGroup();
                 break;
@@ -613,7 +669,7 @@ TAuditLogFragment MakeAuditLogFragment(const NKikimrSchemeOp::TModifyScheme& tx)
     auto [aclAdd, aclRemove] = ExtractACLChange(tx);
     auto [userAttrsAdd, userAttrsRemove] = ExtractUserAttrChange(tx);
     auto [loginUser, loginGroup, loginMember] = ExtractLoginChange(tx);
-    
+
     return {
         .Operation = DefineUserOperationName(tx),
         .Paths = ExtractChangingPaths(tx),

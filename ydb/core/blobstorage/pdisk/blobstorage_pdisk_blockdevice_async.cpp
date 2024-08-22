@@ -334,8 +334,8 @@ class TRealBlockDevice : public IBlockDevice {
     class TSharedCallback : public ICallback {
         ui64 NextPossibleNoop = 0;
         ui64 EndOffset = 0;
-        ui64 PrevEventGotAtCycle = HPNow();
-        ui64 PrevEstimationAtCycle = HPNow();
+        NHPTimer::STime PrevEventGotAtCycle = HPNow();
+        NHPTimer::STime PrevEstimationAtCycle = HPNow();
         ui64 PrevEstimatedCostNs = 0;
         ui64 PrevActualCostNs = 0;
 
@@ -366,34 +366,37 @@ class TRealBlockDevice : public IBlockDevice {
         void Exec(TAsyncIoOperationResult *event) {
             IAsyncIoOperation *op = event->Operation;
             // Add up the execution time of all the events
-            ui64 totalExecutionCycles = 0;
-            ui64 totalCostNs = 0;
-            ui64 eventGotAtCycle = HPNow();
+            NHPTimer::STime eventGotAtCycle = HPNow();
             AtomicSet(Device.Mon.LastDoneOperationTimestamp, eventGotAtCycle);
 
             TCompletionAction *completionAction = static_cast<TCompletionAction*>(op->GetCookie());
             FillCompletionAction(completionAction, op, event->Result);
+            completionAction->GetTime = eventGotAtCycle;
+            LWTRACK(PDiskDeviceGetFromDevice, completionAction->Orbit);
+            if (completionAction->FlushAction) {
+                completionAction->FlushAction->GetTime = eventGotAtCycle;
+                LWTRACK(PDiskDeviceGetFromDevice, completionAction->FlushAction->Orbit);
+            }
 
             Device.QuitCounter.Decrement();
             Device.IdleCounter.Decrement();
             Device.FlightControl.MarkComplete(completionAction->OperationIdx);
 
-            ui64 startCycle = Max((ui64)completionAction->SubmitTime, PrevEventGotAtCycle);
-            ui64 durationCycles = (eventGotAtCycle > startCycle) ? eventGotAtCycle - startCycle : 0;
-            totalExecutionCycles = Max(totalExecutionCycles, durationCycles);
-            totalCostNs += completionAction->CostNs;
+            NHPTimer::STime startCycle = Max(completionAction->SubmitTime, (i64)PrevEventGotAtCycle);
+            NHPTimer::STime durationCycles = (eventGotAtCycle > startCycle) ? eventGotAtCycle - startCycle : 0;
+            NHPTimer::STime totalExecutionCycles = durationCycles;
+            NHPTimer::STime totalCostNs = completionAction->CostNs;
 
-            bool isSeekExpected =
-                ((ui64)completionAction->SubmitTime + Device.SeekCostNs / 25ull >= PrevEventGotAtCycle);
+            bool isSeekExpected = (completionAction->SubmitTime + (NHPTimer::STime)Device.SeekCostNs / 25ll >= PrevEventGotAtCycle);
 
             const ui64 opSize = op->GetSize();
             Device.DecrementMonInFlight(op->GetType(), opSize);
-            if (opSize == 0) {
+            if (opSize == 0) { // Special case for flush operation, which is a read operation with 0 bytes size
                 if (op->GetType() == IAsyncIoOperation::EType::PRead) {
                     Y_ABORT_UNLESS(WaitingNoops[completionAction->OperationIdx % MaxWaitingNoops] == nullptr);
                     WaitingNoops[completionAction->OperationIdx % MaxWaitingNoops] = completionAction;
                 } else {
-                    Y_DEBUG_ABORT_UNLESS(false, "Threre must not be writes of size 0 in TRealBlockDevice");
+                    Y_DEBUG_ABORT("Threre must not be writes of size 0 in TRealBlockDevice");
                 }
             } else {
                 if ((ui64)op->GetOffset() != EndOffset) {
@@ -401,16 +404,15 @@ class TRealBlockDevice : public IBlockDevice {
                 }
                 EndOffset = op->GetOffset() + opSize;
 
-                ui64 duration = HPNow() - completionAction->SubmitTime;
-                ui64 durationMs = HPMilliSecondsFloat(duration);
+                double duration = HPMilliSecondsFloat(HPNow() - completionAction->SubmitTime);
                 if (op->GetType() == IAsyncIoOperation::EType::PRead) {
                     NSan::Unpoison(op->GetData(), opSize);
                     REQUEST_VALGRIND_MAKE_MEM_DEFINED(op->GetData(), opSize);
-                    Device.Mon.DeviceReadDuration.Increment(durationMs);
-                    LWPROBE(PDiskDeviceReadDuration, Device.GetPDiskId(), HPMilliSecondsFloat(duration), opSize);
+                    Device.Mon.DeviceReadDuration.Increment(duration);
+                    LWPROBE(PDiskDeviceReadDuration, Device.GetPDiskId(), duration, opSize);
                 } else {
-                    Device.Mon.DeviceWriteDuration.Increment(durationMs);
-                    LWPROBE(PDiskDeviceWriteDuration, Device.GetPDiskId(), HPMilliSecondsFloat(duration), opSize);
+                    Device.Mon.DeviceWriteDuration.Increment(duration);
+                    LWPROBE(PDiskDeviceWriteDuration, Device.GetPDiskId(), duration, opSize);
                 }
                 if (completionAction->FlushAction) {
                     ui64 idx = completionAction->FlushAction->OperationIdx;
@@ -433,6 +435,9 @@ class TRealBlockDevice : public IBlockDevice {
             while (NextPossibleNoop < firstIncompleteIdx) {
                 ui64 i = NextPossibleNoop % MaxWaitingNoops;
                 if (WaitingNoops[i] && WaitingNoops[i]->OperationIdx == NextPossibleNoop) {
+                    LWTRACK(PDiskDeviceGetFromWaiting, WaitingNoops[i]->Orbit);
+                    double durationMs = HPMilliSecondsFloat(HPNow() - WaitingNoops[i]->GetTime);
+                    Device.Mon.DeviceFlushDuration.Increment(durationMs);
                     Device.CompletionThread->Schedule(WaitingNoops[i]);
                     WaitingNoops[i] = nullptr;
                 }
@@ -668,8 +673,8 @@ class TRealBlockDevice : public IBlockDevice {
                             Device.IsTrimEnabled = Device.IoContext->DoTrim(op);
                             NHPTimer::STime endTime = HPNow();
                             Device.IdleCounter.Decrement();
-                            const ui64 durationUs = HPMicroSeconds(endTime - beginTime);
-                            Device.Mon.DeviceTrimDuration.Increment(durationUs);
+                            const double duration = HPMilliSecondsFloat(endTime - beginTime);
+                            Device.Mon.DeviceTrimDuration.Increment(duration);
                             *Device.Mon.DeviceEstimatedCostNs += completion->CostNs;
                             if (Device.ActorSystem && Device.IsTrimEnabled) {
                                 LOG_DEBUG_S(*Device.ActorSystem, NKikimrServices::BS_DEVICE,
@@ -680,7 +685,7 @@ class TRealBlockDevice : public IBlockDevice {
                                         << "\" offset# " << op->GetOffset()
                                         << " size# " << op->GetSize());
                                 LWPROBE(PDiskDeviceTrimDuration, Device.GetPDiskId(),
-                                        HPMilliSecondsFloat(endTime - beginTime), op->GetOffset());
+                                        duration, op->GetOffset());
                             }
                         }
                         completion->SetResult(EIoResult::Ok);
@@ -1053,7 +1058,8 @@ protected:
             if (DriveData = ::NKikimr::NPDisk::GetDriveData(Path, &details)) {
                 if (ActorSystem) {
                     LOG_NOTICE_S(*ActorSystem, NKikimrServices::BS_PDISK, "PDiskId# " << PDiskId
-                            << " Gathered DriveData, data# " << DriveData->ToString(false));
+                            << " Gathered DriveData, data# " << DriveData->ToString(false)
+                            << " Details# " << details.Str());
                 }
             } else {
                 if (ActorSystem) {
@@ -1155,6 +1161,7 @@ class TCachedBlockDevice : public TRealBlockDevice {
         ui32 Size;
         ui64 Offset;
         TReqId ReqId;
+
     public:
         TCachedReadCompletion(TCachedBlockDevice &cachedBlockDevice, void *data, ui32 size, ui64 offset, TReqId reqId)
             : CachedBlockDevice(cachedBlockDevice)
@@ -1225,7 +1232,7 @@ class TCachedBlockDevice : public TRealBlockDevice {
     TMutex CacheMutex;
     TLogCache Cache; // cache records MUST NOT cross chunk boundaries
     TMultiMap<ui64, TRead> ReadsForOffset;
-    TMap<ui64, TCachedReadCompletion*> CurrentReads;
+    TMap<ui64, std::shared_ptr<TCachedReadCompletion>> CurrentReads;
     ui64 ReadsInFly;
     TPDisk * const PDisk;
 
@@ -1256,11 +1263,9 @@ class TCachedBlockDevice : public TRealBlockDevice {
             TRead &read = it->second;
             auto currentIt = CurrentReads.find(read.Offset);
             if (currentIt == CurrentReads.end()) {
-                TCachedReadCompletion *ptr = new TCachedReadCompletion(*this, read.Data, read.Size, read.Offset,
-                        read.ReqId);
+                auto ptr = std::make_shared<TCachedReadCompletion>(*this, read.Data, read.Size, read.Offset, read.ReqId);
                 CurrentReads[read.Offset] = ptr;
-                ActorSystem->Send(PDiskActor, new TEvReadLogContinue(read.Data, read.Size, read.Offset,
-                            ptr, read.ReqId));
+                ActorSystem->Send(PDiskActor, new TEvReadLogContinue(read.Data, read.Size, read.Offset, ptr, read.ReqId));
                 ReadsInFly++;
                 if (ReadsInFly >= MaxReadsInFly) {
                     return;
@@ -1328,7 +1333,6 @@ public:
                     ReadsForOffset.erase(it);
                 }
             }
-            delete currentReadIt->second;
             CurrentReads.erase(currentReadIt);
             ReadsInFly--;
             UpdateReads();
@@ -1359,7 +1363,7 @@ public:
 
             for (auto it = range.first; it != range.second; ++it) {
                 TRead &read = it->second;
-                
+
                 Y_ABORT_UNLESS(read.CompletionAction);
 
                 read.CompletionAction->SetResult(completion->Result);
@@ -1369,7 +1373,6 @@ public:
 
         auto it = CurrentReads.find(completion->GetOffset());
         Y_ABORT_UNLESS(it != CurrentReads.end());
-        delete it->second;
         CurrentReads.erase(it);
         ReadsInFly--;
     }
@@ -1402,9 +1405,6 @@ public:
 
     void Stop() override {
         TRealBlockDevice::Stop();
-        for (auto it = CurrentReads.begin(); it != CurrentReads.end(); ++it) {
-            delete it->second;
-        }
         CurrentReads.clear();
         for (auto it = ReadsForOffset.begin(); it != ReadsForOffset.end(); ++it) {
             if (it->second.CompletionAction) {

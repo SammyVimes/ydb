@@ -2,6 +2,7 @@
 These are almost end-to-end tests. They create a Prompt, feed it with some
 input and check the result.
 """
+
 from __future__ import annotations
 
 from functools import partial
@@ -190,7 +191,7 @@ def test_emacs_cursor_movements():
 def test_emacs_kill_multiple_words_and_paste():
     # Using control-w twice should place both words on the clipboard.
     result, cli = _feed_cli_with_input(
-        "hello world test" "\x17\x17" "--\x19\x19\r"  # Twice c-w.  # Twice c-y.
+        "hello world test\x17\x17--\x19\x19\r"  # Twice c-w.  Twice c-y.
     )
     assert result.text == "hello --world testworld test"
     assert cli.clipboard.get_data().text == "world test"

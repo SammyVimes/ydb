@@ -4,6 +4,8 @@
 #include "unversioned_row.h"
 #include "versioned_row.h"
 
+#include <yt/yt/core/misc/memory_usage_tracker.h>
+
 #include <library/cpp/yt/memory/chunked_memory_pool.h>
 
 namespace NYT::NTableClient {
@@ -24,27 +26,27 @@ public:
     TRowBuffer(
         TRefCountedTypeCookie tagCookie,
         IMemoryChunkProviderPtr chunkProvider,
-        size_t startChunkSize = TChunkedMemoryPool::DefaultStartChunkSize)
-        : Pool_(
-            tagCookie,
-            std::move(chunkProvider),
-            startChunkSize)
-    { }
+        size_t startChunkSize = TChunkedMemoryPool::DefaultStartChunkSize,
+        IMemoryUsageTrackerPtr tracker = nullptr);
 
     template <class TTag = TDefaultRowBufferPoolTag>
     explicit TRowBuffer(
-        TTag = TDefaultRowBufferPoolTag(),
-        size_t startChunkSize = TChunkedMemoryPool::DefaultStartChunkSize)
-        : Pool_(
+        TTag /*tag*/ = TDefaultRowBufferPoolTag(),
+        size_t startChunkSize = TChunkedMemoryPool::DefaultStartChunkSize,
+        IMemoryUsageTrackerPtr tracker = nullptr)
+        : MemoryTracker_(std::move(tracker))
+        , Pool_(
             TTag(),
             startChunkSize)
     { }
 
     template <class TTag>
     TRowBuffer(
-        TTag,
-        IMemoryChunkProviderPtr chunkProvider)
-        : Pool_(
+        TTag /*tag*/,
+        IMemoryChunkProviderPtr chunkProvider,
+        IMemoryUsageTrackerPtr tracker = nullptr)
+        : MemoryTracker_(std::move(tracker))
+        , Pool_(
             GetRefCountedTypeCookie<TTag>(),
             std::move(chunkProvider))
     { }
@@ -81,8 +83,9 @@ public:
         const TTableSchema& tableSchema,
         int schemafulColumnCount,
         const TNameTableToSchemaIdMapping& idMapping,
-        std::vector<bool>* columnPresenceBuffer,
-        std::optional<TUnversionedValue> addend = std::nullopt);
+        bool validateDuplicateAndRequiredValueColumns,
+        bool preserveIds = false,
+        std::optional<TUnversionedValue> addend = {});
 
     //! Captures the row applying #idMapping to value ids.
     //! #idMapping must be identity for key columns.
@@ -91,7 +94,7 @@ public:
         TVersionedRow row,
         const TTableSchema& tableSchema,
         const TNameTableToSchemaIdMapping& idMapping,
-        std::vector<bool>* columnPresenceBuffer,
+        bool validateDuplicateAndRequiredValueColumns,
         bool allowMissingKeyColumns = false);
 
     i64 GetSize() const;
@@ -105,7 +108,12 @@ public:
     void Purge();
 
 private:
+    const IMemoryUsageTrackerPtr MemoryTracker_;
+
     TChunkedMemoryPool Pool_;
+    std::optional<TMemoryUsageTrackerGuard> MemoryGuard_;
+
+    void ValidateNoOverflow();
 };
 
 DEFINE_REFCOUNTED_TYPE(TRowBuffer)

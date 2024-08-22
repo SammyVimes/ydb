@@ -477,6 +477,10 @@ namespace {
                 if (!AddFileByUrl(pos, args, ctx)) {
                     return false;
                 }
+            } else if (name == "SetFileOption") {
+                if (!SetFileOption(pos, args, ctx)) {
+                    return false;
+                }
             } else if (name == "AddFolderByUrl") {
                 if (!AddFolderByUrl(pos, args, ctx)) {
                     return false;
@@ -539,6 +543,16 @@ namespace {
                     return false;
                 }
                 if (!TryFromString(args[0], ctx.RepeatTransformLimit)) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected integer, but got: " << args[0]));
+                    return false;
+                }
+            }
+            else if (name == "TypeAnnNodeRepeatLimit") {
+                if (args.size() != 1) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected 1 argument, but got " << args.size()));
+                    return false;
+                }
+                if (!TryFromString(args[0], ctx.TypeAnnNodeRepeatLimit)) {
                     ctx.AddError(TIssue(pos, TStringBuilder() << "Expected integer, but got: " << args[0]));
                     return false;
                 }
@@ -622,6 +636,16 @@ namespace {
                     return false;
                 }
             }
+            else if (name == "EvaluateParallelForLimit") {
+                if (args.size() != 1) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected 1 argument, but got " << args.size()));
+                    return false;
+                }
+                if (!TryFromString(args[0], Types.EvaluateParallelForLimit)) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected integer, but got: " << args[0]));
+                    return false;
+                }
+            }
             else if (name == "DisablePullUpFlatMapOverJoin" || name == "PullUpFlatMapOverJoin") {
                 if (args.size() != 0) {
                     ctx.AddError(TIssue(pos, TStringBuilder() << "Expected no arguments, but got " << args.size()));
@@ -629,6 +653,28 @@ namespace {
                 }
 
                 Types.PullUpFlatMapOverJoin = (name == "PullUpFlatMapOverJoin");
+            } else if (name == "DisableFilterPushdownOverJoinOptionalSide" || name == "FilterPushdownOverJoinOptionalSide") {
+                if (args.size() != 0) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected no arguments, but got " << args.size()));
+                    return false;
+                }
+
+                Types.FilterPushdownOverJoinOptionalSide = (name == "FilterPushdownOverJoinOptionalSide");
+            } else if (name == "RotateJoinTree") {
+                if (args.size() > 1) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected at most 1 argument, but got " << args.size()));
+                    return false;
+                }
+
+                bool res = true;
+                if (!args.empty()) {
+                    if (!TryFromString(args[0], res)) {
+                        ctx.AddError(TIssue(pos, TStringBuilder() << "Expected bool, but got: " << args[0]));
+                        return false;
+                    }
+                }
+
+                Types.RotateJoinTree = res;
             }
             else if (name == "SQL") {
                 if (args.size() > 1) {
@@ -884,7 +930,34 @@ namespace {
                     return false;
                 }
             }
-            else {
+            else if (name == "BlockEngine") {
+                if (args.size() != 1) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected at most 1 argument, but got " << args.size()));
+                    return false;
+                }
+
+                auto arg = TString{args[0]};
+                if (!TryFromString(arg, Types.BlockEngineMode)) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected `disable|auto|force', but got: " << args[0]));
+                    return false;
+                }
+            }
+            else if (name == "OptimizerFlags") {
+                for (auto& arg : args) {
+                    if (arg.empty()) {
+                        ctx.AddError(TIssue(pos, "Empty flags are not supported"));
+                        return false;
+                    }
+                    Types.OptimizerFlags.insert(to_lower(ToString(arg)));
+                }
+            }
+            else if (name == "_EnableStreamLookupJoin" || name == "DisableStreamLookupJoin") {
+                if (args.size() != 0) {
+                    ctx.AddError(TIssue(pos, TStringBuilder() << "Expected no arguments, but got " << args.size()));
+                    return false;
+                }
+                Types.StreamLookupJoin = name == "_EnableStreamLookupJoin";
+            } else {
                 ctx.AddError(TIssue(pos, TStringBuilder() << "Unsupported command: " << name));
                 return false;
             }
@@ -977,6 +1050,25 @@ namespace {
             }
 
             return AddFileByUrlImpl(args[0], args[1], token, pos, ctx);
+        }
+
+        bool SetFileOptionImpl(const TStringBuf alias, const TString& key, const TString& value, const TPosition& pos, TExprContext& ctx) {
+            const auto dataKey = TUserDataStorage::ComposeUserDataKey(alias);
+            const auto dataBlock = Types.UserDataStorage->FindUserDataBlock(dataKey);
+            if (!dataBlock) {
+                ctx.AddError(TIssue(pos, TStringBuilder() << "No such file '" << alias << "'"));
+                return false;
+            }
+            dataBlock->Options[key] = value;
+            return true;
+        }
+
+        bool SetFileOption(const TPosition& pos, const TVector<TStringBuf>& args, TExprContext& ctx) {
+            if (args.size() != 3) {
+                ctx.AddError(TIssue(pos, TStringBuilder() << "Expected 3 arguments, but got " << args.size()));
+                return false;
+            }
+            return SetFileOptionImpl(args[0], ToString(args[1]), ToString(args[2]), pos, ctx);
         }
 
         bool SetPackageVersion(const TPosition& pos, const TVector<TStringBuf>& args, TExprContext& ctx) {

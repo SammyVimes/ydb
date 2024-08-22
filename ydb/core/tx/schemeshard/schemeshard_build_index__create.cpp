@@ -4,6 +4,8 @@
 #include "schemeshard_impl.h"
 #include "schemeshard_utils.h"
 
+#include <ydb/core/ydb_convert/table_settings.h>
+
 namespace NKikimr::NSchemeShard {
 
 using namespace NTabletFlatExecutor;
@@ -161,8 +163,11 @@ public:
             buildInfo->BuildColumns.reserve(settings.column_build_operation().column_size());
             for(int i = 0; i < settings.column_build_operation().column_size(); i++) {
                 const auto& colInfo = settings.column_build_operation().column(i);
+                bool notNull = colInfo.HasNotNull() && colInfo.GetNotNull();
+                TString familyName = colInfo.HasFamily() ? colInfo.GetFamily() : "";
                 buildInfo->BuildColumns.push_back(
-                    TIndexBuildInfo::TColumnBuildInfo(colInfo.GetColumnName(), colInfo.default_from_literal()));
+                    TIndexBuildInfo::TColumnBuildInfo(
+                        colInfo.GetColumnName(), colInfo.default_from_literal(), notNull, familyName));
             }
         }
 
@@ -170,8 +175,6 @@ public:
         buildInfo->Limits.MaxBatchBytes = settings.max_batch_bytes();
         buildInfo->Limits.MaxShards = settings.max_shards_in_flight();
         buildInfo->Limits.MaxRetries = settings.max_retries_upload_batch();
-
-        Y_ABORT_UNLESS(buildInfo != nullptr);
 
         buildInfo->CreateSender = Request->Sender;
         buildInfo->SenderCookie = Request->Cookie;
@@ -211,7 +214,9 @@ private:
         }
 
         if (settings.has_index()) {
-            switch (settings.index().type_case()) {
+            const auto& index = settings.index();
+
+            switch (index.type_case()) {
             case Ydb::Table::TableIndex::TypeCase::kGlobalIndex:
                 buildInfo->IndexType = NKikimrSchemeOp::EIndexType::EIndexTypeGlobal;
                 break;
@@ -221,14 +226,26 @@ private:
             case Ydb::Table::TableIndex::TypeCase::kGlobalUniqueIndex:
                 explain = "unsupported index type to build";
                 return false;
+            case Ydb::Table::TableIndex::TypeCase::kGlobalVectorKmeansTreeIndex: {
+                buildInfo->IndexType = NKikimrSchemeOp::EIndexType::EIndexTypeGlobalVectorKmeansTree;
+                NKikimrSchemeOp::TVectorIndexKmeansTreeDescription vectorIndexKmeansTreeDescription;
+                *vectorIndexKmeansTreeDescription.MutableSettings() = index.global_vector_kmeans_tree_index().vector_settings();
+                buildInfo->SpecializedIndexDescription = vectorIndexKmeansTreeDescription;
+                break;
+            }
             case Ydb::Table::TableIndex::TypeCase::TYPE_NOT_SET:
                 explain = "invalid or unset index type";
                 return false;
             };
 
-            buildInfo->IndexName = settings.index().name();
-            buildInfo->IndexColumns.assign(settings.index().index_columns().begin(), settings.index().index_columns().end());
-            buildInfo->DataColumns.assign(settings.index().data_columns().begin(), settings.index().data_columns().end());
+            buildInfo->IndexName = index.name();
+            buildInfo->IndexColumns.assign(index.index_columns().begin(), index.index_columns().end());
+            buildInfo->DataColumns.assign(index.data_columns().begin(), index.data_columns().end());
+
+            Ydb::StatusIds::StatusCode status;
+            if (!FillIndexTablePartitioning(buildInfo->ImplTableDescriptions, index, status, explain)) {
+                return false;
+            } 
         }
         return true;
     }

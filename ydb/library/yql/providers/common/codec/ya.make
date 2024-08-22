@@ -15,13 +15,14 @@ SRCS(
 )
 
 PEERDIR(
-    ydb/library/yql/minikql/computation/llvm
+    ydb/library/yql/minikql/computation
     ydb/library/yql/parser/pg_wrapper/interface
     ydb/library/yql/providers/common/mkql
     library/cpp/yson/node
     library/cpp/yson
     library/cpp/json
     library/cpp/enumbitset
+    yt/yt/library/decimal
 )
 
 YQL_LAST_ABI_VERSION()

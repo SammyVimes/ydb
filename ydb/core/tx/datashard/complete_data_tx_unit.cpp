@@ -97,11 +97,11 @@ void TCompleteOperationUnit::CompleteOperation(TOperation::TPtr op,
     if (result) {
         result->Record.SetProposeLatency(duration.MilliSeconds());
 
-        DataShard.FillExecutionStats(op->GetExecutionProfile(), *result);
+        DataShard.FillExecutionStats(op->GetExecutionProfile(), *result->Record.MutableTxStats());
 
         if (!gSkipRepliesFailPoint.Check(DataShard.TabletID(), op->GetTxId())) {
             result->Orbit = std::move(op->Orbit);
-            DataShard.SendResult(ctx, result, op->GetTarget(), op->GetStep(), op->GetTxId());
+            DataShard.SendResult(ctx, result, op->GetTarget(), op->GetStep(), op->GetTxId(), op->GetTraceId());
         }
     }
 
@@ -122,7 +122,7 @@ void TCompleteOperationUnit::Complete(TOperation::TPtr op,
         DataShard.NotifySchemeshard(ctx, op->GetTxId());
 
     DataShard.EnqueueChangeRecords(std::move(op->ChangeRecords()));
-    DataShard.EmitHeartbeats(ctx);
+    DataShard.EmitHeartbeats();
 
     if (op->HasOutputData()) {
         const auto& outReadSets = op->OutReadSets();

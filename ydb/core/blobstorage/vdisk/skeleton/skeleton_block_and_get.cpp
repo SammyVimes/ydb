@@ -44,7 +44,7 @@ public:
             Request->Get()->Record.GetForceBlockTabletData().GetId(),
             Request->Get()->Record.GetForceBlockTabletData().GetGeneration(),
             VDiskIDFromVDiskID(Request->Get()->Record.GetVDiskID()),
-            Request->Get()->Record.GetMsgQoS().HasDeadlineSeconds() ? 
+            Request->Get()->Record.GetMsgQoS().HasDeadlineSeconds() ?
                 TInstant::Seconds(Request->Get()->Record.GetMsgQoS().GetDeadlineSeconds()) :
                 TInstant::Seconds(VBLOCK_DEFAULT_DEADLINE_SECONDS)
         );
@@ -80,7 +80,7 @@ public:
                     VDiskIncarnationGuid,
                     GInfo
                 );
-                SendVDiskResponse(TActivationContext::AsActorContext(), SenderId, response.release(), Request->Cookie);
+                SendVDiskResponse(TActivationContext::AsActorContext(), SenderId, response.release(), Request->Cookie, VCtx);
                 return PassAway();
             }
         }

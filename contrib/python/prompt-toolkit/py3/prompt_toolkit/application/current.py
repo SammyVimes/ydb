@@ -1,6 +1,5 @@
 from __future__ import annotations
 
-import sys
 from contextlib import contextmanager
 from contextvars import ContextVar
 from typing import TYPE_CHECKING, Any, Generator
@@ -145,18 +144,20 @@ def create_app_session(
     Create a separate AppSession.
 
     This is useful if there can be multiple individual `AppSession`s going on.
-    Like in the case of an Telnet/SSH server. This functionality uses
-    contextvars and requires at least Python 3.7.
+    Like in the case of an Telnet/SSH server.
     """
-    if sys.version_info <= (3, 6):
-        raise RuntimeError("Application sessions require Python 3.7.")
-
     # If no input/output is specified, fall back to the current input/output,
-    # whatever that is.
+    # if there was one that was set/created for the current session.
+    # (Note that we check `_input`/`_output` and not `input`/`output`. This is
+    # because we don't want to accidently create a new input/output objects
+    # here and store it in the "parent" `AppSession`. Especially, when
+    # combining pytest's `capsys` fixture and `create_app_session`, sys.stdin
+    # and sys.stderr are patched for every test, so we don't want to leak
+    # those outputs object across `AppSession`s.)
     if input is None:
-        input = get_app_session().input
+        input = get_app_session()._input
     if output is None:
-        output = get_app_session().output
+        output = get_app_session()._output
 
     # Create new `AppSession` and activate.
     session = AppSession(input=input, output=output)

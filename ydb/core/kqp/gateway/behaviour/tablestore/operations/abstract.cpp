@@ -1,4 +1,5 @@
 #include "abstract.h"
+#include <ydb/core/kqp/gateway/utils/scheme_helpers.h>
 #include <ydb/core/kqp/provider/yql_kikimr_gateway.h>
 
 namespace NKikimr::NKqp {
@@ -7,7 +8,7 @@ TConclusionStatus ITableStoreOperation::Deserialize(const NYql::TObjectSettingsI
     std::pair<TString, TString> pathPair;
     {
         TString error;
-        if (!NYql::IKikimrGateway::TrySplitTablePath(settings.GetObjectId(), pathPair, error)) {
+        if (!NSchemeHelpers::TrySplitTablePath(settings.GetObjectId(), pathPair, error)) {
             return TConclusionStatus::Fail(error);
         }
         WorkingDir = pathPair.first;
@@ -29,8 +30,7 @@ TConclusionStatus ITableStoreOperation::Deserialize(const NYql::TObjectSettingsI
     return TConclusionStatus::Success();
 }
 
-void ITableStoreOperation::SerializeScheme(NKikimrSchemeOp::TModifyScheme& scheme, const bool isStandalone) const {
-    scheme.SetWorkingDir(WorkingDir);
+void ITableStoreOperation::DoSerializeScheme(NKikimrSchemeOp::TModifyScheme& scheme, const bool isStandalone) const {
     if (isStandalone) {
         scheme.SetOperationType(NKikimrSchemeOp::ESchemeOpAlterColumnTable);
         NKikimrSchemeOp::TAlterColumnTable* alter = scheme.MutableAlterColumnTable();
@@ -45,6 +45,11 @@ void ITableStoreOperation::SerializeScheme(NKikimrSchemeOp::TModifyScheme& schem
         schemaPresetObject->SetName(PresetName);
         return DoSerializeScheme(*(schemaPresetObject->MutableAlterSchema()));
     }
+}
+
+void ITableStoreOperation::SerializeScheme(NKikimrSchemeOp::TModifyScheme& scheme, const bool isStandalone) const {
+    scheme.SetWorkingDir(WorkingDir);
+    DoSerializeScheme(scheme, isStandalone);
 }
 
 }

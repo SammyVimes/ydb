@@ -2,12 +2,13 @@
 
 PY3_LIBRARY()
 
-VERSION(1.16.0)
+VERSION(1.17.0)
 
 LICENSE(MIT)
 
 PEERDIR(
     contrib/python/pycparser
+    contrib/python/setuptools
     contrib/restricted/libffi
 )
 

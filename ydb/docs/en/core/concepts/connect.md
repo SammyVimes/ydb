@@ -33,7 +33,20 @@ Applications should not in any way interpret the number and value of `database` 
 Examples:
 
 * `/ru-central1/b1g8skpblkos03malf3s/etn01q5ko6sh271beftr` is a {{ yandex-cloud }} database with `etn01q3ko8sh271beftr` as ID deployed in the `b1g8skpbljhs03malf3s` cloud in the `ru-central1` region.
-* `/local` is the default database for custom deployment [using Docker](../getting_started/self_hosted/ydb_docker.md).
+* `/local` is the default database for custom deployment [using Docker](../quickstart.md).
+
+## Connection string {#connection_string}
+
+A connection string is a URL-formatted string that specifies the endpoint and path to a database using the following syntax:
+
+`<endpoint>?database=<database>`
+
+Examples:
+
+- `grpc://localhost:7135?database=/local`
+- `grpcs://ydb.serverless.yandexcloud.net:2135?database=/ru-central1/b1g8skpblkos03malf3s/etn01q5ko6sh271beftr`
+
+Using a connection string is an alternative to specifying the endpoint and database path separately and can be used in tools that support this method.
 
 ## A root certificate for TLS {#tls-cert}
 

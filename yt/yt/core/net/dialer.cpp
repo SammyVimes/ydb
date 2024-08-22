@@ -85,7 +85,9 @@ public:
         , Poller_(std::move(poller))
     { }
 
-    TFuture<IConnectionPtr> Dial(const TNetworkAddress& remote) override
+    TFuture<IConnectionPtr> Dial(
+        const TNetworkAddress& remote,
+        TDialerContextPtr /*context*/) override
     {
         auto session = New<TDialSession>(
             remote,
@@ -132,7 +134,7 @@ public:
         , OnFinished_(std::move(onFinished))
         , Id_(TGuid::Create())
         , Logger(logger.WithTag("AsyncDialerSession: %v", Id_))
-        , Timeout_(Config_->MinRto * GetRandomVariation())
+        , ReconnectTimeout_(Config_->MinRto * GetRandomVariation())
     { }
 
     ~TAsyncDialerSession()
@@ -149,6 +151,7 @@ public:
 
         YT_VERIFY(!Dialed_);
         Dialed_ = true;
+        Deadline_ = Config_->ConnectTimeout.ToDeadLine();
 
         Connect(guard);
     }
@@ -201,7 +204,8 @@ private:
     SOCKET Socket_ = INVALID_SOCKET;
     bool Dialed_ = false;
     bool Finished_ = false;
-    TDuration Timeout_;
+    TDuration ReconnectTimeout_;
+    TInstant Deadline_;
     TDelayedExecutorCookie TimeoutCookie_;
     TPollablePtr Pollable_;
 
@@ -238,8 +242,10 @@ private:
         Poller_->Unarm(Socket_, Pollable_);
 
         YT_VERIFY(Pollable_);
-        YT_UNUSED_FUTURE(Poller_->Unregister(Pollable_));
-        Pollable_.Reset();
+        auto pollable = std::move(Pollable_);
+
+        auto inverseGuard = Unguard(SpinLock_);
+        YT_UNUSED_FUTURE(Poller_->Unregister(pollable));
     }
 
     void Connect(TGuard<NThreading::TSpinLock>& guard)
@@ -283,11 +289,13 @@ private:
             return;
         }
 
-        if (Config_->EnableAggressiveReconnect) {
-            TimeoutCookie_ = TDelayedExecutor::Submit(
-                BIND(&TAsyncDialerSession::OnTimeout, MakeWeak(this)),
-                Timeout_);
-        }
+        auto deadline = Min(
+            Deadline_,
+            Config_->EnableAggressiveReconnect ? ReconnectTimeout_.ToDeadLine() : TInstant::Max());
+
+        TimeoutCookie_ = TDelayedExecutor::Submit(
+            BIND(&TAsyncDialerSession::OnTimeout, MakeWeak(this)),
+            deadline);
     }
 
     void OnConnected(TPollable* pollable)
@@ -351,12 +359,22 @@ private:
 
         CloseSocket();
 
-        if (Timeout_ < Config_->MaxRto) {
-            Timeout_ *= Config_->RtoScale * GetRandomVariation();
+        if (ReconnectTimeout_ < Config_->MaxRto) {
+            ReconnectTimeout_ *= Config_->RtoScale * GetRandomVariation();
         }
 
-        YT_LOG_DEBUG("Connect timeout; trying to reconnect (Timeout: %v)",
-            Timeout_);
+        if (TInstant::Now() >= Deadline_) {
+            auto error = TError(NRpc::EErrorCode::TransportError, "Connect timeout")
+                << TErrorAttribute("timeout", Config_->ConnectTimeout);
+            YT_LOG_ERROR(error);
+            Finished_ = true;
+            guard.Release();
+            OnFinished_(error);
+            return;
+        }
+
+        YT_LOG_DEBUG("Connect timeout; trying to reconnect (ReconnectTimeout: %v)",
+            ReconnectTimeout_);
 
         Connect(guard);
     }

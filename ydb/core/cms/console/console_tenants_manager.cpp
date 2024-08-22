@@ -71,7 +71,7 @@ public:
     {
         NTabletPipe::TClientConfig pipeConfig;
         pipeConfig.RetryPolicy = FastConnectRetryPolicy();
-        auto tid = MakeBSControllerID(Domain->DefaultStateStorageGroup);
+        auto tid = MakeBSControllerID();
         auto pipe = NTabletPipe::CreateClient(ctx.SelfID, tid, pipeConfig);
         BSControllerPipe = ctx.ExecutorThread.RegisterActor(pipe);
     }
@@ -118,7 +118,11 @@ public:
     void AllocatePool(const TActorContext &ctx)
     {
         auto request = MakeHolder<TEvBlobStorage::TEvControllerConfigRequest>();
-        request->Record.MutableRequest()->AddCommand()->MutableDefineStoragePool()->CopyFrom(Pool->Config);
+        auto *pool = request->Record.MutableRequest()->AddCommand()->MutableDefineStoragePool();
+        pool->CopyFrom(Pool->Config);
+        if (!pool->GetKind()) {
+            pool->SetKind(Pool->Kind);
+        }
 
         BLOG_D(LogPrefix << "send pool request: " << request->Record.ShortDebugString());
 
@@ -451,6 +455,7 @@ public:
         subdomain.SetName(Subdomain.second);
         if (Tenant->IsExternalSubdomain) {
             subdomain.SetExternalSchemeShard(true);
+            subdomain.SetGraphShard(true);
             if (Tenant->IsExternalHive) {
                 subdomain.SetExternalHive(true);
             }
@@ -459,6 +464,12 @@ public:
             }
             if (Tenant->IsExternalStatisticsAggregator) {
                 subdomain.SetExternalStatisticsAggregator(true);
+            }
+            if (Tenant->IsExternalBackupController) {
+                subdomain.SetExternalBackupController(true);
+            }
+            if (Tenant->IsGraphShardEnabled) {
+                subdomain.SetGraphShard(true);
             }
         }
 
@@ -484,6 +495,12 @@ public:
             }
             if (Tenant->IsExternalStatisticsAggregator) {
                 subdomain.SetExternalStatisticsAggregator(true);
+            }
+            if (Tenant->IsExternalBackupController) {
+                subdomain.SetExternalBackupController(true);
+            }
+            if (Tenant->IsGraphShardEnabled) {
+                subdomain.SetGraphShard(true);
             }
         }
         if (tablets) {
@@ -1195,6 +1212,7 @@ TTenantsManager::TTenant::TTenant(const TString &path,
     , IsExternalHive(false)
     , IsExternalSysViewProcessor(false)
     , IsExternalStatisticsAggregator(false)
+    , IsExternalBackupController(false)
     , AreResourcesShared(false)
 {
 }
@@ -1741,7 +1759,7 @@ void TTenantsManager::OpenTenantSlotBrokerPipe(const TActorContext &ctx)
 {
     NTabletPipe::TClientConfig pipeConfig;
     pipeConfig.RetryPolicy = FastConnectRetryPolicy();
-    auto aid = MakeTenantSlotBrokerID(Domain->DefaultStateStorageGroup);
+    auto aid = MakeTenantSlotBrokerID();
     auto pipe = NTabletPipe::CreateClient(ctx.SelfID, aid, pipeConfig);
     TenantSlotBrokerPipe = ctx.ExecutorThread.RegisterActor(pipe);
 }

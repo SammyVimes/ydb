@@ -4,7 +4,7 @@ PEERDIR(
     contrib/libs/apache/arrow
     ydb/library/yverify_stream
     ydb/library/mkql_proto
-    ydb/library/yql/minikql/comp_nodes/llvm
+    ydb/library/yql/minikql/comp_nodes
     ydb/library/yql/parser/pg_wrapper/interface
     ydb/library/yql/public/udf
     ydb/library/yql/dq/actors/protos
@@ -12,6 +12,7 @@ PEERDIR(
     ydb/library/yql/dq/expr_nodes
     ydb/library/yql/dq/type_ann
     ydb/library/yql/parser/pg_wrapper/interface
+    ydb/library/yql/providers/common/comp_nodes
     ydb/library/yql/providers/common/schema/mkql
     ydb/library/actors/util
 )

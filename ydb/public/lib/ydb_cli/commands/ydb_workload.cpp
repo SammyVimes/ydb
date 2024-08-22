@@ -1,20 +1,22 @@
 #include "ydb_workload.h"
+#include "ydb_workload_import.h"
 
-#include "stock_workload.h"
-#include "kv_workload.h"
-#include "click_bench.h"
-#include "tpch.h"
-#include "tpcc_workload.h"
 #include "topic_workload/topic_workload.h"
 #include "transfer_workload/transfer_workload.h"
 #include "query_workload.h"
-#include "ydb/library/yverify_stream/yverify_stream.h"
+#include "ydb_benchmark.h"
 
-#include <ydb/library/workload/workload_factory.h>
+#include <ydb/library/yverify_stream/yverify_stream.h>
+
+#include <ydb/library/workload/abstract/workload_factory.h>
 #include <ydb/public/lib/ydb_cli/commands/ydb_common.h>
+#include <ydb/public/lib/ydb_cli/common/recursive_remove.h>
+#include <ydb/public/sdk/cpp/client/ydb_topic/topic.h>
 
-#include <util/random/random.h>
 #include <library/cpp/threading/local_executor/local_executor.h>
+
+#include <util/system/spinlock.h>
+#include <util/thread/pool.h>
 
 #include <atomic>
 #include <iomanip>
@@ -42,29 +44,30 @@ TWorkloadStats GetWorkloadStats(const NHdr::THistogram& hdr) {
 TCommandWorkload::TCommandWorkload()
     : TClientCommandTree("workload", {}, "YDB workload service")
 {
-    AddCommand(std::make_unique<TCommandStock>());
-    AddCommand(std::make_unique<TCommandKv>());
-    AddCommand(std::make_unique<TCommandClickBench>());
     AddCommand(std::make_unique<TCommandWorkloadTopic>());
     AddCommand(std::make_unique<TCommandWorkloadTransfer>());
-    AddCommand(std::make_unique<TCommandTpch>());
-    AddCommand(std::make_unique<TCommandTPCCWorkload>());
     AddCommand(std::make_unique<TCommandQueryWorkload>());
+    for (const auto& key: NYdbWorkload::TWorkloadFactory::GetRegisteredKeys()) {
+        AddCommand(std::make_unique<TWorkloadCommandRoot>(key.c_str()));
+    }
 }
 
 TWorkloadCommand::TWorkloadCommand(const TString& name, const std::initializer_list<TString>& aliases, const TString& description)
     : TYdbCommand(name, aliases, description)
     , TotalSec(0)
     , Threads(0)
+    , Rate(0)
     , ClientTimeoutMs(0)
     , OperationTimeoutMs(0)
     , CancelAfterTimeoutMs(0)
     , WindowSec(0)
     , Quiet(false)
+    , Verbose(false)
     , PrintTimestamp(false)
     , QueryExecuterType()
     , WindowHist(60000, 2) // highestTrackableValue 60000ms = 60s, precision 2
     , TotalHist(60000, 2)
+    , TotalQueries(0)
     , TotalRetries(0)
     , WindowRetryCount(0)
     , TotalErrors(0)
@@ -78,6 +81,17 @@ void TWorkloadCommand::Config(TConfig& config) {
         .DefaultValue(10).StoreResult(&TotalSec);
     config.Opts->AddLongOption('t', "threads", "Number of parallel threads in workload.")
         .DefaultValue(10).StoreResult(&Threads);
+
+    const auto name = Parent->Parent->Name;
+    if (name == "kv") {
+        config.Opts->AddLongOption("rate", "Total rate for all threads (requests per second).")
+            .DefaultValue(0).StoreResult(&Rate);
+    }
+    else if (name == "stock") {
+        config.Opts->AddLongOption("rate", "Total rate for all threads (transactions per second).")
+            .DefaultValue(0).StoreResult(&Rate);
+    }
+
     config.Opts->AddLongOption("quiet", "Quiet mode. Doesn't print statistics each second.")
         .StoreTrue(&Quiet);
     config.Opts->AddLongOption("print-timestamp", "Print timestamp each second with statistics.")
@@ -103,6 +117,7 @@ void TWorkloadCommand::PrepareForRun(TConfig& config) {
         .SetBalancingPolicy(EBalancingPolicy::UseAllNodes)
         .SetCredentialsProviderFactory(config.CredentialsGetter(config));
 
+    Verbose = config.IsVerbose();
     if (config.EnableSsl) {
         driverConfig.UseSecureConnection(config.CaCerts);
     }
@@ -124,7 +139,7 @@ void TWorkloadCommand::PrepareForRun(TConfig& config) {
     }
 }
 
-void TWorkloadCommand::WorkerFn(int taskId, TWorkloadQueryGenPtr workloadGen, const int type) {
+void TWorkloadCommand::WorkerFn(int taskId, NYdbWorkload::IWorkloadQueryGenerator& workloadGen, const int type) {
     const auto dataQuerySettings = NYdb::NTable::TExecDataQuerySettings()
             .KeepInQueryCache(true)
             .OperationTimeout(TDuration::MilliSeconds(OperationTimeoutMs))
@@ -153,8 +168,9 @@ void TWorkloadCommand::WorkerFn(int taskId, TWorkloadQueryGenPtr workloadGen, co
             }
             return result;
         } else {
+            auto mode = queryInfo.UseStaleRO ? NYdb::NTable::TTxSettings::StaleRO() : NYdb::NTable::TTxSettings::SerializableRW();
             auto result = session.ExecuteDataQuery(queryInfo.Query.c_str(),
-                NYdb::NTable::TTxControl::BeginTx(NYdb::NTable::TTxSettings::SerializableRW()).CommitTx(),
+                NYdb::NTable::TTxControl::BeginTx(mode).CommitTx(),
                 queryInfo.Params, dataQuerySettings
             ).GetValueSync();
             if (queryInfo.DataQueryResultCallback) {
@@ -196,7 +212,7 @@ void TWorkloadCommand::WorkerFn(int taskId, TWorkloadQueryGenPtr workloadGen, co
     };
 
     while (Now() < StopTime) {
-        auto queryInfoList = workloadGen->GetWorkload(type);
+        auto queryInfoList = workloadGen.GetWorkload(type);
         if (queryInfoList.empty()) {
             Cerr << "Task ID: " << taskId << ". No queries to run." << Endl;
             return;
@@ -204,15 +220,27 @@ void TWorkloadCommand::WorkerFn(int taskId, TWorkloadQueryGenPtr workloadGen, co
 
         auto opStartTime = Now();
         NYdbWorkload::TQueryInfoList::iterator it;
-        for (it = queryInfoList.begin(); it != queryInfoList.end(); ++it) {
+        for (it = queryInfoList.begin(); it != queryInfoList.end(); ) {
+
+            if (Rate != 0)
+            {
+                const ui64 expectedQueries = (Now() - StartTime).SecondsFloat() * Rate;
+                if (TotalQueries > expectedQueries) {
+                    Sleep(TDuration::MilliSeconds(1));
+                    continue;
+                }
+            }
+
             queryInfo = *it;
             auto status = runQuery();
-            if (!status.IsSuccess()) {
+            if (status.IsSuccess()) {
+                TotalQueries++;
+            } else {
                 TotalErrors++;
                 WindowErrors++;
-                // if (status.GetStatus() != EStatus::ABORTED) {
-                    // Cerr << "Task ID: " << taskId << " Status: " << status.GetStatus() << " " << status.GetIssues().ToString() << Endl;
-                // }
+                if (Verbose && status.GetStatus() != EStatus::ABORTED) {
+                    Cerr << "Task ID: " << taskId << " Status: " << status.GetStatus() << " " << status.GetIssues().ToString() << Endl;
+                }
                 break;
             }
             if (retryCount > 0) {
@@ -220,6 +248,8 @@ void TWorkloadCommand::WorkerFn(int taskId, TWorkloadQueryGenPtr workloadGen, co
                 WindowRetryCount += retryCount;
             }
             retryCount = -1;
+
+            ++it;
         }
         if (it != queryInfoList.end()) {
             continue;
@@ -235,7 +265,7 @@ void TWorkloadCommand::WorkerFn(int taskId, TWorkloadQueryGenPtr workloadGen, co
     WindowRetryCount += std::max(retryCount, 0);
 }
 
-int TWorkloadCommand::RunWorkload(TWorkloadQueryGenPtr workloadGen, const int type) {
+int TWorkloadCommand::RunWorkload(NYdbWorkload::IWorkloadQueryGenerator& workloadGen, const int type) {
     if (!Quiet) {
         std::cout << "Window\tTxs/Sec\tRetries\tErrors\tp50(ms)\tp95(ms)\tp99(ms)\tpMax(ms)";
         if (PrintTimestamp) {
@@ -299,12 +329,134 @@ void TWorkloadCommand::PrintWindowStats(int windowIt) {
     }
 }
 
-int TWorkloadCommand::InitTables(std::shared_ptr<NYdbWorkload::IWorkloadQueryGenerator> workloadGen) {
-    auto session = GetSession();
-    auto result = session.ExecuteSchemeQuery(workloadGen->GetDDLQueries()).GetValueSync();
-    ThrowOnError(result);
+TWorkloadCommandInit::TWorkloadCommandInit(NYdbWorkload::TWorkloadParams& params)
+    : TWorkloadCommandBase("init", params, NYdbWorkload::TWorkloadParams::ECommandType::Init, "Create and initialize tables for workload")
+{}
 
-    auto queryInfoList = workloadGen->GetInitialData();
+void TWorkloadCommandInit::Config(TConfig& config) {
+    TWorkloadCommandBase::Config(config);
+    config.Opts->AddLongOption("clear", "Clear tables before init").NoArgument()
+        .Optional().StoreResult(&Clear, true);
+}
+
+TWorkloadCommandRun::TWorkloadCommandRun(NYdbWorkload::TWorkloadParams& params, const NYdbWorkload::IWorkloadQueryGenerator::TWorkloadType& workload)
+    : TWorkloadCommand(workload.CommandName, std::initializer_list<TString>(), workload.Description)
+    , Params(params)
+    , Type(workload.Type)
+{}
+
+int TWorkloadCommandRun::Run(TConfig& config) {
+    PrepareForRun(config);
+    Params.DbPath = config.Database;
+    auto workloadGen = Params.CreateGenerator();
+    return RunWorkload(*workloadGen, Type);
+}
+
+void TWorkloadCommandRun::Config(TConfig& config) {
+    TWorkloadCommand::Config(config);
+    config.Opts->SetFreeArgsNum(0);
+    Params.ConfigureOpts(*config.Opts, NYdbWorkload::TWorkloadParams::ECommandType::Run, Type);
+}
+
+TWorkloadCommandBase::TWorkloadCommandBase(const TString& name, NYdbWorkload::TWorkloadParams& params, const NYdbWorkload::TWorkloadParams::ECommandType commandType, const TString& description, int type)
+    : TYdbCommand(name, std::initializer_list<TString>(), description)
+    , CommandType(commandType)
+    , Params(params)
+    , Type(type)
+{}
+
+void TWorkloadCommandBase::Config(TConfig& config) {
+    TYdbCommand::Config(config);
+    config.Opts->SetFreeArgsNum(0);
+    Params.ConfigureOpts(*config.Opts, CommandType, Type);
+}
+
+int TWorkloadCommandBase::Run(TConfig& config) {
+    Driver = MakeHolder<NYdb::TDriver>(CreateDriver(config));
+    TableClient = MakeHolder<NTable::TTableClient>(*Driver);
+    TopicClient = MakeHolder<NTopic::TTopicClient>(*Driver);
+    SchemeClient = MakeHolder<NScheme::TSchemeClient>(*Driver);
+    QueryClient = MakeHolder<NQuery::TQueryClient>(*Driver);
+    Params.DbPath = config.Database;
+    auto workloadGen = Params.CreateGenerator();
+    return DoRun(*workloadGen, config);
+}
+
+void TWorkloadCommandBase::CleanTables(NYdbWorkload::IWorkloadQueryGenerator& workloadGen, TConfig& config) {
+    auto pathsToDelete = workloadGen.GetCleanPaths();
+    NScheme::TRemoveDirectorySettings settings;
+    settings.NotExistsIsOk(true);
+    for (const auto& path : pathsToDelete) {
+        Cout << "Remove path " << path << "..."  << Endl;
+        auto fullPath = config.Database + "/" + path.c_str();
+        ThrowOnError(RemovePathRecursive(*SchemeClient, *TableClient, *TopicClient, fullPath, ERecursiveRemovePrompt::Never, settings));
+        Cout << "Remove path " << path << "...Ok"  << Endl;
+    }
+}
+
+std::unique_ptr<TClientCommand> TWorkloadCommandRoot::CreateRunCommand(const NYdbWorkload::IWorkloadQueryGenerator::TWorkloadType& workload) {
+    switch (workload.Kind) {
+    case NYdbWorkload::IWorkloadQueryGenerator::TWorkloadType::EKind::Workload:
+        return std::make_unique<TWorkloadCommandRun>(*Params, workload);
+    case NYdbWorkload::IWorkloadQueryGenerator::TWorkloadType::EKind::Benchmark:
+        return std::make_unique<TWorkloadCommandBenchmark>(*Params, workload);
+    }
+}
+
+TWorkloadCommandRoot::TWorkloadCommandRoot(const TString& key)
+    : TClientCommandTree(key, {}
+        , "YDB " + NYdbWorkload::TWorkloadFactory::MakeHolder(key)->GetWorkloadName() + " workload"
+      )
+    , Params(NYdbWorkload::TWorkloadFactory::MakeHolder(key))
+{
+    AddCommand(std::make_unique<TWorkloadCommandInit>(*Params));
+    {
+        auto initializers = Params->CreateDataInitializers();
+        if (!initializers.empty()) {
+            AddCommand(std::make_unique<TWorkloadCommandImport>(*Params, std::move(initializers)));
+        }
+    }
+    auto supportedWorkloads = Params->CreateGenerator()->GetSupportedWorkloadTypes();
+    switch (supportedWorkloads.size()) {
+    case 0:
+        break;
+    case 1:
+        supportedWorkloads.back().CommandName = "run";
+        AddCommand(CreateRunCommand(supportedWorkloads.back()));
+        break;
+    default: {
+        auto run = std::make_unique<TClientCommandTree>("run", std::initializer_list<TString>(), "Run YDB " + NYdbWorkload::TWorkloadFactory::MakeHolder(key)->GetWorkloadName() + " workload");
+        for (const auto& type: supportedWorkloads) {
+            run->AddCommand(CreateRunCommand(type));
+        }
+        AddCommand(std::move(run));
+        break;
+    }
+    }
+    AddCommand(std::make_unique<TWorkloadCommandClean>(*Params));
+}
+    
+void TWorkloadCommandRoot::Config(TConfig& config) {
+    TClientCommandTree::Config(config);
+    Params->ConfigureOpts(*config.Opts, NYdbWorkload::TWorkloadParams::ECommandType::Root, 0);
+}
+
+int TWorkloadCommandInit::DoRun(NYdbWorkload::IWorkloadQueryGenerator& workloadGen, TConfig& config) {
+    if (Clear) {
+        CleanTables(workloadGen, config);
+    }
+    auto ddlQueries = workloadGen.GetDDLQueries();
+    if (!ddlQueries.empty()) {
+        Cout << "Init tables " << "..."  << Endl;
+        auto result = TableClient->RetryOperationSync([ddlQueries](NTable::TSession session) {
+            return session.ExecuteSchemeQuery(ddlQueries.c_str()).GetValueSync();
+        });
+        ThrowOnError(result);
+        Cout << "Init tables " << "...Ok"  << Endl;
+    }
+
+    auto session = GetSession();
+    auto queryInfoList = workloadGen.GetInitialData();
     for (auto queryInfo : queryInfoList) {
         auto prepareResult = session.PrepareDataQuery(queryInfo.Query.c_str()).GetValueSync();
         if (!prepareResult.IsSuccess()) {
@@ -326,20 +478,19 @@ int TWorkloadCommand::InitTables(std::shared_ptr<NYdbWorkload::IWorkloadQueryGen
     return EXIT_SUCCESS;
 }
 
-int TWorkloadCommand::CleanTables(std::shared_ptr<NYdbWorkload::IWorkloadQueryGenerator> workloadGen) {
-    auto session = GetSession();
+TWorkloadCommandClean::TWorkloadCommandClean(NYdbWorkload::TWorkloadParams& params)
+    : TWorkloadCommandBase("clean", params, NYdbWorkload::TWorkloadParams::ECommandType::Clean, "Drop tables created in init phase")
+{}
 
-    auto query = workloadGen->GetCleanDDLQueries();
-    TStatus result(EStatus::SUCCESS, NYql::TIssues());
-    result = session.ExecuteSchemeQuery(TString(query)).GetValueSync();
-
-    if (!result.IsSuccess()) {
-        Cerr << "Query execution failed: " << result.GetIssues().ToString() << Endl
-            << "Query:\n" << query << Endl;
-        return EXIT_FAILURE;
-    }
-
+int TWorkloadCommandClean::DoRun(NYdbWorkload::IWorkloadQueryGenerator& workloadGen, TConfig& config) {
+    CleanTables(workloadGen, config);
     return EXIT_SUCCESS;
+}
+
+NTable::TSession TWorkloadCommandInit::GetSession() {
+    NTable::TCreateSessionResult result = TableClient->GetSession(NTable::TCreateSessionSettings()).GetValueSync();
+    ThrowOnError(result);
+    return result.GetSession();
 }
 
 } // namespace NYdb::NConsoleClient

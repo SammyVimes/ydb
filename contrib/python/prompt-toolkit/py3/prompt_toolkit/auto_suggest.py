@@ -11,6 +11,7 @@ because they take too much time, and could potentially block the event loop,
 then wrap the :class:`.AutoSuggest` instance into a
 :class:`.ThreadedAutoSuggest`.
 """
+
 from __future__ import annotations
 
 from abc import ABCMeta, abstractmethod
@@ -46,7 +47,7 @@ class Suggestion:
         self.text = text
 
     def __repr__(self) -> str:
-        return "Suggestion(%s)" % self.text
+        return f"Suggestion({self.text})"
 
 
 class AutoSuggest(metaclass=ABCMeta):
@@ -72,7 +73,7 @@ class AutoSuggest(metaclass=ABCMeta):
         """
 
     async def get_suggestion_async(
-        self, buff: "Buffer", document: Document
+        self, buff: Buffer, document: Document
     ) -> Suggestion | None:
         """
         Return a :class:`.Future` which is set when the suggestions are ready.
@@ -96,7 +97,7 @@ class ThreadedAutoSuggest(AutoSuggest):
         return self.auto_suggest.get_suggestion(buff, document)
 
     async def get_suggestion_async(
-        self, buff: "Buffer", document: Document
+        self, buff: Buffer, document: Document
     ) -> Suggestion | None:
         """
         Run the `get_suggestion` function in a thread.
@@ -170,7 +171,7 @@ class DynamicAutoSuggest(AutoSuggest):
         return auto_suggest.get_suggestion(buff, document)
 
     async def get_suggestion_async(
-        self, buff: "Buffer", document: Document
+        self, buff: Buffer, document: Document
     ) -> Suggestion | None:
         auto_suggest = self.get_auto_suggest() or DummyAutoSuggest()
         return await auto_suggest.get_suggestion_async(buff, document)

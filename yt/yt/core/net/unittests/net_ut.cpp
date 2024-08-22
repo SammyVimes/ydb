@@ -39,7 +39,7 @@ protected:
         return NNet::CreateDialer(
             New<TDialerConfig>(),
             Poller_,
-            NetLogger);
+            NetLogger());
     }
 };
 
@@ -219,8 +219,7 @@ INSTANTIATE_TEST_SUITE_P(
     TContinueReadInCaseOfWriteErrorsTest,
     testing::Values(
         false,
-        true
-    )
+        true)
 );
 
 TEST_F(TNetTest, StressConcurrentClose)
@@ -252,10 +251,10 @@ TEST_F(TNetTest, StressConcurrentClose)
                 .Run();
         };
 
-        runSender(a);
-        runReceiver(a);
-        runSender(b);
-        runReceiver(b);
+        YT_UNUSED_FUTURE(runSender(a));
+        YT_UNUSED_FUTURE(runReceiver(a));
+        YT_UNUSED_FUTURE(runSender(b));
+        YT_UNUSED_FUTURE(runReceiver(b));
 
         Sleep(TDuration::MilliSeconds(10));
         a->Close().Get().ThrowOnError();
@@ -349,7 +348,7 @@ TEST_F(TNetTest, AbandonDial)
         auto listener = CreateListener(address, Poller_, Poller_);
         auto dialer = CreateDialer();
 
-        dialer->Dial(listener->GetAddress());
+        YT_UNUSED_FUTURE(dialer->Dial(listener->GetAddress()));
     })
         .AsyncVia(Poller_->GetInvoker())
         .Run()
@@ -363,7 +362,7 @@ TEST_F(TNetTest, AbandonAccept)
         auto address = TNetworkAddress::CreateIPv6Loopback(0);
         auto listener = CreateListener(address, Poller_, Poller_);
 
-        listener->Accept();
+        YT_UNUSED_FUTURE(listener->Accept());
     })
         .AsyncVia(Poller_->GetInvoker())
         .Run()

@@ -47,6 +47,12 @@ enum EMigrationState {
     MIGRATION_COMPLETE = 3;
 }
 
+enum EDrainDownPolicy {
+    DRAIN_POLICY_NO_DOWN = 0;
+    DRAIN_POLICY_KEEP_DOWN_UNTIL_RESTART = 1;
+    DRAIN_POLICY_KEEP_DOWN = 2;
+}
+
 message TChannelInfo {
     message THistorySlot {
         optional uint32 FromGeneration = 1;
@@ -240,12 +246,14 @@ message TEvTabletMetrics {
     repeated TTabletMetrics TabletMetrics = 1;
     optional NKikimrTabletBase.TMetrics TotalResourceUsage = 2;
     optional double TotalNodeUsage = 3;
+    optional NKikimrTabletBase.TMetrics ResourceMaximum = 4;
 }
 
 message TEvReassignTablet {
     enum EHiveReassignReason {
         HIVE_REASSIGN_REASON_NO = 0;
         HIVE_REASSIGN_REASON_SPACE = 1;
+        HIVE_REASSIGN_REASON_BALANCE = 2; // internal to Hive
     }
 
     optional fixed64 TabletID = 1;
@@ -313,6 +321,7 @@ message THiveNodeStats {
     optional uint32 RestartsPerPeriod = 6;
     optional uint64 LastAliveTimestamp = 7;
     optional NKikimrSubDomains.TDomainKey NodeDomain = 8;
+    optional string NodeName = 9;
 }
 
 message TEvResponseHiveNodeStats {
@@ -353,8 +362,9 @@ message TTabletOwner {
 message TEvDrainNode {
     optional uint32 NodeID = 1;
     optional bool Persist = 3 [default = true];
-    optional bool KeepDown = 4 [default = false];
+    optional bool KeepDown = 4 [default = false]; // deprecated in favor of DownPolicy
     optional uint32 DrainInFlight = 5;
+    optional EDrainDownPolicy DownPolicy = 6 [default = DRAIN_POLICY_KEEP_DOWN_UNTIL_RESTART];
 }
 
 message TEvDrainNodeResult {
@@ -556,3 +566,25 @@ message TEvUpdateTabletsObjectReply {
     optional uint64 TxPartId = 3;
 }
 
+message TEvUpdateDomain {
+    optional NKikimrSubDomains.TDomainKey DomainKey = 1;
+    optional NKikimrSubDomains.EServerlessComputeResourcesMode ServerlessComputeResourcesMode = 2;
+    optional uint64 TxId = 3;
+}
+
+message TEvUpdateDomainReply {
+    optional fixed64 Origin = 1;
+    optional uint64 TxId = 2;
+}
+
+message TEvRequestTabletDistribution {
+    repeated fixed64 TabletIds = 1;
+}
+
+message TEvResponseTabletDistribution {
+    message TNode {
+        optional uint32 NodeId = 1;
+        repeated fixed64 TabletIds = 2;
+    }
+    repeated TNode Nodes = 1;
+}

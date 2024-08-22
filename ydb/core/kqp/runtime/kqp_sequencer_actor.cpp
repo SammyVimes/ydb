@@ -144,8 +144,8 @@ public:
     }
 
 private:
-    void SaveState(const NYql::NDqProto::TCheckpoint&, NYql::NDqProto::TSourceState&) final {}
-    void LoadState(const NYql::NDqProto::TSourceState&) final {}
+    void SaveState(const NYql::NDqProto::TCheckpoint&, NYql::NDq::TSourceState&) final {}
+    void LoadState(const NYql::NDq::TSourceState&) final {}
     void CommitState(const NYql::NDqProto::TCheckpoint&) final {}
 
     ui64 GetInputIndex() const final {
@@ -183,7 +183,7 @@ private:
         finished = (status == NUdf::EFetchStatus::Finish)
             && (UnprocessedRows == 0);
 
-        if (WaitingReplies == 0) {
+        if (PendingRows.size() > 0 && WaitingReplies == 0) {
             Send(ComputeActorId, new TEvNewAsyncInputDataArrived(InputIndex));
         } 
 
@@ -207,7 +207,6 @@ private:
     i64 ReplyResult(NKikimr::NMiniKQL::TUnboxedValueBatch& batch, i64 freeSpace) {
         auto guard = BindAllocator();
 
-        size_t rowsInReply = 0;
         bool hasSequences = true;
         i64 totalSize = 0;
 
@@ -219,7 +218,6 @@ private:
         }
 
         while(PendingRows.size() > 0 && freeSpace > 0 && hasSequences) {
-            ++rowsInReply;
             --UnprocessedRows;
             i64 rowSize = 0;
             NUdf::TUnboxedValue currentValue = std::move(PendingRows.front());

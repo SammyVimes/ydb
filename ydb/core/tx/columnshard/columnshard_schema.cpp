@@ -1,31 +1,7 @@
 #include "columnshard_schema.h"
+#include "transactions/tx_controller.h"
 
 namespace NKikimr::NColumnShard {
-
-bool Schema::IndexColumns_Load(NIceDb::TNiceDb& db, const IBlobGroupSelector* dsGroupSelector, ui32 index, const std::function<void(const NOlap::TPortionInfo&, const NOlap::TColumnChunkLoadContext&)>& callback) {
-    auto rowset = db.Table<IndexColumns>().Prefix(index).Select();
-    if (!rowset.IsReady()) {
-        return false;
-    }
-
-    while (!rowset.EndOfSet()) {
-        NOlap::TPortionInfo portion = NOlap::TPortionInfo::BuildEmpty();
-        portion.SetPathId(rowset.GetValue<IndexColumns::PathId>());
-        portion.SetMinSnapshot(rowset.GetValue<IndexColumns::PlanStep>(), rowset.GetValue<IndexColumns::TxId>());
-        portion.SetPortion(rowset.GetValue<IndexColumns::Portion>());
-        portion.SetDeprecatedGranuleId(rowset.GetValue<IndexColumns::Granule>());
-
-        NOlap::TColumnChunkLoadContext chunkLoadContext(rowset, dsGroupSelector);
-
-        portion.SetRemoveSnapshot(rowset.GetValue<IndexColumns::XPlanStep>(), rowset.GetValue<IndexColumns::XTxId>());
-
-        callback(portion, chunkLoadContext);
-
-        if (!rowset.Next())
-            return false;
-    }
-    return true;
-}
 
 bool Schema::InsertTable_Load(NIceDb::TNiceDb& db, const IBlobGroupSelector* dsGroupSelector, NOlap::TInsertTableAccessor& insertTable, const TInstant& /*loadTime*/) {
     auto rowset = db.Table<InsertTable>().GreaterOrEqual(0, 0, 0, 0, "").Select();
@@ -51,7 +27,18 @@ bool Schema::InsertTable_Load(NIceDb::TNiceDb& db, const IBlobGroupSelector* dsG
         if (metaStr) {
             Y_ABORT_UNLESS(meta.ParseFromString(metaStr));
         }
-        TInsertedData data(planStep, writeTxId, pathId, dedupId, NOlap::TBlobRange(blobId, 0, blobId.BlobSize()), meta, schemaVersion, {});
+
+        std::optional<ui64> rangeOffset;
+        if (rowset.HaveValue<InsertTable::BlobRangeOffset>()) {
+            rangeOffset = rowset.GetValue<InsertTable::BlobRangeOffset>();
+        }
+        std::optional<ui64> rangeSize;
+        if (rowset.HaveValue<InsertTable::BlobRangeSize>()) {
+            rangeSize = rowset.GetValue<InsertTable::BlobRangeSize>();
+        }
+
+        AFL_VERIFY(!!rangeOffset == !!rangeSize);
+        TInsertedData data(planStep, writeTxId, pathId, dedupId, NOlap::TBlobRange(blobId, rangeOffset.value_or(0), rangeSize.value_or(blobId.BlobSize())), meta, schemaVersion, {});
 
         switch (recType) {
             case EInsertTableIds::Inserted:
@@ -64,12 +51,30 @@ bool Schema::InsertTable_Load(NIceDb::TNiceDb& db, const IBlobGroupSelector* dsG
                 insertTable.AddAborted(std::move(data), true);
                 break;
         }
-
         if (!rowset.Next()) {
             return false;
         }
     }
     return true;
+}
+
+void Schema::SaveTxInfo(NIceDb::TNiceDb& db, const TFullTxInfo& txInfo, const TString& txBody) {
+    db.Table<TxInfo>().Key(txInfo.TxId).Update(
+        NIceDb::TUpdate<TxInfo::TxKind>(txInfo.TxKind),
+        NIceDb::TUpdate<TxInfo::TxBody>(txBody),
+        NIceDb::TUpdate<TxInfo::MaxStep>(txInfo.MaxStep),
+        NIceDb::TUpdate<TxInfo::Source>(txInfo.Source),
+        NIceDb::TUpdate<TxInfo::Cookie>(txInfo.Cookie),
+        NIceDb::TUpdate<TxInfo::SeqNo>(txInfo.SerializeSeqNoAsString())
+        );
+}
+
+void Schema::UpdateTxInfoSource(NIceDb::TNiceDb& db, const TFullTxInfo& txInfo) {
+    db.Table<TxInfo>().Key(txInfo.GetTxId()).Update(
+        NIceDb::TUpdate<TxInfo::Source>(txInfo.Source),
+        NIceDb::TUpdate<TxInfo::Cookie>(txInfo.Cookie),
+        NIceDb::TUpdate<TxInfo::SeqNo>(txInfo.SerializeSeqNoAsString())
+    );
 }
 
 }

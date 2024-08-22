@@ -164,7 +164,7 @@ Y_UNIT_TEST_SUITE(KqpProxy) {
         ui16 mbusport = tp.GetPort(2134);
         auto settings = Tests::TServerSettings(mbusport).SetDomainName("Root").SetUseRealThreads(false);
         // set small compilation timeout to avoid long timer creation
-        settings.AppConfig.MutableTableServiceConfig()->SetCompileTimeoutMs(400);
+        settings.AppConfig->MutableTableServiceConfig()->SetCompileTimeoutMs(400);
 
         Tests::TServer::TPtr server = new Tests::TServer(settings);
 
@@ -185,9 +185,8 @@ Y_UNIT_TEST_SUITE(KqpProxy) {
 
         auto scheduledEvs = [&](TTestActorRuntimeBase& run, TAutoPtr<IEventHandle> &event, TDuration delay, TInstant &deadline) {
             if (event->GetTypeRewrite() == TEvents::TSystem::Wakeup) {
-                TActorId actorId = event->GetRecipientRewrite();
-                IActor *actor = runtime->FindActor(actorId);
-                if (actor && actor->GetActivityType() == NKikimrServices::TActivity::KQP_COMPILE_ACTOR) {
+                Cerr << "Captured TEvents::TSystem::Wakeup to " << runtime->FindActorName(event->GetRecipientRewrite()) << Endl;
+                if (runtime->FindActorName(event->GetRecipientRewrite()) == "KQP_COMPILE_ACTOR") {
                     Cerr << "Captured scheduled event for compile actor " << event->Recipient << Endl;
                     scheduled.push_back(event.Release());
                     return true;
@@ -492,8 +491,8 @@ Y_UNIT_TEST_SUITE(KqpProxy) {
 
     Y_UNIT_TEST(ExecuteScriptFailsWithoutFeatureFlag) {
         NKikimrConfig::TAppConfig appConfig;
+        appConfig.MutableFeatureFlags()->SetEnableScriptExecutionOperations(false);
         NYdb::TKikimrWithGrpcAndRootSchema server(appConfig);
-        appConfig.MutableFeatureFlags()->SetEnableScriptExecutionOperations(false); // default
         server.Server_->GetRuntime()->SetLogPriority(NKikimrServices::KQP_PROXY, NActors::NLog::PRI_DEBUG);
 
         ui16 grpc = server.GetPort();

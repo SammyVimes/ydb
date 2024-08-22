@@ -40,19 +40,19 @@ DEFINE_REFCOUNTED_TYPE(THistogramExponentialBounds)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-class THistogramConfig
+class TTimeHistogramConfig
     : public NYTree::TYsonStruct
 {
 public:
     std::optional<THistogramExponentialBoundsPtr> ExponentialBounds;
     std::optional<std::vector<TDuration>> CustomBounds;
 
-    REGISTER_YSON_STRUCT(THistogramConfig);
+    REGISTER_YSON_STRUCT(TTimeHistogramConfig);
 
     static void Register(TRegistrar registrar);
 };
 
-DEFINE_REFCOUNTED_TYPE(THistogramConfig)
+DEFINE_REFCOUNTED_TYPE(TTimeHistogramConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -62,8 +62,8 @@ class TServiceCommonConfig
 {
 public:
     bool EnablePerUserProfiling;
-    THistogramConfigPtr HistogramTimerProfiling;
-    bool EnableErrorCodeCounting;
+    TTimeHistogramConfigPtr TimeHistogram;
+    bool EnableErrorCodeCounter;
     ERequestTracingMode TracingMode;
 
     REGISTER_YSON_STRUCT(TServiceCommonConfig);
@@ -90,14 +90,48 @@ DEFINE_REFCOUNTED_TYPE(TServerConfig)
 
 ////////////////////////////////////////////////////////////////////////////////
 
+// Common options shared between all services in one server.
+class TServiceCommonDynamicConfig
+    : public NYTree::TYsonStruct
+{
+public:
+    std::optional<bool> EnablePerUserProfiling;
+    std::optional<TTimeHistogramConfigPtr> TimeHistogram;
+    std::optional<bool> EnableErrorCodeCounter;
+    std::optional<ERequestTracingMode> TracingMode;
+
+    REGISTER_YSON_STRUCT(TServiceCommonDynamicConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TServiceCommonDynamicConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
+class TServerDynamicConfig
+    : public TServiceCommonDynamicConfig
+{
+public:
+    THashMap<TString, NYTree::INodePtr> Services;
+
+    REGISTER_YSON_STRUCT(TServerDynamicConfig);
+
+    static void Register(TRegistrar registrar);
+};
+
+DEFINE_REFCOUNTED_TYPE(TServerDynamicConfig)
+
+////////////////////////////////////////////////////////////////////////////////
+
 class TServiceConfig
     : public NYTree::TYsonStruct
 {
 public:
     std::optional<bool> EnablePerUserProfiling;
-    std::optional<bool> EnableErrorCodeCounting;
+    std::optional<bool> EnableErrorCodeCounter;
     std::optional<ERequestTracingMode> TracingMode;
-    THistogramConfigPtr HistogramTimerProfiling;
+    TTimeHistogramConfigPtr TimeHistogram;
     THashMap<TString, TMethodConfigPtr> Methods;
     std::optional<int> AuthenticationQueueSizeLimit;
     std::optional<TDuration> PendingPayloadsTimeout;
@@ -118,7 +152,9 @@ class TMethodConfig
 public:
     std::optional<bool> Heavy;
     std::optional<int> QueueSizeLimit;
+    std::optional<i64> QueueByteSizeLimit;
     std::optional<int> ConcurrencyLimit;
+    std::optional<i64> ConcurrencyByteLimit;
     std::optional<NLogging::ELogLevel> LogLevel;
     std::optional<TDuration> LoggingSuppressionTimeout;
     NConcurrency::TThroughputThrottlerConfigPtr RequestBytesThrottler;
@@ -292,6 +328,10 @@ class TBalancingChannelConfig
 public:
     //! First option: static list of addresses.
     std::optional<std::vector<TString>> Addresses;
+
+    //! Disables discovery and balancing when just one address is given.
+    //! This is vital for jobs since node's redirector is incapable of handling
+    //! discover requests properly.
     bool DisableBalancingOnSingleAddress;
 
     //! Second option: SD endpoints.
@@ -350,8 +390,16 @@ public:
     //! For how long responses are kept in memory.
     TDuration ExpirationTime;
 
+    //! How often an eviction tick is initiated. Eviction drops old responses
+    //! that need no longer be kept in memory.
+    TDuration EvictionPeriod;
+
     //! Maximum time an eviction tick can spend.
     TDuration MaxEvictionTickTime;
+
+    //! The number of responses to evict between checking whether the tick is
+    //! taking too long (longer than MaxEvictionTickTime).
+    int EvictionTickTimeCheckPeriod;
 
     //! If |true| then initial warmup is enabled. In particular, #WarmupTime and #ExpirationTime are
     //! checked against each other. If |false| then initial warmup is disabled and #WarmupTime is ignored.
@@ -377,6 +425,7 @@ public:
     static constexpr int DefaultCompressionPoolSize = 8;
     int HeavyPoolSize;
     int CompressionPoolSize;
+    TDuration HeavyPoolPollingPeriod;
 
     bool AlertOnMissingRequestInfo;
 
@@ -397,6 +446,7 @@ class TDispatcherDynamicConfig
 public:
     std::optional<int> HeavyPoolSize;
     std::optional<int> CompressionPoolSize;
+    std::optional<TDuration> HeavyPoolPollingPeriod;
 
     std::optional<bool> AlertOnMissingRequestInfo;
 

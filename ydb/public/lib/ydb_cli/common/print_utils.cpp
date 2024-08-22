@@ -39,6 +39,9 @@ void PrintSchemeEntry(IOutputStream& o, const NScheme::TSchemeEntry& entry, NCol
     case NScheme::ESchemeEntryType::ExternalDataSource:
         o << colors.LightWhite();
         break;
+    case NScheme::ESchemeEntryType::ResourcePool:
+        o << colors.LightWhite();
+        break;
     default:
         o << colors.RedColor();
     }
@@ -102,9 +105,14 @@ TString EntryTypeToString(NScheme::ESchemeEntryType entry) {
         return "external-data-source";
     case NScheme::ESchemeEntryType::ExternalTable:
         return "external-table";
+    case NScheme::ESchemeEntryType::View:
+        return "view";
+    case NScheme::ESchemeEntryType::Replication:
+        return "replication";
+    case NScheme::ESchemeEntryType::ResourcePool:
+        return "resource-pool";
     case NScheme::ESchemeEntryType::Unknown:
     case NScheme::ESchemeEntryType::Sequence:
-    case NScheme::ESchemeEntryType::Replication:
         return "unknown";
     }
 }

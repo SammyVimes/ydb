@@ -20,14 +20,12 @@ struct TProxyDiscoveryRequest
     TString NetworkName = NApi::NRpcProxy::DefaultNetworkName;
     bool IgnoreBalancers = false;
 
-    bool operator==(const TProxyDiscoveryRequest& other) const;
-    bool operator!=(const TProxyDiscoveryRequest& other) const;
+    bool operator==(const TProxyDiscoveryRequest& other) const = default;
 
     operator size_t() const;
 };
 
 void FormatValue(TStringBuilderBase* builder, const TProxyDiscoveryRequest& request, TStringBuf spec);
-TString ToString(const TProxyDiscoveryRequest& request);
 
 ////////////////////////////////////////////////////////////////////////////////
 

@@ -10,13 +10,19 @@
 
 #include <util/generic/string.h>
 #include <util/generic/vector.h>
+#include <util/generic/map.h>
 #include <util/generic/maybe.h>
 
 #include <google/protobuf/any.pb.h>
 
+namespace NJson {
+class TJsonValue;
+} // namespace NJson
+
 namespace NYql {
 
 struct TDqSettings;
+class TTransformationPipeline;
 
 namespace NCommon {
     class TMkqlCallableCompilerBase;
@@ -56,12 +62,22 @@ public:
     virtual bool CanBlockRead(const NNodes::TExprBase& node, TExprContext& ctx, TTypeAnnotationContext& typesCtx) = 0;
     virtual void RegisterMkqlCompiler(NCommon::TMkqlCallableCompilerBase& compiler) = 0;
     virtual bool CanFallback() = 0;
-    virtual void FillSourceSettings(const TExprNode& node, ::google::protobuf::Any& settings, TString& sourceType) = 0;
+    virtual void FillSourceSettings(const TExprNode& node, ::google::protobuf::Any& settings, TString& sourceType, size_t maxPartitions) = 0;
+    virtual void FillLookupSourceSettings(const TExprNode& node, ::google::protobuf::Any& settings, TString& sourceType) = 0;
     virtual void FillSinkSettings(const TExprNode& node, ::google::protobuf::Any& settings, TString& sinkType) = 0;
     virtual void FillTransformSettings(const TExprNode& node, ::google::protobuf::Any& settings) = 0;
     virtual void Annotate(const TExprNode& node, THashMap<TString, TString>& params) = 0;
     virtual bool PrepareFullResultTableParams(const TExprNode& root, TExprContext& ctx, THashMap<TString, TString>& params, THashMap<TString, TString>& secureParams) = 0;
     virtual void WriteFullResultTableRef(NYson::TYsonWriter& writer, const TVector<TString>& columns, const THashMap<TString, TString>& graphParams) = 0;
+
+    // Fill plan operator properties for sources/sinks
+    // Return true if node was handled
+    virtual bool FillSourcePlanProperties(const NNodes::TExprBase& node, TMap<TString, NJson::TJsonValue>& properties) = 0;
+    virtual bool FillSinkPlanProperties(const NNodes::TExprBase& node, TMap<TString, NJson::TJsonValue>& properties) = 0;
+    // Called to configure DQ peephole
+    virtual void ConfigurePeepholePipeline(bool beforeDqTransforms, const THashMap<TString, TString>& params, TTransformationPipeline* pipeline) = 0;
 };
+
+std::unordered_set<IDqIntegration*> GetUniqueIntegrations(const TTypeAnnotationContext& typesCtx);
 
 } // namespace NYql

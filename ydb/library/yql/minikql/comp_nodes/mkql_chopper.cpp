@@ -1,6 +1,6 @@
 #include "mkql_chopper.h"
 
-#include <ydb/library/yql/minikql/computation/mkql_computation_node_codegen.h>
+#include <ydb/library/yql/minikql/computation/mkql_computation_node_codegen.h>  // Y_IGNORE
 #include <ydb/library/yql/minikql/mkql_node_cast.h>
 
 namespace NKikimr {
@@ -129,11 +129,12 @@ private:
         TCodegenContext ctx(codegen);
         ctx.Func = cast<Function>(module.getOrInsertFunction(name.c_str(), funcType).getCallee());
 
+        DISubprogramAnnotator annotator(ctx, ctx.Func);
+        
+
         const auto main = BasicBlock::Create(context, "main", ctx.Func);
         ctx.Ctx = &*ctx.Func->arg_begin();
         ctx.Ctx->addAttr(Attribute::NonNull);
-
-        const auto indexType = Type::getInt32Ty(context);
 
         auto block = main;
 
@@ -563,6 +564,9 @@ private:
         TCodegenContext ctx(codegen);
         ctx.Func = cast<Function>(module.getOrInsertFunction(name.c_str(), funcType).getCallee());
 
+        DISubprogramAnnotator annotator(ctx, ctx.Func);
+        
+
         auto args = ctx.Func->arg_begin();
 
         ctx.Ctx = &*args;
@@ -656,6 +660,9 @@ private:
 
         TCodegenContext ctx(codegen);
         ctx.Func = cast<Function>(module.getOrInsertFunction(name.c_str(), funcType).getCallee());
+
+        DISubprogramAnnotator annotator(ctx, ctx.Func);
+        
 
         auto args = ctx.Func->arg_begin();
 

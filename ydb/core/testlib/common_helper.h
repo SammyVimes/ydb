@@ -16,10 +16,12 @@ public:
 private:
     NActors::TTestActorRuntime* Runtime;
     NActors::NLog::EPriority Priority = NActors::NLog::EPriority::PRI_DEBUG;
-    std::vector<std::vector<NKikimrServices::EServiceKikimr>> Services = {KqpServices, CSServices};
+    THashMap<TString, std::vector<NKikimrServices::EServiceKikimr>> Services;
 public:
     TLoggerInit(NActors::TTestActorRuntime* runtime)
         : Runtime(runtime) {
+        Services.emplace("KQP", KqpServices);
+        Services.emplace("CS", CSServices);
     }
     TLoggerInit(NActors::TTestActorRuntime& runtime)
         : Runtime(&runtime) {
@@ -29,12 +31,20 @@ public:
     ~TLoggerInit() {
         Initialize();
     }
-    TLoggerInit& SetComponents(const std::vector<NKikimrServices::EServiceKikimr> services) {
-        Services = { services };
+    TLoggerInit& Clear() {
+        Services.clear();
         return *this;
     }
-    TLoggerInit& AddComponents(const std::vector<NKikimrServices::EServiceKikimr> services) {
-        Services.emplace_back(services);
+    TLoggerInit& SetComponents(const std::vector<NKikimrServices::EServiceKikimr> services, const TString& name) {
+        Services[name] = services;
+        return *this;
+    }
+    TLoggerInit& AddComponents(const std::vector<NKikimrServices::EServiceKikimr> services, const TString& name) {
+        AFL_VERIFY(Services.emplace(name, services).second);
+        return *this;
+    }
+    TLoggerInit& RemoveComponents(const TString& name) {
+        Services.erase(name);
         return *this;
     }
     TLoggerInit& SetPriority(const NActors::NLog::EPriority priority) {
@@ -48,11 +58,19 @@ protected:
     void WaitForSchemeOperation(TActorId sender, ui64 txId);
     void PrintResultSet(const NYdb::TResultSet& resultSet, NYson::TYsonWriter& writer) const;
 
+    void StartSchemaRequestTableServiceImpl(const TString& request, const bool expectSuccess, const bool waiting) const;
+    void StartSchemaRequestQueryServiceImpl(const TString& request, const bool expectSuccess, const bool waiting) const;
+
     Tests::TServer& Server;
+    bool UseQueryService = false;
 public:
     THelper(TServer& server)
         : Server(server) {
 
+    }
+
+    void SetUseQueryService(bool use = true) {
+        UseQueryService = use;
     }
 
     void DropTable(const TString& tablePath);

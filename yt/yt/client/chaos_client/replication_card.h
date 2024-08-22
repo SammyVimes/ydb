@@ -35,6 +35,7 @@ struct TReplicaHistoryItem
     NTabletClient::ETableReplicaMode Mode;
     NTabletClient::ETableReplicaState State;
 
+    bool IsSync() const;
     void Persist(const TStreamPersistenceContext& context);
 };
 
@@ -51,6 +52,12 @@ struct TReplicaInfo
 
     //! Returns index of history item corresponding to timestamp, -1 if none.
     int FindHistoryItemIndex(NTransactionClient::TTimestamp timestamp) const;
+};
+
+struct TReplicationProgressProjection
+{
+    NTableClient::TUnversionedRow From;
+    NTableClient::TUnversionedRow To;
 };
 
 struct TReplicationCard
@@ -84,32 +91,47 @@ struct TReplicationCardFetchOptions
 
     operator size_t() const;
     bool operator == (const TReplicationCardFetchOptions& other) const = default;
+
+    bool Contains(const TReplicationCardFetchOptions& other) const;
 };
 
 void FormatValue(TStringBuilderBase* builder, const TReplicationCardFetchOptions& options, TStringBuf /*spec*/);
-TString ToString(const TReplicationCardFetchOptions& options);
 
 ///////////////////////////////////////////////////////////////////////////////
 
-void FormatValue(TStringBuilderBase* builder, const TReplicationProgress& replicationProgress, TStringBuf /*spec*/);
-TString ToString(const TReplicationProgress& replicationProgress);
+void FormatValue(
+    TStringBuilderBase* builder,
+    const TReplicationProgress& replicationProgress,
+    TStringBuf /*spec*/,
+    std::optional<TReplicationProgressProjection> replicationProgressProjection = std::nullopt);
 
 void FormatValue(TStringBuilderBase* builder, const TReplicaHistoryItem& replicaHistoryItem, TStringBuf /*spec*/);
-TString ToString(const TReplicaHistoryItem& replicaHistoryItem);
 
-void FormatValue(TStringBuilderBase* builder, const TReplicaInfo& replicaInfo, TStringBuf /*spec*/);
-TString ToString(const TReplicaInfo& replicaInfo);
+void FormatValue(
+    TStringBuilderBase* builder,
+    const TReplicaInfo& replicaInfo,
+    TStringBuf /*spec*/,
+    std::optional<TReplicationProgressProjection> replicationProgressProjection = std::nullopt);
 
-void FormatValue(TStringBuilderBase* builder, const TReplicationCard& replicationCard, TStringBuf /*spec*/);
-TString ToString(const TReplicationCard& replicationCard);
+void FormatValue(
+    TStringBuilderBase* builder,
+    const TReplicationCard& replicationCard,
+    TStringBuf /*spec*/,
+    std::optional<TReplicationProgressProjection> replicationProgressProjection = std::nullopt);
+TString ToString(
+    const TReplicationCard& replicationCard,
+    std::optional<TReplicationProgressProjection> replicationProgressProjection = std::nullopt);
 
 ////////////////////////////////////////////////////////////////////////////////
 
-bool IsReplicaSync(NTabletClient::ETableReplicaMode mode);
+bool IsReplicaSync(NTabletClient::ETableReplicaMode mode, const TReplicaHistoryItem& lastReplicaHistoryItem);
 bool IsReplicaAsync(NTabletClient::ETableReplicaMode mode);
 bool IsReplicaEnabled(NTabletClient::ETableReplicaState state);
 bool IsReplicaDisabled(NTabletClient::ETableReplicaState state);
-bool IsReplicaReallySync(NTabletClient::ETableReplicaMode mode, NTabletClient::ETableReplicaState state);
+bool IsReplicaReallySync(
+    NTabletClient::ETableReplicaMode mode,
+    NTabletClient::ETableReplicaState state,
+    const std::vector<TReplicaHistoryItem>& replicaHistory);
 NTabletClient::ETableReplicaMode GetTargetReplicaMode(NTabletClient::ETableReplicaMode mode);
 NTabletClient::ETableReplicaState GetTargetReplicaState(NTabletClient::ETableReplicaState state);
 
@@ -154,6 +176,19 @@ std::vector<TReplicationProgress> ScatterReplicationProgress(
     TReplicationProgress progress,
     const std::vector<NTableClient::TUnversionedRow>& pivotKeys,
     NTableClient::TUnversionedRow upperKey);
+
+bool IsReplicaLocationValid(
+    const TReplicaInfo* replica,
+    const NYPath::TYPath& tablePath,
+    const TString& clusterName);
+
+TReplicationProgress BuildMaxProgress(const TReplicationProgress& progress1, const TReplicationProgress& progress2);
+
+TDuration ComputeReplicationProgressLag(
+    const TReplicationProgress& maxProgress,
+    const TReplicationProgress& replicaProgress);
+
+THashMap<TReplicaId, TDuration> ComputeReplicasLag(const THashMap<TReplicaId, TReplicaInfo>& replicas);
 
 ////////////////////////////////////////////////////////////////////////////////
 

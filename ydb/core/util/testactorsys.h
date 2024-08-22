@@ -15,6 +15,9 @@
 #include <ydb/core/base/tablet_pipe.h>
 #include <util/system/env.h>
 #include <ydb/core/protos/config.pb.h>
+#include <ydb/core/protos/netclassifier.pb.h>
+#include <ydb/core/protos/datashard_config.pb.h>
+#include <ydb/core/protos/shared_cache.pb.h>
 
 #include "single_thread_ic_mock.h"
 
@@ -92,6 +95,7 @@ class TTestActorSystem {
     };
 
     struct TPerNodeInfo {
+        std::unique_ptr<TAppData> AppData;
         std::unique_ptr<TActorSystem> ActorSystem;
         std::unique_ptr<TMailboxTable> MailboxTable;
         std::unique_ptr<TExecutorThread> ExecutorThread;
@@ -102,15 +106,21 @@ class TTestActorSystem {
 
     struct TMailboxInfo {
         TMailboxHeader Header{TMailboxType::Simple};
-        ui64 ActorLocalId = 1;
+    };
+
+    struct TAppDataInfo {
+        TIntrusivePtr<TDomainsInfo> DomainsInfo;
+        TFeatureFlags FeatureFlags;
+        TIntrusivePtr<IMonotonicTimeProvider> MonotonicTimeProvider;
     };
 
     const ui32 MaxNodeId;
     std::map<TInstant, std::deque<TScheduleItem>> ScheduleQ;
     TInstant Clock = TInstant::Zero();
+    ui64 ActorLocalId = 1;
     std::unordered_map<TMailboxId, TMailboxInfo, THash<std::tuple<ui32, ui32, ui32>>> Mailboxes;
     TProgramShouldContinue ProgramShouldContinue;
-    TAppData AppData;
+    TAppDataInfo AppDataInfo;
     TIntrusivePtr<NLog::TSettings> LoggerSettings_;
     NActors::NLog::EPrio OwnLogPriority = NActors::NLog::EPrio::Error;
     TActorId CurrentRecipient;
@@ -140,6 +150,7 @@ class TTestActorSystem {
     std::unordered_map<TString, TActorStats> ActorStats;
     std::unordered_map<IActor*, TString> ActorName;
 
+public:
     class TEdgeActor : public TActor<TEdgeActor> {
         std::unique_ptr<IEventHandle> *HandlePtr = nullptr;
         TString Tag;
@@ -161,7 +172,7 @@ class TTestActorSystem {
         }
 
         void StateFunc(TAutoPtr<IEventHandle>& ev) {
-            Y_ABORT_UNLESS(HandlePtr, "event is not being captured by this actor Tag# %s", Tag.data());
+            Y_ABORT_UNLESS(HandlePtr, "event %s is not being captured by this actor Tag# %s", ev->GetTypeName().data(), Tag.data());
             Y_ABORT_UNLESS(!*HandlePtr);
             HandlePtr->reset(ev.Release());
         }
@@ -175,14 +186,12 @@ public:
     IOutputStream *LogStream = &Cerr;
 
 public:
-    TTestActorSystem(ui32 numNodes, NLog::EPriority defaultPrio = NLog::PRI_ERROR)
+    TTestActorSystem(ui32 numNodes, NLog::EPriority defaultPrio = NLog::PRI_ERROR, TIntrusivePtr<TDomainsInfo> domainsInfo = nullptr, TFeatureFlags featureFlags = {})
         : MaxNodeId(numNodes)
-        , AppData(0, 0, 0, 0, {{"IC", 0}}, nullptr, nullptr, nullptr, &ProgramShouldContinue)
+        , AppDataInfo({.DomainsInfo=domainsInfo, .FeatureFlags=featureFlags, .MonotonicTimeProvider=CreateMonotonicTimeProvider()})
         , LoggerSettings_(MakeIntrusive<NLog::TSettings>(TActorId(0, "logger"), NActorsServices::LOGGER, defaultPrio))
         , InterconnectMock(0, Max<ui64>(), this) // burst capacity (bytes), bytes per second
     {
-        AppData.Counters = MakeIntrusive<::NMonitoring::TDynamicCounters>();
-        AppData.DomainsInfo = MakeIntrusive<TDomainsInfo>();
         LoggerSettings_->Append(
             NActorsServices::EServiceCommon_MIN,
             NActorsServices::EServiceCommon_MAX,
@@ -199,14 +208,6 @@ public:
 
         Y_ABORT_UNLESS(!CurrentTestActorSystem);
         CurrentTestActorSystem = this;
-
-        AppData.MonotonicTimeProvider = CreateMonotonicTimeProvider();
-
-        AppData.HiveConfig.SetWarmUpBootWaitingPeriod(10);
-        AppData.HiveConfig.SetMaxNodeUsageToKick(100);
-        AppData.HiveConfig.SetMinCounterScatterToBalance(100);
-        AppData.HiveConfig.SetMinScatterToBalance(100);
-        AppData.HiveConfig.SetObjectImbalanceToBalance(100);
     }
 
     ~TTestActorSystem() {
@@ -217,8 +218,27 @@ public:
     static TIntrusivePtr<ITimeProvider> CreateTimeProvider();
     static TIntrusivePtr<IMonotonicTimeProvider> CreateMonotonicTimeProvider();
 
-    TAppData *GetAppData() {
-        return &AppData;
+    const static ui32 SYSTEM_POOL_ID;
+
+    const TIntrusivePtr<TDomainsInfo> GetDomainsInfo() const {
+        return AppDataInfo.DomainsInfo;
+    }
+
+    std::unique_ptr<TAppData> MakeAppData() {
+        auto appData = std::make_unique<TAppData>(SYSTEM_POOL_ID, 0, 0, 0, TMap<TString, ui32>{{"IC", 0}}, nullptr, nullptr, nullptr, &ProgramShouldContinue);
+        appData->Counters = MakeIntrusive<::NMonitoring::TDynamicCounters>();
+
+        appData->DomainsInfo = AppDataInfo.DomainsInfo;
+        appData->MonotonicTimeProvider = AppDataInfo.MonotonicTimeProvider;
+        appData->FeatureFlags = AppDataInfo.FeatureFlags;
+
+        appData->HiveConfig.SetWarmUpBootWaitingPeriod(10);
+        appData->HiveConfig.SetMaxNodeUsageToKick(100);
+        appData->HiveConfig.SetMinCounterScatterToBalance(100);
+        appData->HiveConfig.SetMinScatterToBalance(100);
+        appData->HiveConfig.SetObjectImbalanceToBalance(100);
+
+        return appData;
     }
 
     template<typename T>
@@ -261,7 +281,8 @@ public:
             }
         }
 
-        info.ActorSystem = std::make_unique<TActorSystem>(setup, &AppData, LoggerSettings_);
+        info.AppData = std::move(MakeAppData());
+        info.ActorSystem = std::make_unique<TActorSystem>(setup, info.AppData.get(), LoggerSettings_);
         info.MailboxTable = std::make_unique<TMailboxTable>();
         info.ExecutorThread = std::make_unique<TExecutorThread>(0, 0, info.ActorSystem.get(), pool,
             info.MailboxTable.get(), "TestExecutor");
@@ -279,11 +300,13 @@ public:
         TPerNodeInfo& info = PerNodeInfo.at(nodeId);
         info.ActorSystem->Stop();
 
-        for (;;) {
+        bool found;
+        do {
+            found = false;
+
             // delete all mailboxes from this node (expecting that new one can be created during deletion)
             const TMailboxId from(nodeId, 0, 0);
             const TMailboxId to(nodeId + 1, 0, 0);
-            bool found = false;
             for (auto it = Mailboxes.begin(); it != Mailboxes.end(); ) {
                 if (from <= it->first && it->first < to) {
                     TMailboxInfo& mbox = it->second;
@@ -295,36 +318,34 @@ public:
                     ++it;
                 }
             }
-            if (found) {
-                continue;
-            }
 
-            std::deque<TScheduleItem> deleteQueue;
             auto it = ScheduleQ.begin();
             while (it != ScheduleQ.end()) {
                 auto& queue = it->second;
-                bool found = false;
+                bool foundItem = false;
                 for (auto& item : queue) {
                     if (item.NodeId == nodeId) {
-                        found = true;
+                        foundItem = true;
                         break;
                     }
                 }
-                if (found) {
+                if (foundItem) {
                     std::deque<TScheduleItem> newQueue;
                     for (auto& item : queue) {
-                        (item.NodeId == nodeId ? deleteQueue : newQueue).push_back(std::move(item));
+                        if (item.NodeId != nodeId) {
+                            newQueue.push_back(std::move(item));
+                        }
                     }
                     queue.swap(newQueue);
-                    it = queue.empty() ? ScheduleQ.erase(it) : std::next(it);
+                    if (queue.empty()) {
+                        it = ScheduleQ.erase(it);
+                    }
+                    found = true;
                 } else {
                     ++it;
                 }
             }
-            if (deleteQueue.empty()) {
-                break;
-            }
-        }
+        } while (found);
 
         PerNodeInfo.erase(nodeId);
         SetupNode(nodeId, PerNodeInfo[nodeId]);
@@ -473,11 +494,11 @@ public:
         // register actor in mailbox
         const auto& it = Mailboxes.try_emplace(TMailboxId(nodeId, poolId, mboxId)).first;
         TMailboxInfo& mbox = it->second;
-        mbox.Header.AttachActor(mbox.ActorLocalId, actor);
+        mbox.Header.AttachActor(ActorLocalId, actor);
 
         // generate actor id
-        const TActorId actorId(nodeId, poolId, mbox.ActorLocalId, mboxId);
-        ++mbox.ActorLocalId;
+        const TActorId actorId(nodeId, poolId, ActorLocalId, mboxId);
+        ++ActorLocalId;
         if (OwnLogPriority >= NActors::NLog::EPrio::Info) {
             *LogStream << "[TestActorSystem] Register actor \"" << name << "\" with id " << actorId.ToString() << Endl;
             RegisterActorName(actorId, name);
@@ -541,7 +562,7 @@ public:
             if (FilterFunction && !FilterFunction(item->NodeId, event)) { // event is dropped by the filter function
                 continue;
             }
-            WrapInActorContext(TransformEvent(event.get(), item->NodeId), [&](IActor *actor) {
+            const bool success = WrapInActorContext(TransformEvent(event.get(), item->NodeId), [&](IActor *actor) {
                 TAutoPtr<IEventHandle> ev(event.release());
 
                 const ui32 type = ev->GetTypeRewrite();
@@ -559,14 +580,18 @@ public:
 
                 ++EventsProcessed;
             });
+            if (!success) { // can't find the actor
+                event = IEventHandle::ForwardOnNondelivery(std::move(event), TEvents::TEvUndelivered::ReasonActorUnknown);
+                Send(event.release(), item->NodeId);
+            }
         }
     }
 
     template<typename TCallback>
-    void WrapInActorContext(TActorId actorId, TCallback&& callback) {
+    bool WrapInActorContext(TActorId actorId, TCallback&& callback) {
         const auto mboxIt = Mailboxes.find(actorId);
         if (mboxIt == Mailboxes.end()) {
-            return;
+            return false;
         }
         TMailboxInfo& mbox = mboxIt->second;
         if (IActor *actor = mbox.Header.FindActor(actorId.LocalId())) {
@@ -618,7 +643,9 @@ public:
             if (mbox.Header.IsEmpty()) {
                 Mailboxes.erase(mboxIt);
             }
+            return true;
         }
+        return false;
     }
 
     TActorId AllocateEdgeActor(ui32 nodeId, const char *file = "", int line = 0) {
@@ -715,6 +742,12 @@ public:
         }
     }
 
+    TPerNodeInfo *GetNode(ui32 nodeId) {
+        const auto nodeIt = PerNodeInfo.find(nodeId);
+        Y_ABORT_UNLESS(nodeIt != PerNodeInfo.end());
+        return &nodeIt->second;
+    }
+
     TInstant GetClock() const { return Clock; }
     ui64 GetEventsProcessed() const { return EventsProcessed; }
 
@@ -751,12 +784,6 @@ private:
         }
         Y_ABORT_UNLESS(!recip || (recip.NodeId() == nodeId && !recip.IsService()));
         return recip;
-    }
-
-    TPerNodeInfo *GetNode(ui32 nodeId) {
-        const auto nodeIt = PerNodeInfo.find(nodeId);
-        Y_ABORT_UNLESS(nodeIt != PerNodeInfo.end());
-        return &nodeIt->second;
     }
 };
 

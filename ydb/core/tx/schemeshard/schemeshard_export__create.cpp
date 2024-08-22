@@ -51,12 +51,19 @@ struct TSchemeShard::TExport::TTxCreate: public TSchemeShard::TXxport::TTxBase {
         }
 
         const TString& uid = GetUid(request.GetRequest().GetOperationParams().labels());
-        if (uid && Self->ExportsByUid.contains(uid)) {
-            return Reply(
-                std::move(response),
-                Ydb::StatusIds::ALREADY_EXISTS,
-                TStringBuilder() << "Export with uid '" << uid << "' already exists"
-            );
+        if (uid) {
+            if (auto it = Self->ExportsByUid.find(uid); it != Self->ExportsByUid.end()) {
+                if (IsSameDomain(it->second, request.GetDatabaseName())) {
+                    Self->FromXxportInfo(*response->Record.MutableResponse()->MutableEntry(), it->second);
+                    return Reply(std::move(response));
+                } else {
+                    return Reply(
+                        std::move(response),
+                        Ydb::StatusIds::ALREADY_EXISTS,
+                        TStringBuilder() << "Export with uid '" << uid << "' already exists"
+                    );
+                }
+            }
         }
 
         const TPath domainPath = TPath::Resolve(request.GetDatabaseName(), Self);
@@ -122,7 +129,7 @@ struct TSchemeShard::TExport::TTxCreate: public TSchemeShard::TXxport::TTxBase {
             break;
 
         default:
-            Y_DEBUG_ABORT_UNLESS(false, "Unknown export kind");
+            Y_DEBUG_ABORT("Unknown export kind");
         }
 
         Y_ABORT_UNLESS(exportInfo != nullptr);
@@ -135,6 +142,7 @@ struct TSchemeShard::TExport::TTxCreate: public TSchemeShard::TXxport::TTxBase {
         Self->PersistCreateExport(db, exportInfo);
 
         exportInfo->State = TExportInfo::EState::CreateExportDir;
+        exportInfo->StartTime = TAppData::TimeProvider->Now();
         Self->PersistExportState(db, exportInfo);
 
         Self->Exports[id] = exportInfo;
@@ -200,7 +208,8 @@ private:
                     .IsResolved()
                     .NotDeleted()
                     .NotUnderDeleting()
-                    .IsTable();
+                    .IsTable()
+                    .FailOnRestrictedCreateInTempZone();
 
                 if (!checks) {
                     explain = checks.GetError();
@@ -478,6 +487,10 @@ private:
 
             CancelTransferring(exportInfo, i);
         }
+
+        if (exportInfo->State == EState::Cancelled) {
+            exportInfo->EndTime = TAppData::TimeProvider->Now();
+        }
     }
 
     TMaybe<TString> GetIssues(const TPathId& itemPathId, TTxId backupTxId) {
@@ -572,6 +585,10 @@ private:
 
                     Self->PersistExportItemState(db, exportInfo, itemIdx);
                 }
+            }
+
+            if (exportInfo->State == EState::Cancelled) {
+                exportInfo->EndTime = TAppData::TimeProvider->Now();
             }
 
             Self->PersistExportState(db, exportInfo);
@@ -797,6 +814,7 @@ private:
 
                     exportInfo->Issue = record.GetReason();
                     exportInfo->State = EState::Cancelled;
+                    exportInfo->EndTime = TAppData::TimeProvider->Now();
                 }
 
                 Self->PersistExportState(db, exportInfo);
@@ -941,6 +959,7 @@ private:
             } else {
                 if (AllOf(exportInfo->Items, &TExportInfo::TItem::IsDone)) {
                     exportInfo->State = EState::Done;
+                    exportInfo->EndTime = TAppData::TimeProvider->Now();
                 }
             }
 

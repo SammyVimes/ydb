@@ -77,6 +77,17 @@ Ydb::ResultSet* TKqpExecuterTxResult::GetYdb(google::protobuf::Arena* arena, TMa
     return ydbResult;
 }
 
+Ydb::ResultSet* TKqpExecuterTxResult::ExtractTrailingYdb(google::protobuf::Arena* arena) {
+    if (!HasTrailingResult)
+        return nullptr;
+
+    Ydb::ResultSet* ydbResult = google::protobuf::Arena::CreateMessage<Ydb::ResultSet>(arena);
+    ydbResult->Swap(&TrailingResult);
+
+    return ydbResult;
+}
+
+
 void TKqpExecuterTxResult::FillYdb(Ydb::ResultSet* ydbResult, TMaybe<ui64> rowsLimitPerWrite) {
     YQL_ENSURE(ydbResult);
     YQL_ENSURE(!Rows.IsWide());
@@ -89,7 +100,7 @@ void TKqpExecuterTxResult::FillYdb(Ydb::ResultSet* ydbResult, TMaybe<ui64> rowsL
         column->set_name(TString(mkqlSrcRowStructType->GetMemberName(memberIndex)));
         ExportTypeToProto(mkqlSrcRowStructType->GetMemberType(memberIndex), *column->mutable_type());
     }
-    
+
     Rows.ForEachRow([&](const NUdf::TUnboxedValue& value) -> bool {
         if (rowsLimitPerWrite) {
             if (*rowsLimitPerWrite == 0) {
@@ -106,19 +117,19 @@ void TKqpExecuterTxResult::FillYdb(Ydb::ResultSet* ydbResult, TMaybe<ui64> rowsL
 
 TTxAllocatorState::TTxAllocatorState(const IFunctionRegistry* functionRegistry,
     TIntrusivePtr<ITimeProvider> timeProvider, TIntrusivePtr<IRandomProvider> randomProvider)
-    : Alloc(__LOCATION__, NKikimr::TAlignedPagePoolCounters(), functionRegistry->SupportsSizedAllocators())
-    , TypeEnv(Alloc)
+    : Alloc(std::make_shared<NKikimr::NMiniKQL::TScopedAlloc>(__LOCATION__, NKikimr::TAlignedPagePoolCounters(), functionRegistry->SupportsSizedAllocators()))
+    , TypeEnv(*Alloc)
     , MemInfo("TQueryData")
-    , HolderFactory(Alloc.Ref(), MemInfo, functionRegistry)
+    , HolderFactory(Alloc->Ref(), MemInfo, functionRegistry)
 {
-    Alloc.Release();
+    Alloc->Release();
     TimeProvider = timeProvider;
     RandomProvider = randomProvider;
 }
 
 TTxAllocatorState::~TTxAllocatorState()
 {
-    Alloc.Acquire();
+    Alloc->Acquire();
 }
 
 std::pair<NKikimr::NMiniKQL::TType*, NUdf::TUnboxedValue> TTxAllocatorState::GetInternalBindingValue(
@@ -127,21 +138,21 @@ std::pair<NKikimr::NMiniKQL::TType*, NUdf::TUnboxedValue> TTxAllocatorState::Get
     auto& internalBinding = paramBinding.GetInternalBinding();
     switch (internalBinding.GetType()) {
         case NKqpProto::TKqpPhyInternalBinding::PARAM_NOW:
-            return {TypeEnv.GetUi64(), TUnboxedValuePod(ui64(GetCachedNow()))};
+            return {TypeEnv.GetUi64Lazy(), TUnboxedValuePod(ui64(GetCachedNow()))};
         case NKqpProto::TKqpPhyInternalBinding::PARAM_CURRENT_DATE: {
             ui32 date = GetCachedDate();
             YQL_ENSURE(date <= Max<ui32>());
-            return {TypeEnv.GetUi32(), TUnboxedValuePod(ui32(date))};
+            return {TypeEnv.GetUi32Lazy(), TUnboxedValuePod(ui32(date))};
         }
         case NKqpProto::TKqpPhyInternalBinding::PARAM_CURRENT_DATETIME: {
             ui64 datetime = GetCachedDatetime();
             YQL_ENSURE(datetime <= Max<ui32>());
-            return {TypeEnv.GetUi32(), TUnboxedValuePod(ui32(datetime))};
+            return {TypeEnv.GetUi32Lazy(), TUnboxedValuePod(ui32(datetime))};
         }
         case NKqpProto::TKqpPhyInternalBinding::PARAM_CURRENT_TIMESTAMP:
-            return {TypeEnv.GetUi64(), TUnboxedValuePod(ui64(GetCachedTimestamp()))};
+            return {TypeEnv.GetUi64Lazy(), TUnboxedValuePod(ui64(GetCachedTimestamp()))};
         case NKqpProto::TKqpPhyInternalBinding::PARAM_RANDOM_NUMBER:
-            return {TypeEnv.GetUi64(), TUnboxedValuePod(ui64(GetCachedRandom<ui64>()))};
+            return {TypeEnv.GetUi64Lazy(), TUnboxedValuePod(ui64(GetCachedRandom<ui64>()))};
         case NKqpProto::TKqpPhyInternalBinding::PARAM_RANDOM:
             return {NKikimr::NMiniKQL::TDataType::Create(NUdf::TDataType<double>::Id, TypeEnv),
                 TUnboxedValuePod(double(GetCachedRandom<double>()))};
@@ -223,6 +234,13 @@ NKikimrMiniKQL::TResult* TQueryData::GetMkqlTxResult(const NKqpProto::TKqpPhyRes
     auto g = TypeEnv().BindAllocator();
     return TxResults[txIndex][resultIndex].GetMkql(arena);
 }
+
+Ydb::ResultSet* TQueryData::ExtractTrailingTxResult(const NKqpProto::TKqpPhyResultBinding& rb, google::protobuf::Arena* arena) {
+    auto txIndex = rb.GetTxResultBinding().GetTxIndex();
+    auto resultIndex = rb.GetTxResultBinding().GetResultIndex();
+    return TxResults[txIndex][resultIndex].ExtractTrailingYdb(arena);
+}
+
 
 Ydb::ResultSet* TQueryData::GetYdbTxResult(const NKqpProto::TKqpPhyResultBinding& rb, google::protobuf::Arena* arena, TMaybe<ui64> rowsLimitPerWrite) {
     auto txIndex = rb.GetTxResultBinding().GetTxIndex();
@@ -348,7 +366,7 @@ const NKikimrMiniKQL::TParams* TQueryData::GetParameterMiniKqlValue(const TStrin
 
     auto it = Params.find(name);
     if (it == Params.end()) {
-        with_lock(AllocState->Alloc) {
+        with_lock(*AllocState->Alloc) {
             const auto& [type, uv] = GetParameterUnboxedValue(name);
             NKikimrMiniKQL::TParams param;
             ExportTypeToProto(type, *param.MutableType());
@@ -370,7 +388,7 @@ const Ydb::TypedValue* TQueryData::GetParameterTypedValue(const TString& name) {
 
     auto it = ParamsProtobuf.find(name);
     if (it == ParamsProtobuf.end()) {
-        with_lock(AllocState->Alloc) {
+        with_lock(*AllocState->Alloc) {
             const auto& [type, uv] = GetParameterUnboxedValue(name);
 
             auto& tv = ParamsProtobuf[name];

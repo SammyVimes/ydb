@@ -3,6 +3,7 @@
 #include <ydb/library/yql/providers/yt/lib/skiff/yql_skiff_schema.h>
 #include <ydb/library/yql/providers/yt/common/yql_names.h>
 #include <ydb/library/yql/providers/yt/common/yql_configuration.h>
+#include <ydb/library/yql/providers/common/provider/yql_provider.h>
 #include <ydb/library/yql/providers/yt/codec/yt_codec.h>
 #include <ydb/library/yql/providers/yt/gateway/lib/yt_helpers.h>
 #include <ydb/library/yql/providers/yt/expr_nodes/yql_yt_expr_nodes.h>
@@ -55,12 +56,18 @@ TGatewayTransformer::TGatewayTransformer(const TExecContextBase& execCtx, TYtSet
     , JobUdfs_(std::make_shared<THashMap<TString, TString>>())
     , UniqFiles_(std::make_shared<THashMap<TString, TString>>())
     , RemoteFiles_(std::make_shared<TVector<NYT::TRichYPath>>())
-    , LocalFiles_(std::make_shared<TVector<std::pair<TString, TString>>>())
-    , DeferredUdfFiles_(std::make_shared<TVector<std::pair<TString, TString>>>())
+    , LocalFiles_(std::make_shared<TVector<std::pair<TString, TLocalFileInfo>>>())
+    , DeferredUdfFiles_(std::make_shared<TVector<std::pair<TString, TLocalFileInfo>>>())
 
 {
     if (optLLVM != "OFF") {
         *UsedMem_ = 128_MB;
+    }
+
+    for (const auto& f: ExecCtx_.UserFiles_->GetFiles()) {
+        if (f.second.IsPgExt || f.second.IsPgCatalog) {
+            AddFile(f.second.IsPgCatalog ? TString(NCommon::PgCatalogFileName) : "", f.second);
+        }
     }
 }
 
@@ -244,7 +251,7 @@ TCallableVisitFunc TGatewayTransformer::operator()(TInternName name) {
                                     out->Finish();
                                 } catch (const yexception& e) {
                                     YQL_CLOG(ERROR, ProviderYt) << "Error transferring " << richYPathDesc << " to " << remotePath << ": " << e.what();
-                                    if (reader->Retry(Nothing(), Nothing())) {
+                                    if (reader->Retry(Nothing(), Nothing(), std::make_exception_ptr(e))) {
                                         continue;
                                     }
                                     throw;
@@ -279,7 +286,7 @@ TCallableVisitFunc TGatewayTransformer::operator()(TInternName name) {
                                     throw;
                                 } catch (const yexception& e) {
                                     YQL_CLOG(ERROR, ProviderYt) << "Error reading " << richYPathDesc << ": " << e.what();
-                                    if (reader->Retry(Nothing(), Nothing())) {
+                                    if (reader->Retry(Nothing(), Nothing(), std::make_exception_ptr(e))) {
                                         continue;
                                     }
                                     throw;
@@ -289,7 +296,7 @@ TCallableVisitFunc TGatewayTransformer::operator()(TInternName name) {
                             YQL_CLOG(DEBUG, ProviderYt) << "Passing table " << richYPathDesc << " as file "
                                 << fileName.Quote() << " (size=" << TFileStat(outPath).Size << ')';
 
-                            LocalFiles_->emplace_back(outPath, TString());
+                            LocalFiles_->emplace_back(outPath, TLocalFileInfo{TString(), false});
                         }
                     }
                 }
@@ -320,6 +327,10 @@ TCallableVisitFunc TGatewayTransformer::operator()(TInternName name) {
                     callable.GetType()->GetName() == TStringBuf("ScriptUdf") ||
                     !ExecCtx_.FunctionRegistry_->IsLoadedUdfModule(moduleName) ||
                     moduleName == TStringBuf("Geo");
+
+                if (moduleName.StartsWith("SystemPython")) {
+                    *RemoteExecutionFlag_ = true;
+                }
 
                 const auto udfPath = FindUdfPath(moduleName);
                 if (!udfPath.StartsWith(NMiniKQL::StaticModulePrefix)) {
@@ -424,19 +435,21 @@ void TGatewayTransformer::ApplyUserJobSpec(NYT::TUserJobSpec& spec, bool localRu
     bool fakeChecksum = (GetEnv("YQL_LOCAL") == "1");  // YQL-15353
     for (auto& file: *LocalFiles_) {
         TAddLocalFileOptions opts;
-        if (!fakeChecksum && file.second) {
-            opts.MD5CheckSum(file.second);
+        if (!fakeChecksum && file.second.Hash) {
+            opts.MD5CheckSum(file.second.Hash);
         }
+        opts.BypassArtifactCache(file.second.BypassArtifactCache);
         spec.AddLocalFile(file.first, opts);
     }
     const TString binTmpFolder = Settings_->BinaryTmpFolder.Get().GetOrElse(TString());
     if (localRun || !binTmpFolder) {
         for (auto& file: *DeferredUdfFiles_) {
             TAddLocalFileOptions opts;
-            if (!fakeChecksum && file.second) {
-                opts.MD5CheckSum(file.second);
+            if (!fakeChecksum && file.second.Hash) {
+                opts.MD5CheckSum(file.second.Hash);
             }
             YQL_ENSURE(TFileStat(file.first).Size != 0);
+            opts.BypassArtifactCache(file.second.BypassArtifactCache);
             spec.AddLocalFile(file.first, opts);
         }
     } else {
@@ -444,8 +457,8 @@ void TGatewayTransformer::ApplyUserJobSpec(NYT::TUserJobSpec& spec, bool localRu
         auto entry = GetEntry();
         for (auto& file: *DeferredUdfFiles_) {
             YQL_ENSURE(TFileStat(file.first).Size != 0);
-            auto snapshot = entry->GetBinarySnapshot(binTmpFolder, file.second, file.first, binExpiration);
-            spec.AddFile(TRichYPath(snapshot.first).TransactionId(snapshot.second).FileName(TFsPath(file.first).GetName()).Executable(true));
+            auto snapshot = entry->GetBinarySnapshot(binTmpFolder, file.second.Hash, file.first, binExpiration);
+            spec.AddFile(TRichYPath(snapshot.first).TransactionId(snapshot.second).FileName(TFsPath(file.first).GetName()).Executable(true).BypassArtifactCache(file.second.BypassArtifactCache));
         }
     }
     RemoteFiles_->clear();
@@ -482,9 +495,9 @@ void TGatewayTransformer::AddFile(TString alias,
             filePath = fileInfo.Path->GetPath();
             *UsedMem_ += fileInfo.InMemorySize;
             if (fileInfo.IsUdf) {
-                DeferredUdfFiles_->emplace_back(filePath, fileInfo.Path->GetMd5());
+                DeferredUdfFiles_->emplace_back(filePath, TLocalFileInfo{fileInfo.Path->GetMd5(), fileInfo.BypassArtifactCache});
             } else {
-                LocalFiles_->emplace_back(filePath, fileInfo.Path->GetMd5());
+                LocalFiles_->emplace_back(filePath, TLocalFileInfo{fileInfo.Path->GetMd5(), fileInfo.BypassArtifactCache});
             }
         } else {
             filePath = insertRes.first->second;
@@ -507,7 +520,7 @@ void TGatewayTransformer::AddFile(TString alias,
         }
         auto insertRes = UniqFiles_->insert({alias, remoteFile.Path_});
         if (insertRes.second) {
-            RemoteFiles_->push_back(remoteFile.Executable(true));
+            RemoteFiles_->push_back(remoteFile.Executable(true).BypassArtifactCache(fileInfo.BypassArtifactCache));
             if (fileInfo.RemoteMemoryFactor > 0.) {
                 *UsedMem_ += fileInfo.RemoteMemoryFactor * GetUncompressedFileSize(GetTx(), remoteFile.Path_).GetOrElse(ui64(1) << 10);
             }

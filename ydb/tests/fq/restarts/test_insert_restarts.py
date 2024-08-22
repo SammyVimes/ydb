@@ -27,7 +27,9 @@ class TestS3(object):
             select COUNT(idx) from {0}.`{1}` with (format={2}, schema(
                 idx Int NOT NULL
             ))
-        '''.format(connection, prefix, format)
+        '''.format(
+            connection, prefix, format
+        )
 
         query_id = client.create_query("simple", sql, type=fq.QueryContent.QueryType.ANALYTICS).result.query_id
         client.wait_query_status(query_id, fq.QueryMeta.COMPLETED)
@@ -39,10 +41,7 @@ class TestS3(object):
     @pytest.mark.parametrize("client", [{"folder_id": "my_folder"}], indirect=True)
     def test_atomic_upload_commit(self, kikimr, s3, client):
         resource = boto3.resource(
-            "s3",
-            endpoint_url=s3.s3_url,
-            aws_access_key_id="key",
-            aws_secret_access_key="secret_key"
+            "s3", endpoint_url=s3.s3_url, aws_access_key_id="key", aws_secret_access_key="secret_key"
         )
 
         # Creating select content
@@ -51,10 +50,7 @@ class TestS3(object):
         bucket.objects.all().delete()
 
         s3_client = boto3.client(
-            "s3",
-            endpoint_url=s3.s3_url,
-            aws_access_key_id="key",
-            aws_secret_access_key="secret_key"
+            "s3", endpoint_url=s3.s3_url, aws_access_key_id="key", aws_secret_access_key="secret_key"
         )
 
         number_rows = 10000000
@@ -79,7 +75,9 @@ class TestS3(object):
         start = time.time()
         deadline = start + timeout
         while True:
-            current_number_rows = self.run_atomic_upload_check_query(client, bucket, "ibucket", "insert/", "csv_with_names")
+            current_number_rows = self.run_atomic_upload_check_query(
+                client, bucket, "ibucket", "insert/", "csv_with_names"
+            )
             if current_number_rows == number_rows:
                 break
 
@@ -93,7 +91,12 @@ class TestS3(object):
             assert time.time() < deadline, f"Insert not finished for already {time.time() - start} seconds"
             time.sleep(0.001)
 
-        client.wait_query(query_id, statuses=[fq.QueryMeta.COMPLETED, fq.QueryMeta.ABORTED_BY_SYSTEM, fq.QueryMeta.FAILED], timeout=timeout)
+        kikimr.compute_plane.wait_bootstrap()
+        client.wait_query(
+            query_id,
+            statuses=[fq.QueryMeta.COMPLETED, fq.QueryMeta.ABORTED_BY_SYSTEM, fq.QueryMeta.FAILED],
+            timeout=timeout,
+        )
 
         final_number_rows = self.run_atomic_upload_check_query(client, bucket, "ibucket", "insert/", "csv_with_names")
         query = client.describe_query(query_id).result.query
@@ -104,12 +107,12 @@ class TestS3(object):
         elif final_status == fq.QueryMeta.ABORTED_BY_SYSTEM:
             assert self.get_issues_depth(query.issue) <= 3, str(query.issue)
             assert self.get_issues_depth(query.transient_issue) <= 3, str(query.transient_issue)
-            assert "Query failed with code UNAVAILABLE at" in query.issue[0].message, query.issue[0].message
+            assert "Lease expired" in str(query.issue), str(query.issue)
             assert final_number_rows == 0, "Incomplete final result in bucket"
         else:
             assert self.get_issues_depth(query.issue) <= 3, str(query.issue)
             assert self.get_issues_depth(query.transient_issue) <= 3, str(query.transient_issue)
-            assert "Query failed with code UNAVAILABLE at" in query.issue[0].message, query.issue[0].message
+            assert "Lease expired" in str(query.issue), str(query.issue)
             assert final_number_rows == 0 or final_number_rows == number_rows
 
         assert len(list(bucket.multipart_uploads.all())) == 0, "Unexpected uncommited upload in bucket"

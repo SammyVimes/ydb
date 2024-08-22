@@ -9,6 +9,10 @@
 #include <ydb/core/tx/schemeshard/schemeshard_export.h>
 #include <ydb/core/tx/schemeshard/schemeshard_identificators.h>
 #include <ydb/core/tx/schemeshard/schemeshard_import.h>
+#include <ydb/library/ydb_issue/proto/issue_id.pb.h>
+#include <ydb/public/api/protos/ydb_status_codes.pb.h>
+#include <ydb/core/protos/follower_group.pb.h>
+#include <ydb/core/protos/msgbus_kv.pb.h>
 
 #include <ydb/public/sdk/cpp/client/ydb_driver/driver.h>
 
@@ -57,6 +61,11 @@ namespace NSchemeShardUT_Private {
         OPTION(std::optional<bool>, EnableChangefeedDynamoDBStreamsFormat, std::nullopt);
         OPTION(std::optional<bool>, EnableChangefeedDebeziumJsonFormat, std::nullopt);
         OPTION(std::optional<bool>, EnableTablePgTypes, std::nullopt);
+        OPTION(std::optional<bool>, EnableServerlessExclusiveDynamicNodes, std::nullopt);
+        OPTION(std::optional<bool>, EnableAddColumsWithDefaults, std::nullopt);
+        OPTION(std::optional<bool>, EnableReplaceIfExistsForExternalEntities, std::nullopt);
+        OPTION(std::optional<TString>, GraphBackendType, std::nullopt);
+        OPTION(std::optional<bool>, EnableChangefeedsOnIndexTables, std::nullopt);
 
         #undef OPTION
     };
@@ -77,6 +86,8 @@ namespace NSchemeShardUT_Private {
         THolder<NYdb::TDriver> YdbDriver;
 
     public:
+        static bool ENABLE_SCHEMESHARD_LOG;
+
         TTestEnv(TTestActorRuntime& runtime, ui32 nchannels = 4, bool enablePipeRetries = true,
             TSchemeShardFactory ssFactory = &CreateFlatTxSchemeShard, bool enableSystemViews = false);
         TTestEnv(TTestActorRuntime& runtime, const TTestEnvOptions& opts,
@@ -112,6 +123,10 @@ namespace NSchemeShardUT_Private {
 
         void SimulateSleep(TTestActorRuntime& runtime, TDuration duration);
 
+        void TestServerlessComputeResourcesModeInHive(TTestActorRuntime& runtime, const TString& path,
+                                                      NKikimrSubDomains::EServerlessComputeResourcesMode serverlessComputeResourcesMode,
+                                                      ui64 hive = TTestTxConfig::Hive);
+
         TEvSchemeShard::TEvInitRootShardResult::EStatus InitRoot(TTestActorRuntime& runtime, ui64 schemeRoot, const TActorId& sender, const TString& domainName, const TDomainsInfo::TDomain::TStoragePoolKinds& StoragePoolTypes = {}, const TString& owner = {});
         void InitRootStoragePools(TTestActorRuntime& runtime, ui64 schemeRoot, const TActorId& sender, ui64 domainUid);
 
@@ -119,7 +134,7 @@ namespace NSchemeShardUT_Private {
 
     private:
         static std::function<IActor*(const TActorId&, TTabletStorageInfo*)> GetTabletCreationFunc(ui32 type);
-        void AddDomain(TTestActorRuntime& runtime, TAppPrepare& app, ui32 domainUid, ui32 ssId, ui64 hive, ui64 schemeRoot);
+        void AddDomain(TTestActorRuntime& runtime, TAppPrepare& app, ui32 domainUid, ui64 hive, ui64 schemeRoot);
 
         void BootSchemeShard(TTestActorRuntime& runtime, ui64 schemeRoot);
         void BootTxAllocator(TTestActorRuntime& runtime, ui64 tabletId);

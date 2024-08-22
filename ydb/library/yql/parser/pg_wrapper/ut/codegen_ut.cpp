@@ -1,3 +1,5 @@
+#include "../pg_compat.h"
+
 #include <library/cpp/testing/unittest/registar.h>
 #include <library/cpp/resource/resource.h>
 #include <ydb/library/yql/minikql/codegen/codegen.h>
@@ -25,7 +27,10 @@ using namespace NYql;
 using namespace NYql::NCodegen;
 
 extern "C" {
+Y_PRAGMA_DIAGNOSTIC_PUSH
+Y_PRAGMA("GCC diagnostic ignored \"-Wreturn-type-c-linkage\"")
 #include <ydb/library/yql/parser/pg_wrapper/pg_kernels_fwd.inc>
+Y_PRAGMA_DIAGNOSTIC_POP
 }
 
 enum class EKernelFlavor {
@@ -155,12 +160,8 @@ Y_UNIT_TEST_SUITE(TPgCodegen) {
         kernelCtx.SetState(&state);
         FmgrInfo finfo;
         Zero(state.flinfo);
-        if (fixed) {
-            fmgr_info(NPg::LookupProc("date_eq", { 0, 0}).ProcId, &state.flinfo);
-        } else {
-            fmgr_info(NPg::LookupProc("textout", { 0} ).ProcId, &state.flinfo);
-        }
-
+        state.ProcDesc = fixed ? &NPg::LookupProc("date_eq", { 0, 0 }) : &NPg::LookupProc("textout", { 0 });
+        fmgr_info(state.ProcDesc->ProcId, &state.flinfo);
         state.context = nullptr;
         state.resultinfo = nullptr;
         state.fncollation = DEFAULT_COLLATION_OID;
@@ -209,7 +210,7 @@ Y_UNIT_TEST_SUITE(TPgCodegen) {
                 NUdf::ZeroMemoryContext(s.data() + sizeof(void*));
                 auto t = (text*)(s.data() + sizeof(void*));
                 SET_VARSIZE(t, VARHDRSZ + 500);
-                builder.Append(s);
+                ARROW_OK(builder.Append(s));
             }
 
             std::shared_ptr<arrow::ArrayData> out;

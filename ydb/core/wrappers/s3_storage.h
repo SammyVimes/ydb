@@ -3,7 +3,6 @@
 #ifndef KIKIMR_DISABLE_S3_OPS
 
 #include "abstract.h"
-#include "s3_storage_config.h"
 
 #include <ydb/core/protos/flat_scheme_op.pb.h>
 #include <ydb/core/wrappers/events/common.h>
@@ -32,7 +31,7 @@
 
 namespace NKikimr::NWrappers::NExternalStorage {
 
-class TS3ExternalStorage: public IExternalStorageOperator, TS3User {
+class TS3ExternalStorage: public IExternalStorageOperator {
 private:
     THolder<Aws::S3::S3Client> Client;
     const Aws::Client::ClientConfiguration Config;
@@ -67,9 +66,7 @@ private:
                 Y_DEFER {
                     std::unique_lock guard(RunningQueriesMutex);
                     --RunningQueriesCount;
-                    bool needNotify = (RunningQueriesCount == 0);
-                    guard.unlock();
-                    if (needNotify) {
+                    if (RunningQueriesCount == 0) {
                         RunningQueriesNotifier.notify_all();
                     }
                 };
@@ -105,12 +102,13 @@ public:
     TS3ExternalStorage(const Aws::Client::ClientConfiguration& config,
         const Aws::Auth::AWSCredentials& credentials,
         const TString& bucket, const Aws::S3::Model::StorageClass storageClass,
-        bool verbose = true)
+        bool verbose = true,
+        bool useVirtualAdressing = true)
         : Client(new Aws::S3::S3Client(
             credentials,
             config,
             Aws::Client::AWSAuthV4Signer::PayloadSigningPolicy::Never,
-            /*useVirtualAddressing=*/ true))
+            useVirtualAdressing))
         , Config(config)
         , Credentials(credentials)
         , Bucket(bucket)

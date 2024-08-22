@@ -27,6 +27,7 @@ struct TPipeReaderToWriterOptions
     i64 BufferDataWeight = 16_MB;
     bool ValidateValues = false;
     NConcurrency::IThroughputThrottlerPtr Throttler;
+    std::function<TError(TError readerError)> ReaderErrorWrapper;
     // Used only for testing.
     TDuration PipeDelay;
 };
@@ -36,10 +37,19 @@ void PipeReaderToWriter(
     const IUnversionedRowsetWriterPtr& writer,
     const TPipeReaderToWriterOptions& options);
 
+//! Parameter #pipeDelay is used only for testing.
 void PipeReaderToWriterByBatches(
     const NApi::ITableReaderPtr& reader,
     const NFormats::ISchemalessFormatWriterPtr& writer,
-    const TRowBatchReadOptions& options);
+    const TRowBatchReadOptions& options,
+    TDuration pipeDelay = TDuration::Zero());
+
+void PipeReaderToAdaptiveWriterByBatches(
+    const NApi::ITableReaderPtr& reader,
+    const NFormats::ISchemalessFormatWriterPtr& writer,
+    TRowBatchReadOptions startingOptions,
+    TCallback<void(TRowBatchReadOptions* mutableOptions, TDuration timeForBatch)> optionsUpdater,
+    TDuration pipeDelay = TDuration::Zero());
 
 void PipeInputToOutput(
     IInputStream* input,
@@ -50,6 +60,10 @@ void PipeInputToOutput(
     const NConcurrency::IAsyncInputStreamPtr& input,
     IOutputStream* output,
     i64 bufferBlockSize);
+
+void PipeInputToOutput(
+    const NConcurrency::IAsyncZeroCopyInputStreamPtr& input,
+    IOutputStream* output);
 
 ////////////////////////////////////////////////////////////////////////////////
 

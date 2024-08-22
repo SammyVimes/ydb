@@ -121,6 +121,7 @@ TExecFunc arrow_phraseto_tsquery() { return TGenericExec<TPgDirectFunc<&phraseto
 TExecFunc arrow_phraseto_tsquery_byid() { return TGenericExec<TPgDirectFunc<&phraseto_tsquery_byid>, true, false, TArgs_phraseto_tsquery_byid_Policy>({}); }
 TExecFunc arrow_plainto_tsquery() { return TGenericExec<TPgDirectFunc<&plainto_tsquery>, true, false, TArgs_plainto_tsquery_Policy>({}); }
 TExecFunc arrow_plainto_tsquery_byid() { return TGenericExec<TPgDirectFunc<&plainto_tsquery_byid>, true, false, TArgs_plainto_tsquery_byid_Policy>({}); }
+TExecFunc arrow_satisfies_hash_partition() { return TGenericExec<TPgDirectFunc<&satisfies_hash_partition>, false, true, TDefaultArgsPolicy>({}); }
 TExecFunc arrow_spg_range_quad_choose() { return TGenericExec<TPgDirectFunc<&spg_range_quad_choose>, true, true, TArgs_spg_range_quad_choose_Policy>({}); }
 TExecFunc arrow_spg_range_quad_config() { return TGenericExec<TPgDirectFunc<&spg_range_quad_config>, true, true, TArgs_spg_range_quad_config_Policy>({}); }
 TExecFunc arrow_spg_range_quad_inner_consistent() { return TGenericExec<TPgDirectFunc<&spg_range_quad_inner_consistent>, true, true, TArgs_spg_range_quad_inner_consistent_Policy>({}); }

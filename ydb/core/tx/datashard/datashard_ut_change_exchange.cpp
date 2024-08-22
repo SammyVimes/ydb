@@ -1,19 +1,22 @@
 #include <ydb/core/tx/datashard/ut_common/datashard_ut_common.h>
-#include "change_sender_common_ops.h"
+#include "datashard_ut_common_kqp.h"
+
+#include <ydb/core/base/path.h>
+#include <ydb/core/change_exchange/change_sender_common_ops.h>
+#include <ydb/core/persqueue/events/global.h>
+#include <ydb/core/persqueue/user_info.h>
+#include <ydb/core/persqueue/write_meta.h>
+#include <ydb/core/tx/scheme_board/events.h>
+#include <ydb/core/tx/scheme_board/events_internal.h>
+#include <ydb/public/sdk/cpp/client/ydb_datastreams/datastreams.h>
+#include <ydb/public/sdk/cpp/client/ydb_persqueue_public/persqueue.h>
+#include <ydb/public/sdk/cpp/client/ydb_topic/topic.h>
 
 #include <library/cpp/digest/md5/md5.h>
 #include <library/cpp/json/json_reader.h>
 #include <library/cpp/json/json_writer.h>
 
-#include <ydb/core/base/path.h>
-#include <ydb/core/persqueue/events/global.h>
-#include <ydb/core/persqueue/user_info.h>
-#include <ydb/core/persqueue/write_meta.h>
-#include <ydb/core/tx/scheme_board/events.h>
-#include <ydb/public/sdk/cpp/client/ydb_datastreams/datastreams.h>
-#include <ydb/public/sdk/cpp/client/ydb_persqueue_public/persqueue.h>
-#include <ydb/public/sdk/cpp/client/ydb_topic/topic.h>
-
+#include <util/generic/algorithm.h>
 #include <util/generic/size_literals.h>
 #include <util/string/join.h>
 #include <util/string/printf.h>
@@ -22,6 +25,7 @@
 namespace NKikimr {
 
 using namespace NDataShard;
+using namespace NDataShard::NKqpHelpers;
 using namespace Tests;
 
 Y_UNIT_TEST_SUITE(AsyncIndexChangeExchange) {
@@ -218,20 +222,20 @@ Y_UNIT_TEST_SUITE(AsyncIndexChangeExchange) {
 
         runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             switch (ev->GetTypeRewrite()) {
-            case TEvChangeExchange::EvEnqueueRecords:
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvEnqueueRecords>()->Records) {
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvEnqueueRecords>()->Records) {
                     enqueued.insert(record.Order);
                 }
                 break;
 
-            case TEvChangeExchange::EvRequestRecords:
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvRequestRecords>()->Records) {
+            case NChangeExchange::TEvChangeExchange::EvRequestRecords:
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvRequestRecords>()->Records) {
                     requested.insert(record.Order);
                 }
                 break;
 
-            case TEvChangeExchange::EvRemoveRecords:
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvRemoveRecords>()->Records) {
+            case NChangeExchange::TEvChangeExchange::EvRemoveRecords:
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvRemoveRecords>()->Records) {
                     removed.insert(record);
                 }
                 break;
@@ -307,14 +311,14 @@ Y_UNIT_TEST_SUITE(AsyncIndexChangeExchange) {
                     return TTestActorRuntime::EEventAction::PROCESS;
                 }
 
-            case TEvChangeExchange::EvEnqueueRecords:
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvEnqueueRecords>()->Records) {
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvEnqueueRecords>()->Records) {
                     enqueued.insert(record.Order);
                 }
                 break;
 
-            case TEvChangeExchange::EvRemoveRecords:
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvRemoveRecords>()->Records) {
+            case NChangeExchange::TEvChangeExchange::EvRemoveRecords:
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvRemoveRecords>()->Records) {
                     removed.insert(record);
                 }
                 break;
@@ -371,7 +375,7 @@ Y_UNIT_TEST_SUITE(AsyncIndexChangeExchange) {
         bool inited = false;
         runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             switch (ev->GetTypeRewrite()) {
-            case TEvChangeExchange::EvEnqueueRecords:
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
                 delayed.emplace_back(ev.Release());
                 return TTestActorRuntime::EEventAction::DROP;
 
@@ -416,14 +420,14 @@ Y_UNIT_TEST_SUITE(AsyncIndexChangeExchange) {
         THashSet<ui64> removed;
         runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             switch (ev->GetTypeRewrite()) {
-            case TEvChangeExchange::EvEnqueueRecords:
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvEnqueueRecords>()->Records) {
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvEnqueueRecords>()->Records) {
                     enqueued.insert(record.Order);
                 }
                 break;
 
-            case TEvChangeExchange::EvRemoveRecords:
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvRemoveRecords>()->Records) {
+            case NChangeExchange::TEvChangeExchange::EvRemoveRecords:
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvRemoveRecords>()->Records) {
                     removed.insert(record);
                 }
                 break;
@@ -481,7 +485,7 @@ Y_UNIT_TEST_SUITE(AsyncIndexChangeExchange) {
 
         runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             switch (ev->GetTypeRewrite()) {
-            case TEvChangeExchange::EvEnqueueRecords:
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
                 if (preventEnqueueing) {
                     enqueued.emplace_back(ev.Release());
                     return TTestActorRuntime::EEventAction::DROP;
@@ -636,7 +640,7 @@ Y_UNIT_TEST_SUITE(AsyncIndexChangeExchange) {
 
         runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             switch (ev->GetTypeRewrite()) {
-            case TEvChangeExchange::EvEnqueueRecords:
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
                 if (preventEnqueueing) {
                     enqueued.emplace_back(ev.Release());
                     return TTestActorRuntime::EEventAction::DROP;
@@ -679,6 +683,110 @@ Y_UNIT_TEST_SUITE(AsyncIndexChangeExchange) {
         ShouldRejectChangesOnQueueOverflow([](TServerSettings& opts) {
             opts.SetChangesQueueBytesLimit(1);
         });
+    }
+
+    Y_UNIT_TEST(ShouldNotReorderChangesOnRace) {
+        TPortManager pm;
+        TServerSettings serverSettings(pm.GetPort(2134));
+        serverSettings
+            .SetDomainName("Root")
+            .SetUseRealThreads(false)
+            .SetEnableDataColumnForIndexTable(true);
+
+        TServer::TPtr server = new TServer(serverSettings);
+        auto& runtime = *server->GetRuntime();
+        const TActorId sender = runtime.AllocateEdgeActor();
+
+        runtime.SetLogPriority(NKikimrServices::TX_DATASHARD, NLog::PRI_DEBUG);
+        runtime.SetLogPriority(NKikimrServices::CHANGE_EXCHANGE, NLog::PRI_DEBUG);
+        InitRoot(server, sender);
+
+        CreateShardedTable(server, sender, "/Root", "Table", TableWithIndex(SimpleAsyncIndex()));
+        SimulateSleep(server, TDuration::Seconds(1));
+        SetSplitMergePartCountLimit(&runtime, -1);
+
+        // find main change sender
+        TActorId changeSenderMain;
+        auto findChangeSenderMain = runtime.AddObserver<NChangeExchange::TEvChangeExchange::TEvRequestRecords>(
+            [&](NChangeExchange::TEvChangeExchange::TEvRequestRecords::TPtr& ev) {
+                changeSenderMain = ev->Sender;
+            }
+        );
+
+        ExecSQL(server, sender, R"(UPSERT INTO `/Root/Table` (pkey, ikey) VALUES (1, 10);)");
+        WaitForContent(server, "/Root/Table/by_ikey/indexImplTable",
+            "ikey = 10, pkey = 1");
+        UNIT_ASSERT(changeSenderMain);
+        findChangeSenderMain.Remove();
+
+        // block outgoing records
+        TVector<THolder<IEventHandle>> blockedOutRecords;
+        auto blockOutRecords = runtime.AddObserver<NChangeExchange::TEvChangeExchange::TEvRecords>(
+            [&](NChangeExchange::TEvChangeExchange::TEvRecords::TPtr& ev) {
+                if (changeSenderMain == ev->Sender) {
+                    blockedOutRecords.emplace_back(ev.Release());
+                }
+            }
+        );
+
+        ExecSQL(server, sender, R"(UPSERT INTO `/Root/Table` (pkey, ikey) VALUES (2, 20);)");
+        WaitFor(runtime, [&]{ return blockedOutRecords.size() == 1; }, "records");
+        blockOutRecords.Remove();
+
+        // block incoming records
+        TDeque<THolder<IEventHandle>> blockedInRecords;
+        auto blockInRecords = runtime.AddObserver<NChangeExchange::TEvChangeExchange::TEvRecords>(
+            [&](NChangeExchange::TEvChangeExchange::TEvRecords::TPtr& ev) {
+                if (changeSenderMain == ev->Recipient) {
+                    blockedInRecords.emplace_back(ev.Release());
+                }
+            }
+        );
+
+        ExecSQL(server, sender, R"(UPSERT INTO `/Root/Table` (pkey, ikey) VALUES (3, 30);)");
+        WaitFor(runtime, [&]{ return blockedInRecords.size() == 1; }, "records");
+
+        // start split
+        THashMap<ui64, ui32> splitAcks;
+        auto countSplitAcks = runtime.AddObserver<TEvDataShard::TEvSplitAck>(
+            [&](TEvDataShard::TEvSplitAck::TPtr& ev) {
+                ++splitAcks[ev->Get()->Record.GetOperationCookie()];
+            }
+        );
+
+        auto tabletIds = GetTableShards(server, sender, "/Root/Table/by_ikey/indexImplTable");
+        UNIT_ASSERT_VALUES_EQUAL(tabletIds.size(), 1);
+        auto txId = AsyncSplitTable(server, sender, "/Root/Table/by_ikey/indexImplTable", tabletIds.at(0), 10);
+        WaitFor(runtime, [&]{ return splitAcks[txId] == 1; }, "split acks");
+        countSplitAcks.Remove();
+
+        // send outgoing records
+        for (auto& ev : std::exchange(blockedOutRecords, TVector<THolder<IEventHandle>>())) {
+            server->GetRuntime()->Send(ev.Release(), 0, true);
+        }
+
+        // finish split
+        WaitTxNotification(server, sender, txId);
+        WaitFor(runtime, [&]{ return blockedInRecords.size() == 2; }, "records");
+
+        // send first incoming record (key = 3)
+        blockInRecords.Remove();
+        {
+            auto& ev = blockedInRecords.front();
+            server->GetRuntime()->Send(ev.Release(), 0, true);
+            blockedInRecords.pop_front();
+        }
+
+        // give some time & send second (re-enqueued) incoming record (key = 2)
+        SimulateSleep(server, TDuration::Seconds(1));
+        {
+            auto& ev = blockedInRecords.front();
+            server->GetRuntime()->Send(ev.Release(), 0, true);
+            blockedInRecords.pop_front();
+        }
+
+        WaitForContent(server, "/Root/Table/by_ikey/indexImplTable",
+            "ikey = 10, pkey = 1\nikey = 20, pkey = 2\nikey = 30, pkey = 3");
     }
 
 } // AsyncIndexChangeExchange
@@ -727,7 +835,8 @@ Y_UNIT_TEST_SUITE(Cdc) {
                 .SetEnableChangefeedDynamoDBStreamsFormat(true)
                 .SetEnableChangefeedDebeziumJsonFormat(true)
                 .SetEnableTopicMessageMeta(true)
-                .SetEnableChangefeedInitialScan(true);
+                .SetEnableChangefeedInitialScan(true)
+                .SetEnableUuidAsPrimaryKey(true);
 
             Server = new TServer(settings);
             if (useRealThreads) {
@@ -787,7 +896,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
         static THolder<TDataStreamsClient> MakeClient(const NYdb::TDriver& driver, const TString& database) {
             return MakeHolder<TDataStreamsClient>(driver, NYdb::TCommonClientSettings().Database(database));
         }
-    }; 
+    };
 
     class TTestTopicEnv: public TTestEnv<TTestTopicEnv, NYdb::NTopic::TTopicClient> {
     public:
@@ -796,12 +905,16 @@ Y_UNIT_TEST_SUITE(Cdc) {
         static THolder<NYdb::NTopic::TTopicClient> MakeClient(const NYdb::TDriver& driver, const TString& database) {
             return MakeHolder<NYdb::NTopic::TTopicClient>(driver, NYdb::NTopic::TTopicClientSettings().Database(database));
         }
-    }; 
+    };
 
     TShardedTableOptions SimpleTable() {
+        return TShardedTableOptions();
+    }
+
+    TShardedTableOptions UuidTable() {
         return TShardedTableOptions()
             .Columns({
-                {"key", "Uint32", true, false},
+                {"key", "Uuid", true, false},
                 {"value", "Uint32", false, false},
             });
     }
@@ -1342,11 +1455,27 @@ Y_UNIT_TEST_SUITE(Cdc) {
             (3, 30);
         )", R"(
             DELETE FROM `/Root/Table` WHERE key = 1;
-        )"}, { 
+        )"}, {
             R"({"update":{},"key":[1]})",
             R"({"update":{},"key":[2]})",
             R"({"update":{},"key":[3]})",
             R"({"erase":{},"key":[1]})",
+        });
+    }
+
+    Y_UNIT_TEST_TRIPLET(UuidExchange, PqRunner, YdsRunner, TopicRunner) {
+        TRunner::Read(UuidTable(), KeysOnly(NKikimrSchemeOp::ECdcStreamFormatJson), {R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES
+            (Uuid("65df1ec1-a97d-47b2-ae56-3c023da6ee8c"), 10),
+            (Uuid("65df1ec2-a97d-47b2-ae56-3c023da6ee8c"), 20),
+            (Uuid("65df1ec3-a97d-47b2-ae56-3c023da6ee8c"), 30);
+        )", R"(
+            DELETE FROM `/Root/Table` WHERE key = Uuid("65df1ec1-a97d-47b2-ae56-3c023da6ee8c");
+        )"}, {
+            R"({"update":{},"key":["65df1ec1-a97d-47b2-ae56-3c023da6ee8c"]})",
+            R"({"update":{},"key":["65df1ec2-a97d-47b2-ae56-3c023da6ee8c"]})",
+            R"({"update":{},"key":["65df1ec3-a97d-47b2-ae56-3c023da6ee8c"]})",
+            R"({"erase":{},"key":["65df1ec1-a97d-47b2-ae56-3c023da6ee8c"]})",
         });
     }
 
@@ -1358,7 +1487,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             (3, 30);
         )", R"(
             DELETE FROM `/Root/Table` WHERE key = 1;
-        )"}, { 
+        )"}, {
             {DebeziumBody("u", nullptr, nullptr), {{"__key", R"({"payload":{"key":1}})"}}},
             {DebeziumBody("u", nullptr, nullptr), {{"__key", R"({"payload":{"key":2}})"}}},
             {DebeziumBody("u", nullptr, nullptr), {{"__key", R"({"payload":{"key":3}})"}}},
@@ -1374,7 +1503,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             (3, 30);
         )", R"(
             DELETE FROM `/Root/Table` WHERE key = 1;
-        )"}, { 
+        )"}, {
             R"({"update":{"value":10},"key":[1]})",
             R"({"update":{"value":20},"key":[2]})",
             R"({"update":{"value":30},"key":[3]})",
@@ -1395,7 +1524,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             (3, 300);
         )", R"(
             DELETE FROM `/Root/Table` WHERE key = 1;
-        )"}, { 
+        )"}, {
             R"({"update":{},"newImage":{"value":10},"key":[1]})",
             R"({"update":{},"newImage":{"value":20},"key":[2]})",
             R"({"update":{},"newImage":{"value":30},"key":[3]})",
@@ -1419,7 +1548,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             (3, 300);
         )", R"(
             DELETE FROM `/Root/Table` WHERE key = 1;
-        )"}, { 
+        )"}, {
             {DebeziumBody("c", nullptr, R"({"key":1,"value":10})"), {{"__key", R"({"payload":{"key":1}})"}}},
             {DebeziumBody("c", nullptr, R"({"key":2,"value":20})"), {{"__key", R"({"payload":{"key":2}})"}}},
             {DebeziumBody("c", nullptr, R"({"key":3,"value":30})"), {{"__key", R"({"payload":{"key":3}})"}}},
@@ -1443,7 +1572,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             (3, 300);
         )", R"(
             DELETE FROM `/Root/Table` WHERE key = 1;
-        )"}, { 
+        )"}, {
             {DebeziumBody("u", nullptr, nullptr), {{"__key", R"({"payload":{"key":1}})"}}},
             {DebeziumBody("u", nullptr, nullptr), {{"__key", R"({"payload":{"key":2}})"}}},
             {DebeziumBody("u", nullptr, nullptr), {{"__key", R"({"payload":{"key":3}})"}}},
@@ -1454,7 +1583,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
         });
     }
 
-    Y_UNIT_TEST(NewImageLogDebezium) { 
+    Y_UNIT_TEST(NewImageLogDebezium) {
         TopicRunner::Read(SimpleTable(), NewImage(NKikimrSchemeOp::ECdcStreamFormatDebeziumJson), {R"(
             UPSERT INTO `/Root/Table` (key, value) VALUES
             (1, 10),
@@ -1467,7 +1596,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             (3, 300);
         )", R"(
             DELETE FROM `/Root/Table` WHERE key = 1;
-        )"}, { 
+        )"}, {
             {DebeziumBody("u", nullptr, R"({"key":1,"value":10})"), {{"__key", R"({"payload":{"key":1}})"}}},
             {DebeziumBody("u", nullptr, R"({"key":2,"value":20})"), {{"__key", R"({"payload":{"key":2}})"}}},
             {DebeziumBody("u", nullptr, R"({"key":3,"value":30})"), {{"__key", R"({"payload":{"key":3}})"}}},
@@ -1484,7 +1613,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             (1, 10),
             (2, 20),
             (3, 30);
-        )"}, { 
+        )"}, {
             R"({"update":{},"key":[1],"ts":"***"})",
             R"({"update":{},"key":[2],"ts":"***"})",
             R"({"update":{},"key":[3],"ts":"***"})",
@@ -1510,7 +1639,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             UPSERT INTO `/Root/Table` (__Hash, id_shard, id_sort, __RowData) VALUES (
                 1, "10", "100", JsonDocument('{"M":{"color":{"S":"pink"},"weight":{"N":"4.5"}}}')
             );
-        )"}, { 
+        )"}, {
             WriteJson(NJson::TJsonMap({
                 {"awsRegion", ""},
                 {"dynamodb", NJson::TJsonMap({
@@ -1539,7 +1668,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
             );
         )", R"(
             DELETE FROM `/Root/Table` WHERE __Hash = 1;
-        )"}, { 
+        )"}, {
             WriteJson(NJson::TJsonMap({
                 {"awsRegion", ""},
                 {"dynamodb", NJson::TJsonMap({
@@ -1637,7 +1766,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
                 (1, 0.0%s/0.0%s),
                 (2, 1.0%s/0.0%s),
                 (3, -1.0%s/0.0%s);
-            )", s, s, s, s, s, s)}, { 
+            )", s, s, s, s, s, s)}, {
                 R"({"update":{"value":"nan"},"key":[1]})",
                 R"({"update":{"value":"inf"},"key":[2]})",
                 R"({"update":{"value":"-inf"},"key":[3]})",
@@ -1672,7 +1801,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
         TopicRunner::Read(table, KeysOnly(NKikimrSchemeOp::ECdcStreamFormatDebeziumJson), {Sprintf(R"(
             UPSERT INTO `/Root/Table` (key, value) VALUES
             ("%s", 1);
-        )", key.c_str())}, { 
+        )", key.c_str())}, {
             {DebeziumBody("u", nullptr, nullptr), {{"__key", Sprintf(R"({"payload":{"key":"%s"}})", key.c_str())}}},
         });
     }
@@ -1864,11 +1993,13 @@ Y_UNIT_TEST_SUITE(Cdc) {
     void WaitForContent(TServer::TPtr server, const TActorId& sender, const TString& path, const TVector<TString>& expected) {
         while (true) {
             const auto records = GetRecords(*server->GetRuntime(), sender, path, 0);
-            if (records.size() == expected.size()) {
-                for (ui32 i = 0; i < expected.size(); ++i) {
-                    AssertJsonsEqual(records.at(i).second, expected.at(i));
-                }
+            for (ui32 i = 0; i < std::min(records.size(), expected.size()); ++i) {
+                AssertJsonsEqual(records.at(i).second, expected.at(i));
+            }
 
+            if (records.size() >= expected.size()) {
+                UNIT_ASSERT_VALUES_EQUAL_C(records.size(), expected.size(),
+                    "Unexpected record: " << records.at(expected.size()).second);
                 break;
             }
 
@@ -1886,7 +2017,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
 
         env.GetServer()->GetRuntime()->SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             switch (ev->GetTypeRewrite()) {
-            case TEvChangeExchange::EvEnqueueRecords:
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
                 if (preventEnqueueing) {
                     enqueued.emplace_back(ev.Release());
                     return TTestActorRuntime::EEventAction::DROP;
@@ -2039,7 +2170,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
         ExecSQL(env.GetServer(), env.GetEdgeActor(), R"(
             UPSERT INTO `/Root/TableAux` (key, value)
             VALUES (1, 10);
-        )"); 
+        )");
 
         SetSplitMergePartCountLimit(&runtime, -1);
         const auto tabletIds = GetTableShards(env.GetServer(), env.GetEdgeActor(), "/Root/Table");
@@ -2143,7 +2274,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
 
         env.GetServer()->GetRuntime()->SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             switch (ev->GetTypeRewrite()) {
-            case TEvChangeExchange::EvEnqueueRecords:
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
                 if (preventEnqueueing) {
                     enqueued.emplace_back(ev.Release());
                     return TTestActorRuntime::EEventAction::DROP;
@@ -2240,7 +2371,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
 
         env.GetServer()->GetRuntime()->SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             switch (ev->GetTypeRewrite()) {
-            case TEvChangeExchange::EvEnqueueRecords:
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
                 if (preventEnqueueing || (preventEnqueueingOnSpecificSender && *preventEnqueueingOnSpecificSender == ev->Recipient)) {
                     enqueued.emplace_back(ev.Release());
                     return TTestActorRuntime::EEventAction::DROP;
@@ -2288,7 +2419,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
         auto tabletIds = GetTableShards(env.GetServer(), env.GetEdgeActor(), "/Root/Table");
         UNIT_ASSERT_VALUES_EQUAL(tabletIds.size(), 1);
 
-        WaitTxNotification(env.GetServer(), env.GetEdgeActor(), 
+        WaitTxNotification(env.GetServer(), env.GetEdgeActor(),
             AsyncSplitTable(env.GetServer(), env.GetEdgeActor(), "/Root/Table", tabletIds.at(0), 4));
 
         // execute on old partitions
@@ -2371,8 +2502,9 @@ Y_UNIT_TEST_SUITE(Cdc) {
                 break;
 
             case TSchemeBoardEvents::EvUpdate:
-                if (auto* msg = ev->Get<TSchemeBoardEvents::TEvUpdate>()) {
-                    const auto desc = msg->GetRecord().GetDescribeSchemeResult();
+                if (auto* msg = ev->Get<NSchemeBoard::NInternalEvents::TEvUpdate>()) {
+                    NKikimrScheme::TEvDescribeSchemeResult desc;
+                    Y_ABORT_UNLESS(ParseFromStringNoSizeLimit(desc, *msg->GetRecord().GetDescribeSchemeResultSerialized().begin()));
                     if (desc.GetPath() == "/Root/Table/Stream" && desc.GetPathDescription().GetSelf().GetCreateFinished()) {
                         delayed.emplace_back(ev.Release());
                         return TTestActorRuntime::EEventAction::DROP;
@@ -2432,7 +2564,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
 
         TVector<THolder<IEventHandle>> enqueued;
         auto prevObserver = runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
-            if (ev->GetTypeRewrite() == TEvChangeExchange::EvEnqueueRecords) {
+            if (ev->GetTypeRewrite() == NChangeExchange::TEvChangeExchange::EvEnqueueRecords) {
                 enqueued.emplace_back(ev.Release());
                 return TTestActorRuntime::EEventAction::DROP;
             }
@@ -2442,7 +2574,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
         ExecSQL(env.GetServer(), env.GetEdgeActor(), R"(
             UPSERT INTO `/Root/Table` (key, value)
             VALUES (1, 10);
-        )"); 
+        )");
 
         SetSplitMergePartCountLimit(&runtime, -1);
         const auto tabletIds = GetTableShards(env.GetServer(), env.GetEdgeActor(), "/Root/Table");
@@ -2474,8 +2606,8 @@ Y_UNIT_TEST_SUITE(Cdc) {
 
         THashSet<ui64> enqueued;
         runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
-            if (ev->GetTypeRewrite() == TEvChangeExchange::EvEnqueueRecords) {
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvEnqueueRecords>()->Records) {
+            if (ev->GetTypeRewrite() == NChangeExchange::TEvChangeExchange::EvEnqueueRecords) {
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvEnqueueRecords>()->Records) {
                     enqueued.insert(record.Order);
                 }
 
@@ -2506,8 +2638,8 @@ Y_UNIT_TEST_SUITE(Cdc) {
 
         THashSet<ui64> removed;
         runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
-            if (ev->GetTypeRewrite() == TEvChangeExchange::EvRemoveRecords) {
-                for (const auto& record : ev->Get<TEvChangeExchange::TEvRemoveRecords>()->Records) {
+            if (ev->GetTypeRewrite() == NChangeExchange::TEvChangeExchange::EvRemoveRecords) {
+                for (const auto& record : ev->Get<NChangeExchange::TEvChangeExchange::TEvRemoveRecords>()->Records) {
                     removed.insert(record);
                 }
             }
@@ -2629,6 +2761,49 @@ Y_UNIT_TEST_SUITE(Cdc) {
         });
     }
 
+    Y_UNIT_TEST(InitialScanRacyCompleteAndRequest) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableChangefeedInitialScan(true)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+        CreateShardedTable(server, edgeActor, "/Root", "Table", SimpleTable());
+
+        std::unique_ptr<IEventHandle> doneResponse;
+        auto blockDone = runtime.AddObserver<TEvDataShard::TEvCdcStreamScanResponse>(
+            [&](TEvDataShard::TEvCdcStreamScanResponse::TPtr& ev) {
+                if (ev->Get()->Record.GetStatus() == NKikimrTxDataShard::TEvCdcStreamScanResponse::DONE) {
+                    doneResponse.reset(ev.Release());
+                }
+            }
+        );
+
+        WaitTxNotification(server, edgeActor, AsyncAlterAddStream(server, "/Root", "Table",
+            WithInitialScan(Updates(NKikimrSchemeOp::ECdcStreamFormatJson))));
+        WaitFor(runtime, [&]{ return bool(doneResponse); }, "doneResponse");
+        blockDone.Remove();
+
+        bool done = false;
+        auto waitDone = runtime.AddObserver<TEvDataShard::TEvCdcStreamScanResponse>(
+            [&](TEvDataShard::TEvCdcStreamScanResponse::TPtr& ev) {
+                if (ev->Get()->Record.GetStatus() == NKikimrTxDataShard::TEvCdcStreamScanResponse::DONE) {
+                    done = true;
+                }
+            }
+        );
+
+        const auto& record = doneResponse->Get<TEvDataShard::TEvCdcStreamScanResponse>()->Record;
+        RebootTablet(runtime, record.GetTablePathId().GetOwnerId(), edgeActor);
+        WaitFor(runtime, [&]{ return done; }, "done");
+    }
+
     Y_UNIT_TEST(InitialScanUpdatedRows) {
         TPortManager portManager;
         TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
@@ -2743,7 +2918,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
                 }
                 break;
 
-            case TEvChangeExchange::EvEnqueueRecords:
+            case NChangeExchange::TEvChangeExchange::EvEnqueueRecords:
                 delayed.emplace_back(ev.Release());
                 return TTestActorRuntime::EEventAction::DROP;
 
@@ -2906,10 +3081,17 @@ Y_UNIT_TEST_SUITE(Cdc) {
     }
 
     Y_UNIT_TEST(EnqueueRequestProcessSend) {
+        // Disable workload manager because it's also used events from ES_PRIVATE
+        // which squash with event NChangeExchange::TEvChangeExchangePrivate::EvReady in test
+        NKikimrConfig::TAppConfig config;
+        config.MutableFeatureFlags()->SetEnableResourcePools(false);
+
         TPortManager portManager;
         TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
             .SetUseRealThreads(false)
             .SetDomainName("Root")
+            .SetEnableResourcePools(false)
+            .SetAppConfig(config)
         );
 
         auto& runtime = *server->GetRuntime();
@@ -2926,7 +3108,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
 
         bool ready = false;
         auto prevObserver = runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
-            if (ev->GetTypeRewrite() == TEvChangeExchangePrivate::EvReady) {
+            if (ev->GetTypeRewrite() == NChangeExchange::TEvChangeExchangePrivate::EvReady) {
                 ready = true;
             }
 
@@ -2948,7 +3130,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
 
         THolder<IEventHandle> delayed;
         prevObserver = runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
-            if (ev->GetTypeRewrite() == TEvChangeExchangePrivate::EvReady) {
+            if (ev->GetTypeRewrite() == NChangeExchange::TEvChangeExchangePrivate::EvReady) {
                 delayed.Reset(ev.Release());
                 return TTestActorRuntime::EEventAction::DROP;
             }
@@ -3099,6 +3281,45 @@ Y_UNIT_TEST_SUITE(Cdc) {
         });
     }
 
+    Y_UNIT_TEST(ResolvedTimestampsMultiplePartitions) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+        CreateShardedTable(server, edgeActor, "/Root", "Table", TShardedTableOptions().Shards(2));
+
+        WaitTxNotification(server, edgeActor, AsyncAlterAddStream(server, "/Root", "Table",
+            WithResolvedTimestamps(TDuration::Seconds(3), Updates(NKikimrSchemeOp::ECdcStreamFormatJson))));
+
+        TVector<TVector<std::pair<TString, TString>>> records(2); // partition to records
+        while (true) {
+            for (ui32 i = 0; i < records.size(); ++i) {
+                records[i] = GetRecords(*server->GetRuntime(), edgeActor, "/Root/Table/Stream", i);
+            }
+
+            if (AllOf(records, [](const auto& x) { return !x.empty(); })) {
+                break;
+            }
+
+            SimulateSleep(server, TDuration::Seconds(1));
+        }
+
+        UNIT_ASSERT(records.size() > 1);
+        UNIT_ASSERT(!records[0].empty());
+        AssertJsonsEqual(records[0][0].second, R"({"resolved":"***"})");
+
+        for (ui32 i = 1; i < records.size(); ++i) {
+            UNIT_ASSERT_VALUES_EQUAL(records[i][0].second, records[0][0].second);
+        }
+    }
+
     Y_UNIT_TEST(InitialScanAndResolvedTimestamps) {
         TPortManager portManager;
         TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
@@ -3157,6 +3378,103 @@ Y_UNIT_TEST_SUITE(Cdc) {
         });
     }
 
+    Y_UNIT_TEST(ResolvedTimestampsVolatileOutOfOrder) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableDataShardVolatileTransactions(true)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+        CreateShardedTable(server, edgeActor, "/Root", "Table1", SimpleTable());
+        CreateShardedTable(server, edgeActor, "/Root", "Table2", SimpleTable());
+
+        WaitTxNotification(server, edgeActor, AsyncAlterAddStream(server, "/Root", "Table1",
+            WithResolvedTimestamps(TDuration::Seconds(3), Updates(NKikimrSchemeOp::ECdcStreamFormatJson))));
+        WaitTxNotification(server, edgeActor, AsyncAlterAddStream(server, "/Root", "Table2",
+            WithResolvedTimestamps(TDuration::Seconds(3), Updates(NKikimrSchemeOp::ECdcStreamFormatJson))));
+
+        WaitForContent(server, edgeActor, "/Root/Table1/Stream", {
+            R"({"resolved":"***"})",
+        });
+        WaitForContent(server, edgeActor, "/Root/Table2/Stream", {
+            R"({"resolved":"***"})",
+        });
+
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table1` (key, value) VALUES (1, 10);
+            UPSERT INTO `/Root/Table2` (key, value) VALUES (2, 20);
+        )");
+
+        WaitForContent(server, edgeActor, "/Root/Table1/Stream", {
+            R"({"resolved":"***"})",
+            R"({"update":{"value":10},"key":[1]})",
+            R"({"resolved":"***"})",
+        });
+        WaitForContent(server, edgeActor, "/Root/Table2/Stream", {
+            R"({"resolved":"***"})",
+            R"({"update":{"value":20},"key":[2]})",
+            R"({"resolved":"***"})",
+        });
+
+        // Block readset exchange
+        std::vector<std::unique_ptr<IEventHandle>> readSets;
+        auto blockReadSets = runtime.AddObserver<TEvTxProcessing::TEvReadSet>([&](TEvTxProcessing::TEvReadSet::TPtr& ev) {
+            readSets.emplace_back(ev.Release());
+        });
+
+        // Start a distributed write to both tables
+        TString sessionId = CreateSessionRPC(runtime, "/Root");
+        auto upsertResult = SendRequest(
+            runtime,
+            MakeSimpleRequestRPC(R"(
+                UPSERT INTO `/Root/Table1` (key, value) VALUES (3, 30);
+                UPSERT INTO `/Root/Table2` (key, value) VALUES (4, 40);
+                )", sessionId, /* txId */ "", /* commitTx */ true),
+            "/Root");
+        WaitFor(runtime, [&]{ return readSets.size() >= 4; }, "readsets");
+
+        // Stop blocking further readsets
+        blockReadSets.Remove();
+
+        // Start another distributed write to both tables, it should succeed
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table1` (key, value) VALUES (5, 50);
+            UPSERT INTO `/Root/Table2` (key, value) VALUES (6, 60);
+        )");
+
+        runtime.SimulateSleep(TDuration::Seconds(10));
+
+        // Unblock readsets
+        for (auto& ev : readSets) {
+            runtime.Send(ev.release(), 0, true);
+        }
+        readSets.clear();
+
+        // There should be only one resolved timestamp after out of order writes
+        WaitForContent(server, edgeActor, "/Root/Table1/Stream", {
+            R"({"resolved":"***"})",
+            R"({"update":{"value":10},"key":[1]})",
+            R"({"resolved":"***"})",
+            R"({"update":{"value":50},"key":[5]})",
+            R"({"update":{"value":30},"key":[3]})",
+            R"({"resolved":"***"})",
+        });
+        WaitForContent(server, edgeActor, "/Root/Table2/Stream", {
+            R"({"resolved":"***"})",
+            R"({"update":{"value":20},"key":[2]})",
+            R"({"resolved":"***"})",
+            R"({"update":{"value":60},"key":[6]})",
+            R"({"update":{"value":40},"key":[4]})",
+            R"({"resolved":"***"})",
+        });
+    }
+
     Y_UNIT_TEST(SequentialSplitMerge) {
         TTestPqEnv env(SimpleTable(), Updates(NKikimrSchemeOp::ECdcStreamFormatJson), false);
         SetSplitMergePartCountLimit(env.GetServer()->GetRuntime(), -1);
@@ -3165,7 +3483,7 @@ Y_UNIT_TEST_SUITE(Cdc) {
         auto tabletIds = GetTableShards(env.GetServer(), env.GetEdgeActor(), "/Root/Table");
         UNIT_ASSERT_VALUES_EQUAL(tabletIds.size(), 1);
 
-        WaitTxNotification(env.GetServer(), env.GetEdgeActor(), 
+        WaitTxNotification(env.GetServer(), env.GetEdgeActor(),
             AsyncSplitTable(env.GetServer(), env.GetEdgeActor(), "/Root/Table", tabletIds.at(0), 4));
 
         // merge
@@ -3189,6 +3507,194 @@ Y_UNIT_TEST_SUITE(Cdc) {
         });
     }
 
+    void MustNotLoseSchemaSnapshot(bool enableVolatileTx) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+            .SetEnableDataShardVolatileTransactions(enableVolatileTx)
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+        CreateShardedTable(server, edgeActor, "/Root", "Table", SimpleTable());
+
+        WaitTxNotification(server, edgeActor, AsyncAlterAddStream(server, "/Root", "Table",
+            Updates(NKikimrSchemeOp::ECdcStreamFormatJson)));
+
+        auto tabletIds = GetTableShards(server, edgeActor, "/Root/Table");
+        UNIT_ASSERT_VALUES_EQUAL(tabletIds.size(), 1);
+
+        std::vector<std::unique_ptr<IEventHandle>> blockedRemoveRecords;
+        auto blockRemoveRecords = runtime.AddObserver<NChangeExchange::TEvChangeExchange::TEvRemoveRecords>([&](auto& ev) {
+            Cerr << "... blocked remove record" << Endl;
+            blockedRemoveRecords.emplace_back(ev.Release());
+        });
+
+        Cerr << "... execute first query" << Endl;
+        ExecSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES (1, 10);
+        )");
+
+        WaitFor(runtime, [&]{ return blockedRemoveRecords.size() == 1; }, "blocked remove records");
+        blockRemoveRecords.Remove();
+
+        std::vector<std::unique_ptr<IEventHandle>> blockedPlans;
+        auto blockPlans = runtime.AddObserver<TEvTxProxy::TEvProposeTransaction>([&](auto& ev) {
+            blockedPlans.emplace_back(ev.Release());
+        });
+
+        Cerr << "... execute scheme query" << Endl;
+        const auto alterTxId = AsyncAlterAddExtraColumn(server, "/Root", "Table");
+
+        WaitFor(runtime, [&]{ return blockedPlans.size() > 0; }, "blocked plans");
+        blockPlans.Remove();
+
+        std::vector<std::unique_ptr<IEventHandle>> blockedPutResponses;
+        auto blockPutResponses = runtime.AddObserver<TEvBlobStorage::TEvPutResult>([&](auto& ev) {
+            auto* msg = ev->Get();
+            if (msg->Id.TabletID() == tabletIds[0]) {
+                Cerr << "... blocked put response:" << msg->Id << Endl;
+                blockedPutResponses.emplace_back(ev.Release());
+            }
+        });
+
+        Cerr << "... execute second query" << Endl;
+        SendSQL(server, edgeActor, R"(
+            UPSERT INTO `/Root/Table` (key, value) VALUES (2, 20);
+        )");
+
+        WaitFor(runtime, [&]{ return blockedPutResponses.size() > 0; }, "blocked put responses");
+        auto wasBlockedPutResponses = blockedPutResponses.size();
+
+        Cerr << "... release blocked plans" << Endl;
+        for (auto& ev : std::exchange(blockedPlans, {})) {
+            runtime.Send(ev.release(), 0, true);
+        }
+
+        WaitFor(runtime, [&]{ return blockedPutResponses.size() > wasBlockedPutResponses; }, "blocked put responses");
+        wasBlockedPutResponses = blockedPutResponses.size();
+
+        Cerr << "... release blocked remove records" << Endl;
+        for (auto& ev : std::exchange(blockedRemoveRecords, {})) {
+            runtime.Send(ev.release(), 0, true);
+        }
+
+        WaitFor(runtime, [&]{ return blockedPutResponses.size() > wasBlockedPutResponses; }, "blocked put responses");
+        blockPutResponses.Remove();
+
+        Cerr << "... release blocked put responses" << Endl;
+        for (auto& ev : std::exchange(blockedPutResponses, {})) {
+            runtime.Send(ev.release(), 0, true);
+        }
+
+        Cerr << "... finalize" << Endl;
+        WaitTxNotification(server, edgeActor, alterTxId);
+        WaitForContent(server, edgeActor, "/Root/Table/Stream", {
+            R"({"update":{"value":10},"key":[1]})",
+            R"({"update":{"value":20},"key":[2]})",
+        });
+    }
+
+    Y_UNIT_TEST(MustNotLoseSchemaSnapshot) {
+        MustNotLoseSchemaSnapshot(false);
+    }
+
+    Y_UNIT_TEST(MustNotLoseSchemaSnapshotWithVolatileTx) {
+        MustNotLoseSchemaSnapshot(true);
+    }
+
+    Y_UNIT_TEST(ResolvedTimestampsContinueAfterMerge) {
+        TPortManager portManager;
+        TServer::TPtr server = new TServer(TServerSettings(portManager.GetPort(2134), {}, DefaultPQConfig())
+            .SetUseRealThreads(false)
+            .SetDomainName("Root")
+        );
+
+        auto& runtime = *server->GetRuntime();
+        const auto edgeActor = runtime.AllocateEdgeActor();
+
+        SetupLogging(runtime);
+        InitRoot(server, edgeActor);
+        SetSplitMergePartCountLimit(&runtime, -1);
+        CreateShardedTable(server, edgeActor, "/Root", "Table", SimpleTable());
+
+        WaitTxNotification(server, edgeActor, AsyncAlterAddStream(server, "/Root", "Table",
+            WithResolvedTimestamps(TDuration::Seconds(3), Updates(NKikimrSchemeOp::ECdcStreamFormatJson))));
+
+        Cerr << "... prepare" << Endl;
+        {
+            WaitForContent(server, edgeActor, "/Root/Table/Stream", {
+                R"({"resolved":"***"})",
+            });
+
+            auto tabletIds = GetTableShards(server, edgeActor, "/Root/Table");
+            UNIT_ASSERT_VALUES_EQUAL(tabletIds.size(), 1);
+
+            WaitTxNotification(server, edgeActor, AsyncSplitTable(server, edgeActor, "/Root/Table", tabletIds.at(0), 2));
+            WaitForContent(server, edgeActor, "/Root/Table/Stream", {
+                R"({"resolved":"***"})",
+                R"({"resolved":"***"})",
+            });
+        }
+
+        auto initialTabletIds = GetTableShards(server, edgeActor, "/Root/Table");
+        UNIT_ASSERT_VALUES_EQUAL(initialTabletIds.size(), 2);
+
+        std::vector<std::unique_ptr<IEventHandle>> blockedSplitRequests;
+        auto blockSplitRequests = runtime.AddObserver<TEvPersQueue::TEvRequest>([&](auto& ev) {
+            if (ev->Get()->Record.GetPartitionRequest().HasCmdSplitMessageGroup()) {
+                blockedSplitRequests.emplace_back(ev.Release());
+            }
+        });
+
+        Cerr << "... merge table" << Endl;
+        const auto mergeTxId = AsyncMergeTable(server, edgeActor, "/Root/Table", initialTabletIds);
+        WaitFor(runtime, [&]{ return blockedSplitRequests.size() == initialTabletIds.size(); }, "blocked split requests");
+        blockSplitRequests.Remove();
+
+        std::vector<std::unique_ptr<IEventHandle>> blockedRegisterRequests;
+        auto blockRegisterRequests = runtime.AddObserver<TEvPersQueue::TEvRequest>([&](auto& ev) {
+            if (ev->Get()->Record.GetPartitionRequest().HasCmdRegisterMessageGroup()) {
+                blockedRegisterRequests.emplace_back(ev.Release());
+            }
+        });
+
+        ui32 splitResponses = 0;
+        auto countSplitResponses = runtime.AddObserver<TEvPersQueue::TEvResponse>([&](auto&) {
+            ++splitResponses;
+        });
+
+        Cerr << "... release split requests" << Endl;
+        for (auto& ev : std::exchange(blockedSplitRequests, {})) {
+            runtime.Send(ev.release(), 0, true);
+            WaitFor(runtime, [prev = splitResponses, &splitResponses]{ return splitResponses > prev; }, "split response");
+        }
+
+        Cerr << "... reboot pq tablet" << Endl;
+        RebootTablet(runtime, ResolvePqTablet(runtime, edgeActor, "/Root/Table/Stream", 0), edgeActor);
+        countSplitResponses.Remove();
+
+        Cerr << "... release register requests" << Endl;
+        blockRegisterRequests.Remove();
+        for (auto& ev : std::exchange(blockedRegisterRequests, {})) {
+            runtime.Send(ev.release(), 0, true);
+        }
+
+        Cerr << "... wait for merge tx notification" << Endl;
+        WaitTxNotification(server, edgeActor, mergeTxId);
+
+        Cerr << "... wait for final heartbeat" << Endl;
+        WaitForContent(server, edgeActor, "/Root/Table/Stream", {
+            R"({"resolved":"***"})",
+            R"({"resolved":"***"})",
+            R"({"resolved":"***"})",
+        });
+    }
+
 } // Cdc
 
 } // NKikimr
@@ -3197,7 +3703,7 @@ template <>
 void Out<std::pair<TString, TString>>(IOutputStream& output, const std::pair<TString, TString>& x) {
     output << x.first << ":" << x.second;
 }
- 
+
 void AppendToString(TString& dst, const std::pair<TString, TString>& x) {
     TStringOutput output(dst);
     output << x;

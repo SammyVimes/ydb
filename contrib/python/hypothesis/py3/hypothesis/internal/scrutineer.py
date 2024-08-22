@@ -8,15 +8,30 @@
 # v. 2.0. If a copy of the MPL was not distributed with this file, You can
 # obtain one at https://mozilla.org/MPL/2.0/.
 
+import functools
+import os
+import re
+import subprocess
 import sys
 import types
 from collections import defaultdict
 from functools import lru_cache, reduce
 from os import sep
 from pathlib import Path
+from typing import TYPE_CHECKING, Dict, List, Optional, Set, Tuple
 
 from hypothesis._settings import Phase, Verbosity
+from hypothesis.internal.compat import PYPY
 from hypothesis.internal.escalation import is_hypothesis_file
+
+if TYPE_CHECKING:
+    from typing import TypeAlias
+else:
+    TypeAlias = object
+
+Location: TypeAlias = Tuple[str, int]
+Branch: TypeAlias = Tuple[Optional[Location], Location]
+Trace: TypeAlias = Set[Branch]
 
 
 @lru_cache(maxsize=None)
@@ -41,19 +56,32 @@ class Tracer:
     __slots__ = ("branches", "_previous_location")
 
     def __init__(self):
-        self.branches = set()
+        self.branches: Trace = set()
         self._previous_location = None
 
+    @staticmethod
+    def can_trace():
+        return (
+            (sys.version_info[:2] < (3, 12) and sys.gettrace() is None)
+            or (
+                sys.version_info[:2] >= (3, 12)
+                and sys.monitoring.get_tool(MONITORING_TOOL_ID) is None
+            )
+        ) and not PYPY
+
     def trace(self, frame, event, arg):
-        if event == "call":
-            return self.trace
-        elif event == "line":
-            # manual inlining of self.trace_line for performance.
-            fname = frame.f_code.co_filename
-            if should_trace_file(fname):
-                current_location = (fname, frame.f_lineno)
-                self.branches.add((self._previous_location, current_location))
-                self._previous_location = current_location
+        try:
+            if event == "call":
+                return self.trace
+            elif event == "line":
+                # manual inlining of self.trace_line for performance.
+                fname = frame.f_code.co_filename
+                if should_trace_file(fname):
+                    current_location = (fname, frame.f_lineno)
+                    self.branches.add((self._previous_location, current_location))
+                    self._previous_location = current_location
+        except RecursionError:
+            pass
 
     def trace_line(self, code: types.CodeType, line_number: int) -> None:
         fname = code.co_filename
@@ -63,8 +91,9 @@ class Tracer:
             self._previous_location = current_location
 
     def __enter__(self):
+        assert self.can_trace()  # caller checks in core.py
+
         if sys.version_info[:2] < (3, 12):
-            assert sys.gettrace() is None  # caller checks in core.py
             sys.settrace(self.trace)
             return self
 
@@ -91,17 +120,36 @@ UNHELPFUL_LOCATIONS = (
     # a contextmanager; this is probably after the fault has been triggered.
     # Similar reasoning applies to a few other standard-library modules: even
     # if the fault was later, these still aren't useful locations to report!
-    f"{sep}contextlib.py",
-    f"{sep}inspect.py",
-    f"{sep}re.py",
-    f"{sep}re{sep}__init__.py",  # refactored in Python 3.11
-    f"{sep}warnings.py",
+    # Note: The list is post-processed, so use plain "/" for separator here.
+    "/contextlib.py",
+    "/inspect.py",
+    "/re.py",
+    "/re/__init__.py",  # refactored in Python 3.11
+    "/warnings.py",
     # Quite rarely, the first AFNP line is in Pytest's internals.
-    f"{sep}_pytest{sep}assertion{sep}__init__.py",
-    f"{sep}_pytest{sep}assertion{sep}rewrite.py",
-    f"{sep}_pytest{sep}_io{sep}saferepr.py",
-    f"{sep}pluggy{sep}_result.py",
+    "/_pytest/_io/saferepr.py",
+    "/_pytest/assertion/*.py",
+    "/_pytest/config/__init__.py",
+    "/_pytest/pytester.py",
+    "/pluggy/_*.py",
+    "/reprlib.py",
+    "/typing.py",
+    "/conftest.py",
 )
+
+
+def _glob_to_re(locs):
+    """Translate a list of glob patterns to a combined regular expression.
+    Only the * wildcard is supported, and patterns including special
+    characters will only work by chance."""
+    # fnmatch.translate is not an option since its "*" consumes path sep
+    return "|".join(
+        loc.replace("*", r"[^/]+")
+        .replace(".", re.escape("."))
+        .replace("/", re.escape(sep))
+        + r"\Z"  # right anchored
+        for loc in locs
+    )
 
 
 def get_explaining_locations(traces):
@@ -146,8 +194,9 @@ def get_explaining_locations(traces):
     # The last step is to filter out explanations that we know would be uninformative.
     # When this is the first AFNP location, we conclude that Scrutineer missed the
     # real divergence (earlier in the trace) and drop that unhelpful explanation.
+    filter_regex = re.compile(_glob_to_re(UNHELPFUL_LOCATIONS))
     return {
-        origin: {loc for loc in afnp_locs if not loc[0].endswith(UNHELPFUL_LOCATIONS)}
+        origin: {loc for loc in afnp_locs if not filter_regex.search(loc[0])}
         for origin, afnp_locs in explanations.items()
     }
 
@@ -179,3 +228,50 @@ def explanatory_lines(traces, settings):
     explanations = get_explaining_locations(traces)
     max_lines = 5 if settings.verbosity <= Verbosity.normal else float("inf")
     return make_report(explanations, cap_lines_at=max_lines)
+
+
+# beware the code below; we're using some heuristics to make a nicer report...
+
+
+@functools.lru_cache
+def _get_git_repo_root() -> Path:
+    try:
+        where = subprocess.run(
+            ["git", "rev-parse", "--show-toplevel"],
+            check=True,
+            timeout=10,
+            capture_output=True,
+            text=True,
+            encoding="utf-8",
+        ).stdout.strip()
+    except Exception:  # pragma: no cover
+        return Path().absolute().parents[-1]
+    else:
+        return Path(where)
+
+
+if sys.version_info[:2] <= (3, 8):
+
+    def is_relative_to(self, other):
+        return other == self or other in self.parents
+
+else:
+    is_relative_to = Path.is_relative_to
+
+
+def tractable_coverage_report(trace: Trace) -> Dict[str, List[int]]:
+    """Report a simple coverage map which is (probably most) of the user's code."""
+    coverage: dict = {}
+    t = dict(trace)
+    for file, line in set(t.keys()).union(t.values()) - {None}:  # type: ignore
+        # On Python <= 3.11, we can use coverage.py xor Hypothesis' tracer,
+        # so the trace will be empty and this line never run under coverage.
+        coverage.setdefault(file, set()).add(line)  # pragma: no cover
+    stdlib_fragment = f"{os.sep}lib{os.sep}python3.{sys.version_info.minor}{os.sep}"
+    return {
+        k: sorted(v)
+        for k, v in coverage.items()
+        if stdlib_fragment not in k
+        and is_relative_to(p := Path(k), _get_git_repo_root())
+        and "site-packages" not in p.parts
+    }

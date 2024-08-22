@@ -23,7 +23,9 @@ extern "C" {
 
 #undef Min
 #undef Max
+#undef Abs
 #undef bind
 #undef open
 #undef FATAL
 #undef locale_t
+#undef strtou64

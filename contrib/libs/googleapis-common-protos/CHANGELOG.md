@@ -1,5 +1,42 @@
 # Changelog
 
+## [1.63.2](https://github.com/googleapis/python-api-common-protos/compare/v1.63.1...v1.63.2) (2024-06-19)
+
+
+### Bug Fixes
+
+* **deps:** Require protobuf&gt;=3.20.2 ([c77c0dc](https://github.com/googleapis/python-api-common-protos/commit/c77c0dc5d29ef780d781a3c5d757736a9ed09674))
+* Regenerate pb2 files for compatibility with protobuf 5.x ([c77c0dc](https://github.com/googleapis/python-api-common-protos/commit/c77c0dc5d29ef780d781a3c5d757736a9ed09674))
+
+## [1.63.1](https://github.com/googleapis/python-api-common-protos/compare/v1.63.0...v1.63.1) (2024-05-30)
+
+
+### Bug Fixes
+
+* Increase upper limit for protobuf 5.X versions ([#212](https://github.com/googleapis/python-api-common-protos/issues/212)) ([28fc17a](https://github.com/googleapis/python-api-common-protos/commit/28fc17a9208aa98782acc6bee6c40ec12b959706))
+
+## [1.63.0](https://github.com/googleapis/python-api-common-protos/compare/v1.62.0...v1.63.0) (2024-03-08)
+
+
+### Features
+
+* Add `api_version` field to `ServiceOptions` in `google/api/client.proto` ([6f9c4d2](https://github.com/googleapis/python-api-common-protos/commit/6f9c4d2b4b787d9ed2b447d7b99281aa3dcf97b5))
+* Add `LOCATION_POLICY_VIOLATED` enum to `ErrorReason` in `google/api/error_reason.proto` ([6f9c4d2](https://github.com/googleapis/python-api-common-protos/commit/6f9c4d2b4b787d9ed2b447d7b99281aa3dcf97b5))
+* Add `rest_reference_documentation_uri` field to `ServiceOptions` in `google/api/client.proto` ([6f9c4d2](https://github.com/googleapis/python-api-common-protos/commit/6f9c4d2b4b787d9ed2b447d7b99281aa3dcf97b5))
+
+## [1.62.0](https://github.com/googleapis/python-api-common-protos/compare/v1.61.0...v1.62.0) (2023-12-01)
+
+
+### Features
+
+* Add `auto_populated_fields` field of `MethodSettings` in `google/api/client_pb2` ([#194](https://github.com/googleapis/python-api-common-protos/issues/194)) ([4b0c73a](https://github.com/googleapis/python-api-common-protos/commit/4b0c73a40f9bf5337fe451c0210f73eadd196b99))
+* Add support for Python 3.12 ([#192](https://github.com/googleapis/python-api-common-protos/issues/192)) ([336cdf3](https://github.com/googleapis/python-api-common-protos/commit/336cdf351d4e87891d735837817d2cfc4e5a9fc7))
+
+
+### Bug Fixes
+
+* Migrate to native namespace packages ([#187](https://github.com/googleapis/python-api-common-protos/issues/187)) ([713e388](https://github.com/googleapis/python-api-common-protos/commit/713e3887a3293aea314060e84bdcf8a12eda3d6c))
+
 ## [1.61.0](https://github.com/googleapis/python-api-common-protos/compare/v1.60.0...v1.61.0) (2023-10-09)
 
 

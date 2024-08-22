@@ -1,3 +1,4 @@
+import cmath
 import warnings
 
 from collections import Counter, abc
@@ -23,7 +24,7 @@ from itertools import (
 )
 from operator import add, mul, itemgetter
 from pickle import loads, dumps
-from random import seed, Random
+from random import Random, random, randrange, seed
 from statistics import mean
 from string import ascii_letters
 from sys import version_info
@@ -112,17 +113,9 @@ class FirstTests(TestCase):
     def test_one(self):
         self.assertEqual(mi.first([3]), 3)
 
-    def test_empty_stop_iteration(self):
-        try:
+    def test_empty(self):
+        with self.assertRaises(ValueError):
             mi.first([])
-        except ValueError:
-            formatted_exc = format_exc()
-            self.assertIn('StopIteration', formatted_exc)
-            self.assertIn(
-                'The above exception was the direct cause', formatted_exc
-            )
-        else:
-            self.fail()
 
     def test_default(self):
         self.assertEqual(mi.first([], 'boo'), 'boo')
@@ -160,10 +153,8 @@ class LastTests(TestCase):
             (iter(range(1)), 0),
             (IterOnlyRange(5), 4),
             ({n: str(n) for n in range(5)}, 4),
+            ({0: '0', -1: '-1', 2: '-2'}, 2),
         ]
-        # Versions below 3.6.0 don't have ordered dicts
-        if version_info >= (3, 6, 0):
-            cases.append(({0: '0', -1: '-1', 2: '-2'}, 2))
 
         for iterable, expected in cases:
             with self.subTest(iterable=iterable):
@@ -255,7 +246,7 @@ class PeekableTests(PeekableMixinTests, TestCase):
         self.assertEqual(p[0], 'a')
         self.assertEqual(next(p), 'a')
 
-        # Indexing further into the peekable shouldn't advance the itertor
+        # Indexing further into the peekable shouldn't advance the iterator
         self.assertEqual(p[2], 'd')
         self.assertEqual(next(p), 'b')
 
@@ -327,7 +318,7 @@ class PeekableTests(PeekableMixinTests, TestCase):
     # prepend() behavior tests
 
     def test_prepend(self):
-        """Tests intersperesed ``prepend()`` and ``next()`` calls"""
+        """Tests interspersed ``prepend()`` and ``next()`` calls"""
         it = mi.peekable(range(2))
         actual = []
 
@@ -781,6 +772,11 @@ class WindowedTests(TestCase):
     def test_negative(self):
         with self.assertRaises(ValueError):
             list(mi.windowed([1, 2, 3, 4, 5], -1))
+
+    def test_empty_seq(self):
+        actual = list(mi.windowed([], 3))
+        expected = []
+        self.assertEqual(actual, expected)
 
 
 class SubstringsTests(TestCase):
@@ -2131,9 +2127,9 @@ class SortTogetherTest(TestCase):
             mi.sort_together(
                 iterables,
                 key_list=(0, 2),
-                key=lambda state, number: number
-                if state == 'CT'
-                else 2 * number,
+                key=lambda state, number: (
+                    number if state == 'CT' else 2 * number
+                ),
             ),
             [
                 ('CT', 'GA', 'CT', 'CT', 'GA', 'GA'),
@@ -3259,7 +3255,6 @@ class DifferenceTest(TestCase):
     def test_empty(self):
         self.assertEqual(list(mi.difference([])), [])
 
-    @skipIf(version_info[:2] < (3, 8), 'accumulate with initial needs 3.8+')
     def test_initial(self):
         original = list(range(100))
         accumulated = accumulate(original, initial=100)
@@ -3995,22 +3990,41 @@ class IchunkedTests(TestCase):
         self.assertRaises(RuntimeError, next, it)
 
     def test_memory_in_order(self):
-        # No items should be kept in memory when a chunk is produced
-        all_chunks = mi.ichunked(count(), 4)
+        gen_numbers = []
+
+        def gen():
+            for gen_number in count():
+                gen_numbers.append(gen_number)
+                yield gen_number
+
+        # No items should be kept in memory when a ichunked is first called
+        all_chunks = mi.ichunked(gen(), 4)
+        self.assertEqual(gen_numbers, [])
+
+        # The first item of each chunk should be generated on chunk generation
         first_chunk = next(all_chunks)
-        self.assertEqual(len(first_chunk._cache), 0)
+        self.assertEqual(gen_numbers, [0])
 
         # If we don't read a chunk before getting its successor, its contents
         # will be cached
         second_chunk = next(all_chunks)
-        self.assertEqual(len(first_chunk._cache), 4)
+        self.assertEqual(gen_numbers, [0, 1, 2, 3, 4])
 
-        # If we read in order, there again should be nothing cached
-        mi.consume(first_chunk)
-        mi.consume(second_chunk)
+        # Check if we can read in cached values
+        self.assertEqual(list(first_chunk), [0, 1, 2, 3])
+        self.assertEqual(list(second_chunk), [4, 5, 6, 7])
+
+        # Again only the most recent chunk should have an item cached
         third_chunk = next(all_chunks)
-        for chunk in (first_chunk, second_chunk, third_chunk):
-            self.assertEqual(len(chunk._cache), 0)
+        self.assertEqual(len(gen_numbers), 9)
+
+        # No new item should be cached when reading past the first number
+        next(third_chunk)
+        self.assertEqual(len(gen_numbers), 9)
+
+        # we should not be able to read spent chunks
+        self.assertEqual(list(first_chunk), [])
+        self.assertEqual(list(second_chunk), [])
 
 
 class DistinctCombinationsTests(TestCase):
@@ -4140,7 +4154,7 @@ class SampleTests(TestCase):
             expected = min(k, len(data))
             self.assertEqual(actual, expected)
 
-    def test_samling_entire_iterable(self):
+    def test_sampling_entire_iterable(self):
         """If k=len(iterable), the sample contains the original elements."""
         data = ["a", 2, "a", 4, (1, 2, 3)]
         actual = set(mi.sample(data, k=len(data)))
@@ -4148,7 +4162,7 @@ class SampleTests(TestCase):
         self.assertEqual(actual, expected)
 
     def test_scale_invariance_of_weights(self):
-        """The probabilit of chosing element a_i is w_i / sum(weights).
+        """The probability of choosing element a_i is w_i / sum(weights).
         Scaling weights should not change the probability or outcome."""
         data = "abcdef"
 
@@ -5130,6 +5144,197 @@ class DuplicatesJustSeenTests(TestCase):
         self.assertEqual(list(mi.duplicates_justseen(iterable)), [[5, 6]])
 
 
+class ClassifyUniqueTests(TestCase):
+    def test_basic(self):
+        self.assertEqual(
+            list(mi.classify_unique('mississippi')),
+            [
+                ('m', True, True),
+                ('i', True, True),
+                ('s', True, True),
+                ('s', False, False),
+                ('i', True, False),
+                ('s', True, False),
+                ('s', False, False),
+                ('i', True, False),
+                ('p', True, True),
+                ('p', False, False),
+                ('i', True, False),
+            ],
+        )
+
+    def test_non_hashable(self):
+        self.assertEqual(
+            list(mi.classify_unique([[1, 2], [3, 4], [3, 4], [1, 2]])),
+            [
+                ([1, 2], True, True),
+                ([3, 4], True, True),
+                ([3, 4], False, False),
+                ([1, 2], True, False),
+            ],
+        )
+
+    def test_partially_hashable(self):
+        self.assertEqual(
+            list(
+                mi.classify_unique(
+                    [[1, 2], [3, 4], (5, 6), (5, 6), (3, 4), [1, 2]]
+                )
+            ),
+            [
+                ([1, 2], True, True),
+                ([3, 4], True, True),
+                ((5, 6), True, True),
+                ((5, 6), False, False),
+                ((3, 4), True, True),
+                ([1, 2], True, False),
+            ],
+        )
+
+    def test_key_hashable(self):
+        iterable = 'HEheHHHhEheeEe'
+        self.assertEqual(
+            list(mi.classify_unique(iterable)),
+            [
+                ('H', True, True),
+                ('E', True, True),
+                ('h', True, True),
+                ('e', True, True),
+                ('H', True, False),
+                ('H', False, False),
+                ('H', False, False),
+                ('h', True, False),
+                ('E', True, False),
+                ('h', True, False),
+                ('e', True, False),
+                ('e', False, False),
+                ('E', True, False),
+                ('e', True, False),
+            ],
+        )
+        self.assertEqual(
+            list(mi.classify_unique(iterable, str.lower)),
+            [
+                ('H', True, True),
+                ('E', True, True),
+                ('h', True, False),
+                ('e', True, False),
+                ('H', True, False),
+                ('H', False, False),
+                ('H', False, False),
+                ('h', False, False),
+                ('E', True, False),
+                ('h', True, False),
+                ('e', True, False),
+                ('e', False, False),
+                ('E', False, False),
+                ('e', False, False),
+            ],
+        )
+
+    def test_key_non_hashable(self):
+        iterable = [[1, 2], [3, 0], [5, -2], [5, 6], [1, 2]]
+        self.assertEqual(
+            list(mi.classify_unique(iterable, lambda x: x)),
+            [
+                ([1, 2], True, True),
+                ([3, 0], True, True),
+                ([5, -2], True, True),
+                ([5, 6], True, True),
+                ([1, 2], True, False),
+            ],
+        )
+        self.assertEqual(
+            list(mi.classify_unique(iterable, sum)),
+            [
+                ([1, 2], True, True),
+                ([3, 0], False, False),
+                ([5, -2], False, False),
+                ([5, 6], True, True),
+                ([1, 2], True, False),
+            ],
+        )
+
+    def test_key_partially_hashable(self):
+        iterable = [[1, 2], (1, 2), [1, 2], [5, 6], [1, 2]]
+        self.assertEqual(
+            list(mi.classify_unique(iterable, lambda x: x)),
+            [
+                ([1, 2], True, True),
+                ((1, 2), True, True),
+                ([1, 2], True, False),
+                ([5, 6], True, True),
+                ([1, 2], True, False),
+            ],
+        )
+        self.assertEqual(
+            list(mi.classify_unique(iterable, list)),
+            [
+                ([1, 2], True, True),
+                ((1, 2), False, False),
+                ([1, 2], False, False),
+                ([5, 6], True, True),
+                ([1, 2], True, False),
+            ],
+        )
+
+    def test_vs_unique_everseen(self):
+        input = 'AAAABBBBCCDAABBB'
+        output = [e for e, j, u in mi.classify_unique(input) if u]
+        self.assertEqual(output, ['A', 'B', 'C', 'D'])
+        self.assertEqual(list(mi.unique_everseen(input)), output)
+
+    def test_vs_unique_everseen_key(self):
+        input = 'aAbACCc'
+        output = [e for e, j, u in mi.classify_unique(input, str.lower) if u]
+        self.assertEqual(output, list('abC'))
+        self.assertEqual(list(mi.unique_everseen(input, str.lower)), output)
+
+    def test_vs_unique_justseen(self):
+        input = 'AAAABBBCCDABB'
+        output = [e for e, j, u in mi.classify_unique(input) if j]
+        self.assertEqual(output, list('ABCDAB'))
+        self.assertEqual(list(mi.unique_justseen(input)), output)
+
+    def test_vs_unique_justseen_key(self):
+        input = 'AABCcAD'
+        output = [e for e, j, u in mi.classify_unique(input, str.lower) if j]
+        self.assertEqual(output, list('ABCAD'))
+        self.assertEqual(list(mi.unique_justseen(input, str.lower)), output)
+
+    def test_vs_duplicates_everseen(self):
+        input = [1, 2, 1, 2]
+        output = [e for e, j, u in mi.classify_unique(input) if not u]
+        self.assertEqual(output, [1, 2])
+        self.assertEqual(list(mi.duplicates_everseen(input)), output)
+
+    def test_vs_duplicates_everseen_key(self):
+        input = 'HEheHEhe'
+        output = [
+            e for e, j, u in mi.classify_unique(input, str.lower) if not u
+        ]
+        self.assertEqual(output, list('heHEhe'))
+        self.assertEqual(
+            list(mi.duplicates_everseen(input, str.lower)), output
+        )
+
+    def test_vs_duplicates_justseen(self):
+        input = [1, 2, 3, 3, 2, 2]
+        output = [e for e, j, u in mi.classify_unique(input) if not j]
+        self.assertEqual(output, [3, 2])
+        self.assertEqual(list(mi.duplicates_justseen(input)), output)
+
+    def test_vs_duplicates_justseen_key(self):
+        input = 'HEheHHHhEheeEe'
+        output = [
+            e for e, j, u in mi.classify_unique(input, str.lower) if not j
+        ]
+        self.assertEqual(output, list('HHheEe'))
+        self.assertEqual(
+            list(mi.duplicates_justseen(input, str.lower)), output
+        )
+
+
 class LongestCommonPrefixTests(TestCase):
     def test_basic(self):
         iterables = [[1, 2], [1, 2, 3], [1, 2, 4]]
@@ -5309,6 +5514,10 @@ class ConstrainedBatchesTests(TestCase):
             [(record_3, record_5), (record_10,), (record_2,)],
         )
 
+    def test_bad_max(self):
+        with self.assertRaises(ValueError):
+            list(mi.constrained_batches([], 0))
+
 
 class GrayProductTests(TestCase):
     def test_basic(self):
@@ -5482,3 +5691,178 @@ class OuterProductTests(TestCase):
             ('Goodbye, Alice!', 'Goodbye, Bob!', 'Goodbye, Carol!'),
         ]
         self.assertEqual(result, expected)
+
+
+class IterSuppressTests(TestCase):
+    class Producer:
+        def __init__(self, exc, die_early=False):
+            self.exc = exc
+            self.pos = 0
+            self.die_early = die_early
+
+        def __iter__(self):
+            if self.die_early:
+                raise self.exc
+
+            return self
+
+        def __next__(self):
+            ret = self.pos
+            if self.pos >= 5:
+                raise self.exc
+            self.pos += 1
+            return ret
+
+    def test_no_error(self):
+        iterator = range(5)
+        actual = list(mi.iter_suppress(iterator, RuntimeError))
+        expected = [0, 1, 2, 3, 4]
+        self.assertEqual(actual, expected)
+
+    def test_raises_error(self):
+        iterator = self.Producer(ValueError)
+        with self.assertRaises(ValueError):
+            list(mi.iter_suppress(iterator, RuntimeError))
+
+    def test_suppression(self):
+        iterator = self.Producer(ValueError)
+        actual = list(mi.iter_suppress(iterator, RuntimeError, ValueError))
+        expected = [0, 1, 2, 3, 4]
+        self.assertEqual(actual, expected)
+
+    def test_early_suppression(self):
+        iterator = self.Producer(ValueError, die_early=True)
+        actual = list(mi.iter_suppress(iterator, RuntimeError, ValueError))
+        expected = []
+        self.assertEqual(actual, expected)
+
+
+class FilterMapTests(TestCase):
+    def test_no_iterables(self):
+        actual = list(mi.filter_map(lambda _: None, []))
+        expected = []
+        self.assertEqual(actual, expected)
+
+    def test_filter(self):
+        actual = list(mi.filter_map(lambda _: None, [1, 2, 3]))
+        expected = []
+        self.assertEqual(actual, expected)
+
+    def test_map(self):
+        actual = list(mi.filter_map(lambda x: x + 1, [1, 2, 3]))
+        expected = [2, 3, 4]
+        self.assertEqual(actual, expected)
+
+    def test_filter_map(self):
+        actual = list(
+            mi.filter_map(
+                lambda x: int(x) if x.isnumeric() else None,
+                ['1', 'a', '2', 'b', '3'],
+            )
+        )
+        expected = [1, 2, 3]
+        self.assertEqual(actual, expected)
+
+
+class PowersetOfSetsTests(TestCase):
+    def test_simple(self):
+        iterable = [0, 1, 2]
+        actual = list(mi.powerset_of_sets(iterable))
+        expected = [set(), {0}, {1}, {2}, {0, 1}, {0, 2}, {1, 2}, {0, 1, 2}]
+        self.assertEqual(actual, expected)
+
+    def test_hash_count(self):
+        hash_count = 0
+
+        class Str(str):
+            def __hash__(true_self):
+                nonlocal hash_count
+                hash_count += 1
+                return super.__hash__(true_self)
+
+        iterable = map(Str, 'ABBBCDD')
+        self.assertEqual(len(list(mi.powerset_of_sets(iterable))), 128)
+        self.assertLessEqual(hash_count, 14)
+
+
+class JoinMappingTests(TestCase):
+    def test_basic(self):
+        salary_map = {'e1': 12, 'e2': 23, 'e3': 34}
+        dept_map = {'e1': 'eng', 'e2': 'sales', 'e3': 'eng'}
+        service_map = {'e1': 5, 'e2': 9, 'e3': 2}
+        field_to_map = {
+            'salary': salary_map,
+            'dept': dept_map,
+            'service': service_map,
+        }
+        expected = {
+            'e1': {'salary': 12, 'dept': 'eng', 'service': 5},
+            'e2': {'salary': 23, 'dept': 'sales', 'service': 9},
+            'e3': {'salary': 34, 'dept': 'eng', 'service': 2},
+        }
+        self.assertEqual(dict(mi.join_mappings(**field_to_map)), expected)
+
+    def test_empty(self):
+        self.assertEqual(dict(mi.join_mappings()), {})
+
+
+class DiscreteFourierTransformTests(TestCase):
+    def test_basic(self):
+        # Example calculation from:
+        # https://en.wikipedia.org/wiki/Discrete_Fourier_transform#Example
+        xarr = [1, 2 - 1j, -1j, -1 + 2j]
+        Xarr = [2, -2 - 2j, -2j, 4 + 4j]
+        self.assertTrue(all(map(cmath.isclose, mi.dft(xarr), Xarr)))
+        self.assertTrue(all(map(cmath.isclose, mi.idft(Xarr), xarr)))
+
+    def test_roundtrip(self):
+        for _ in range(1_000):
+            N = randrange(35)
+            xarr = [complex(random(), random()) for i in range(N)]
+            Xarr = list(mi.dft(xarr))
+            assert all(map(cmath.isclose, mi.idft(Xarr), xarr))
+
+
+class DoubleStarMapTests(TestCase):
+    def test_construction(self):
+        iterable = [{'price': 1.23}, {'price': 42}, {'price': 0.1}]
+        actual = list(mi.doublestarmap('{price:.2f}'.format, iterable))
+        expected = ['1.23', '42.00', '0.10']
+        self.assertEqual(actual, expected)
+
+    def test_identity(self):
+        iterable = [{'x': 1}, {'x': 2}, {'x': 3}]
+        actual = list(mi.doublestarmap(lambda x: x, iterable))
+        expected = [1, 2, 3]
+        self.assertEqual(actual, expected)
+
+    def test_adding(self):
+        iterable = [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]
+        actual = list(mi.doublestarmap(lambda a, b: a + b, iterable))
+        expected = [3, 7]
+        self.assertEqual(actual, expected)
+
+    def test_mismatch_function_smaller(self):
+        iterable = [{'a': 1, 'b': 2}, {'a': 3, 'b': 4}]
+        with self.assertRaises(TypeError):
+            list(mi.doublestarmap(lambda a: a, iterable))
+
+    def test_mismatch_function_different(self):
+        iterable = [{'a': 1}, {'a': 2}]
+        with self.assertRaises(TypeError):
+            list(mi.doublestarmap(lambda x: x, iterable))
+
+    def test_mismatch_function_larger(self):
+        iterable = [{'a': 1}, {'a': 2}]
+        with self.assertRaises(TypeError):
+            list(mi.doublestarmap(lambda a, b: a + b, iterable))
+
+    def test_no_mapping(self):
+        iterable = [1, 2, 3, 4]
+        with self.assertRaises(TypeError):
+            list(mi.doublestarmap(lambda x: x, iterable))
+
+    def test_empty(self):
+        actual = list(mi.doublestarmap(lambda x: x, []))
+        expected = []
+        self.assertEqual(actual, expected)

@@ -11,6 +11,9 @@ void THttpIOConfig::Register(TRegistrar registrar)
     registrar.Parameter("read_buffer_size", &TThis::ReadBufferSize)
         .Default(128_KB);
 
+    registrar.Parameter("max_redirect_count", &TThis::MaxRedirectCount)
+        .Default(0);
+
     registrar.Parameter("connection_idle_timeout", &TThis::ConnectionIdleTimeout)
         .Default(TDuration::Minutes(5));
 
@@ -47,7 +50,7 @@ void TServerConfig::Register(TRegistrar registrar)
         .Default(true);
 
     registrar.Parameter("cancel_fiber_on_connection_close", &TThis::CancelFiberOnConnectionClose)
-        .Default(false);
+        .Default();
 
     registrar.Parameter("nodelay", &TThis::NoDelay)
         .Default(true);

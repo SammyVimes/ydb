@@ -135,12 +135,15 @@ Y_UNIT_TEST_SUITE(Scheme) {
                                  0);
 
         TSerializedCellVec vec3;
+        UNIT_ASSERT(!vec3);
         UNIT_ASSERT(vec3.GetCells().empty());
         UNIT_ASSERT(vec3.GetBuffer().empty());
 
         TString buf = vec.GetBuffer();
         UNIT_ASSERT(buf.size() > cells.size()*2);
         vec3.Parse(buf);
+        UNIT_ASSERT(vec3);
+
 
         UNIT_ASSERT_VALUES_EQUAL(CompareTypedCellVectors(vec3.GetCells().data(), cells.data(),
                                                          types.data(),
@@ -232,6 +235,8 @@ Y_UNIT_TEST_SUITE(Scheme) {
     }
 
     void CompareTypedCellMatrix(const TSerializedCellMatrix& matrix, const TVector<TCell>& cells, const TVector<TTypeInfo>& types, ui64 hash) {
+        UNIT_ASSERT_VALUES_EQUAL(matrix.GetCells().size(), matrix.GetRowCount() * matrix.GetColCount());
+
         UNIT_ASSERT_VALUES_EQUAL(matrix.GetCells().size(), cells.size());
         UNIT_ASSERT_VALUES_EQUAL(matrix.GetCells().size(), types.size());
 
@@ -279,6 +284,13 @@ Y_UNIT_TEST_SUITE(Scheme) {
         CompareTypedCellMatrix(matrix, cells, types, hash);
 
         UNIT_ASSERT_VALUES_EQUAL(matrix.GetBuffer().size(), 2146);
+
+        //test submatrix
+        {
+            TVector<TCell> submatrix;
+            matrix.GetSubmatrix(1, 2, 3, 5, submatrix);
+            UNIT_ASSERT_VALUES_EQUAL(submatrix.size(), 6);
+        }
 
         TSerializedCellMatrix matrix2(matrix.GetBuffer());
         CompareTypedCellMatrix(matrix2, cells, types, hash);
@@ -398,6 +410,7 @@ Y_UNIT_TEST_SUITE(Scheme) {
                 CompareTypedCells(TCell(charArr, sizeof(ui16)), TCell(charArr, sizeof(ui16)), typeInfo);
                 break;
             case NScheme::NTypeIds::Int32:
+            case NScheme::NTypeIds::Date32:
                 GetValueHash(typeInfo, TCell(charArr, sizeof(i32)));
                 CompareTypedCells(TCell(charArr, sizeof(i32)), TCell(charArr, sizeof(i32)), typeInfo);
                 break;
@@ -406,6 +419,9 @@ Y_UNIT_TEST_SUITE(Scheme) {
                 CompareTypedCells(TCell(charArr, sizeof(ui32)), TCell(charArr, sizeof(ui32)), typeInfo);
                 break;
             case NScheme::NTypeIds::Int64:
+            case NScheme::NTypeIds::Datetime64:
+            case NScheme::NTypeIds::Timestamp64:
+            case NScheme::NTypeIds::Interval64:
                 GetValueHash(typeInfo, TCell(charArr, sizeof(i64)));
                 CompareTypedCells(TCell(charArr, sizeof(i64)), TCell(charArr, sizeof(i64)), typeInfo);
                 break;
@@ -493,5 +509,38 @@ Y_UNIT_TEST_SUITE(Scheme) {
                 UNIT_ASSERT_EQUAL(std::clamp(cmp, -1, 1), (i == j ? 0 : (i < j ? -1 : +1)));
             }
         }
+    }
+
+    Y_UNIT_TEST(UnsafeAppend) {
+        TString appended = TSerializedCellVec::Serialize({});
+
+        UNIT_ASSERT(TSerializedCellVec::UnsafeAppendCells({}, appended));
+
+        UNIT_ASSERT_EQUAL(appended.size(), 0);
+
+        ui64 intVal = 42;
+        char bigStrVal[] = "This is a large string value that shouldn't be inlined";
+
+        TVector<TCell> cells;
+        cells.emplace_back(TCell::Make(intVal));
+        cells.emplace_back(bigStrVal, sizeof(bigStrVal));
+
+        UNIT_ASSERT(TSerializedCellVec::UnsafeAppendCells(cells, appended));
+        TString serialized = TSerializedCellVec::Serialize(cells);
+
+        UNIT_ASSERT_VALUES_EQUAL(appended, serialized);
+
+        UNIT_ASSERT(TSerializedCellVec::UnsafeAppendCells(cells, appended));
+
+        cells.emplace_back(TCell::Make(intVal));
+        cells.emplace_back(bigStrVal, sizeof(bigStrVal));
+
+        serialized = TSerializedCellVec::Serialize(cells);
+
+        UNIT_ASSERT_VALUES_EQUAL(appended, serialized);
+
+        appended.resize(1);
+
+        UNIT_ASSERT(!TSerializedCellVec::UnsafeAppendCells(cells, appended));
     }
 }

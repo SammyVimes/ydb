@@ -15,7 +15,7 @@ struct TQueryTrackerOptions
     TString QueryTrackerStage = "production";
 };
 
-DEFINE_ENUM(ContentType,
+DEFINE_ENUM(EContentType,
     ((RawInlineData)   (0))
     ((Url)   (1))
 );
@@ -25,7 +25,7 @@ struct TQueryFile
 {
     TString Name;
     TString Content;
-    ContentType Type;
+    EContentType Type;
 
     REGISTER_YSON_STRUCT(TQueryFile);
 
@@ -42,6 +42,8 @@ struct TStartQueryOptions
     bool Draft = false;
     NYTree::IMapNodePtr Annotations;
     std::vector<TQueryFilePtr> Files;
+    std::optional<TString> AccessControlObject; // COMPAT(mpereskokova)
+    std::optional<std::vector<TString>> AccessControlObjects;
 };
 
 struct TAbortQueryOptions
@@ -101,6 +103,8 @@ struct TQuery
     std::optional<TInstant> FinishTime;
     NYson::TYsonString Settings;
     std::optional<TString> User;
+    std::optional<TString> AccessControlObject; // COMPAT(mpereskokova)
+    std::optional<NYson::TYsonString> AccessControlObjects;
     std::optional<NQueryTrackerClient::EQueryState> State;
     std::optional<i64> ResultCount;
     NYson::TYsonString Progress;
@@ -135,12 +139,30 @@ struct TAlterQueryOptions
     , public TQueryTrackerOptions
 {
     NYTree::IMapNodePtr Annotations;
+    std::optional<TString> AccessControlObject; // COMPAT(mpereskokova)
+    std::optional<std::vector<TString>> AccessControlObjects;
+};
+
+struct TGetQueryTrackerInfoOptions
+    : public TTimeoutOptions
+    , public TQueryTrackerOptions
+{
+    NYTree::TAttributeFilter Attributes;
+};
+
+struct TGetQueryTrackerInfoResult
+{
+    TString ClusterName;
+    NYson::TYsonString SupportedFeatures;
+    std::vector<TString> AccessControlObjects;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 
 struct IQueryTrackerClient
 {
+    virtual ~IQueryTrackerClient() = default;
+
     virtual TFuture<NQueryTrackerClient::TQueryId> StartQuery(
         NQueryTrackerClient::EQueryEngine engine,
         const TString& query,
@@ -169,6 +191,8 @@ struct IQueryTrackerClient
     virtual TFuture<void> AlterQuery(
         NQueryTrackerClient::TQueryId queryId,
         const TAlterQueryOptions& options = {}) = 0;
+
+    virtual TFuture<TGetQueryTrackerInfoResult> GetQueryTrackerInfo(const TGetQueryTrackerInfoOptions& options = {}) = 0;
 };
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -93,10 +93,12 @@ class NativeTransform:
                 write_leb128(block.column_count, output)
                 write_leb128(block.row_count, output)
                 for col_name, col_type, data in zip(block.column_names, block.column_types, block.column_data):
-                    write_leb128(len(col_name), output)
-                    output += col_name.encode()
-                    write_leb128(len(col_type.name), output)
-                    output += col_type.name.encode()
+                    col_enc = col_name.encode()
+                    write_leb128(len(col_enc), output)
+                    output += col_enc
+                    col_enc = col_type.name.encode()
+                    write_leb128(len(col_enc), output)
+                    output += col_enc
                     context.start_column(col_name)
                     try:
                         col_type.write_column(data, output, context)
@@ -105,7 +107,7 @@ class NativeTransform:
                         # the insert if the user has included bad data in the column.  We need to ensure that the
                         # insert fails (using garbage data) to avoid a partial insert, and use the context to
                         # propagate the correct exception to the user
-                        logger.error('Error serializing column `%s` into into data type `%s`',
+                        logger.error('Error serializing column `%s` into data type `%s`',
                                      col_name, col_type.name, exc_info=True)
                         context.insert_exception = ex
                         yield 'INTERNAL EXCEPTION WHILE SERIALIZING'.encode()

@@ -42,9 +42,12 @@ TExecFunc arrow_int4range_subdiff() { return MakeIndirectExec<true, true>(&int4r
 TExecFunc arrow_int8range_canonical() { return MakeIndirectExec<true, false>(&int8range_canonical); }
 TExecFunc arrow_int8range_subdiff() { return MakeIndirectExec<true, true>(&int8range_subdiff); }
 TExecFunc arrow_jsonb_agg_finalfn() { return MakeIndirectExec<false, false>(&jsonb_agg_finalfn); }
+TExecFunc arrow_jsonb_agg_strict_transfn() { return MakeIndirectExec<false, true>(&jsonb_agg_strict_transfn); }
 TExecFunc arrow_jsonb_agg_transfn() { return MakeIndirectExec<false, true>(&jsonb_agg_transfn); }
 TExecFunc arrow_jsonb_bool() { return MakeIndirectExec<true, true>(&jsonb_bool); }
+TExecFunc arrow_jsonb_build_array() { return MakeIndirectExec<false, false>(&jsonb_build_array); }
 TExecFunc arrow_jsonb_build_array_noargs() { return MakeIndirectExec<false, false>(&jsonb_build_array_noargs); }
+TExecFunc arrow_jsonb_build_object() { return MakeIndirectExec<false, false>(&jsonb_build_object); }
 TExecFunc arrow_jsonb_build_object_noargs() { return MakeIndirectExec<false, false>(&jsonb_build_object_noargs); }
 TExecFunc arrow_jsonb_float4() { return MakeIndirectExec<true, true>(&jsonb_float4); }
 TExecFunc arrow_jsonb_float8() { return MakeIndirectExec<true, true>(&jsonb_float8); }
@@ -55,7 +58,10 @@ TExecFunc arrow_jsonb_int8() { return MakeIndirectExec<true, true>(&jsonb_int8);
 TExecFunc arrow_jsonb_numeric() { return MakeIndirectExec<true, false>(&jsonb_numeric); }
 TExecFunc arrow_jsonb_object() { return MakeIndirectExec<true, false>(&jsonb_object); }
 TExecFunc arrow_jsonb_object_agg_finalfn() { return MakeIndirectExec<false, false>(&jsonb_object_agg_finalfn); }
+TExecFunc arrow_jsonb_object_agg_strict_transfn() { return MakeIndirectExec<false, true>(&jsonb_object_agg_strict_transfn); }
 TExecFunc arrow_jsonb_object_agg_transfn() { return MakeIndirectExec<false, true>(&jsonb_object_agg_transfn); }
+TExecFunc arrow_jsonb_object_agg_unique_strict_transfn() { return MakeIndirectExec<false, true>(&jsonb_object_agg_unique_strict_transfn); }
+TExecFunc arrow_jsonb_object_agg_unique_transfn() { return MakeIndirectExec<false, true>(&jsonb_object_agg_unique_transfn); }
 TExecFunc arrow_jsonb_object_two_arg() { return MakeIndirectExec<true, false>(&jsonb_object_two_arg); }
 TExecFunc arrow_jsonb_out() { return MakeIndirectExec<true, false>(&jsonb_out); }
 TExecFunc arrow_jsonb_recv() { return MakeIndirectExec<true, false>(&jsonb_recv); }

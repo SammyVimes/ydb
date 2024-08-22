@@ -18,9 +18,11 @@ PEERDIR(
     library/cpp/getopt
     library/cpp/regex/pcre
     library/cpp/svnversion
+    contrib/libs/aws-sdk-cpp/aws-cpp-sdk-core
     ydb/core/testlib/default
     ydb/core/tx/columnshard/hooks/abstract
     ydb/core/tx/columnshard/hooks/testing
+    ydb/core/tx/columnshard/test_helper
     ydb/services/metadata
     ydb/core/tx
     ydb/public/lib/yson_value
@@ -29,7 +31,6 @@ PEERDIR(
 YQL_LAST_ABI_VERSION()
 
 SRCS(
-    columnshard_ut_common.cpp
     ut_columnshard_schema.cpp
 )
 

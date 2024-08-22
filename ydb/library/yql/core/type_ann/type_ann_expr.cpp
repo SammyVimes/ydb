@@ -180,7 +180,7 @@ private:
         }
 
         auto input = start;
-        for (;;) {
+        for (size_t transformCount = 0; true; ++transformCount) {
             TIssueScopeGuard issueScope(ctx.IssueManager, [this, input, &ctx]() -> TIssuePtr {
                 TStringBuilder str;
                 str << "At ";
@@ -256,6 +256,22 @@ private:
                 return TStatus::Error;
             default:
                 YQL_ENSURE(false, "Unknown state");
+            }
+
+            if (transformCount >= ctx.TypeAnnNodeRepeatLimit) {
+                TConvertToAstSettings settings;
+                settings.AllowFreeArgs = true;
+                auto ast = ConvertToAst(*input, ctx, settings);
+                if (ast.Root) {
+                    TStringStream s;
+                    ast.Root->PrettyPrintTo(s, TAstPrintFlags::ShortQuote | TAstPrintFlags::AdaptArbitraryContent | TAstPrintFlags::PerLine);
+                    YQL_CLOG(INFO, Core) << "Too many transformations for node:\n" << s.Str();
+                }
+                ctx.AddError(TIssue(ctx.GetPosition(input->Pos()),
+                    TStringBuilder() << "YQL: Internal core error! Type annotation of node " << input->Content()
+                        << " with type " << input->Type() << " takes too much iterations: "
+                        << ctx.TypeAnnNodeRepeatLimit << ". You may set TypeAnnNodeRepeatLimit as flags for config provider."));
+                return TStatus::Error;
             }
 
             input->SetState(TExprNode::EState::TypePending);
@@ -525,31 +541,7 @@ private:
     }
 
     void CheckExpected(const TExprNode& input, TExprContext& ctx) {
-        Y_UNUSED(ctx);
-        auto it = Types.ExpectedTypes.find(input.UniqueId());
-        if (it != Types.ExpectedTypes.end()) {
-            YQL_ENSURE(IsSameAnnotation(*input.GetTypeAnn(), *it->second),
-                "Rewrite error, type should be : " <<
-                *it->second << ", but it is: " << *input.GetTypeAnn() << " for node " << input.Content());
-        }
-
-        auto coIt = Types.ExpectedColumnOrders.find(input.UniqueId());
-        if (coIt != Types.ExpectedColumnOrders.end()) {
-            TColumnOrder oldColumnOrder = coIt->second;
-            TMaybe<TColumnOrder> newColumnOrder = Types.LookupColumnOrder(input);
-            if (!newColumnOrder) {
-                // keep column order after rewrite
-                // TODO: check if needed
-                auto status = Types.SetColumnOrder(input, oldColumnOrder, ctx);
-                YQL_ENSURE(status == IGraphTransformer::TStatus::Ok);
-            } else {
-                YQL_ENSURE(newColumnOrder == oldColumnOrder,
-                    "Rewrite error, column order should be: "
-                    << FormatColumnOrder(oldColumnOrder) << ", but it is: "
-                    << FormatColumnOrder(newColumnOrder) << " for node "
-                    << input.Content());
-            }
-        }
+        CheckExpectedTypeAndColumnOrder(input, ctx, Types);
     }
 
 private:

@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING, Callable, DefaultDict
+from typing import TYPE_CHECKING, Callable
 
 from prompt_toolkit.cache import FastDictCache
 from prompt_toolkit.data_structures import Point
@@ -163,13 +163,13 @@ class Screen:
         else:
             default_char2 = default_char
 
-        self.data_buffer: DefaultDict[int, DefaultDict[int, Char]] = defaultdict(
+        self.data_buffer: defaultdict[int, defaultdict[int, Char]] = defaultdict(
             lambda: defaultdict(lambda: default_char2)
         )
 
         #: Escape sequences to be injected.
-        self.zero_width_escapes: DefaultDict[int, DefaultDict[int, str]] = defaultdict(
-            lambda: defaultdict(lambda: "")
+        self.zero_width_escapes: defaultdict[int, defaultdict[int, str]] = defaultdict(
+            lambda: defaultdict(str)
         )
 
         #: Position of the cursor.
@@ -320,10 +320,4 @@ class WritePosition:
         self.height = height
 
     def __repr__(self) -> str:
-        return "{}(x={!r}, y={!r}, width={!r}, height={!r})".format(
-            self.__class__.__name__,
-            self.xpos,
-            self.ypos,
-            self.width,
-            self.height,
-        )
+        return f"{self.__class__.__name__}(x={self.xpos!r}, y={self.ypos!r}, width={self.width!r}, height={self.height!r})"

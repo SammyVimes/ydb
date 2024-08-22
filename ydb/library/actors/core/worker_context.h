@@ -17,6 +17,17 @@
 #include <library/cpp/lwtrace/shuttle.h>
 
 namespace NActors {
+    struct TSharedExecutorThreadCtx;
+
+    struct TCpuSensor {
+        ui64 Value = 0;
+
+        ui64 GetDiff() {
+            ui64 prev = std::exchange(Value, ThreadCPUTime());
+            return Value - prev;
+        }
+    };
+    
     struct TWorkerContext {
         TWorkerId WorkerId;
         const TCpuId CpuId;
@@ -33,6 +44,9 @@ namespace NActors {
         bool IsNeededToWaitNextActivation = true;
         i64 HPStart = 0;
         ui32 ExecutedEvents = 0;
+        TSharedExecutorThreadCtx *SharedThread = nullptr;
+        TCpuSensor CpuSensor;
+        
 
         TWorkerContext(TWorkerId workerId, TCpuId cpuId)
             : WorkerId(workerId)
@@ -46,14 +60,23 @@ namespace NActors {
             statsCopy.Aggregate(*Stats);
         }
 
+        void SetCurrentActivationTime(ui32 activityType, i64 elapsed) {
+            RelaxedStore(&Stats->CurrentActivationTime.LastActivity, activityType);
+            RelaxedStore(&Stats->CurrentActivationTime.TimeUs, (elapsed > 0 ? elapsed : 0));
+        }
+
         void AddElapsedCycles(ui32 activityType, i64 elapsed) {
-            Y_DEBUG_ABORT_UNLESS(activityType < Stats->MaxActivityType());
-            RelaxedStore(&Stats->ElapsedTicks, RelaxedLoad(&Stats->ElapsedTicks) + elapsed);
-            RelaxedStore(&Stats->ElapsedTicksByActivity[activityType], RelaxedLoad(&Stats->ElapsedTicksByActivity[activityType]) + elapsed);
+            if (Y_LIKELY(elapsed > 0)) {
+                Y_DEBUG_ABORT_UNLESS(activityType < Stats->MaxActivityType());
+                RelaxedStore(&Stats->ElapsedTicks, RelaxedLoad(&Stats->ElapsedTicks) + elapsed);
+                RelaxedStore(&Stats->ElapsedTicksByActivity[activityType], RelaxedLoad(&Stats->ElapsedTicksByActivity[activityType]) + elapsed);
+            }
         }
 
         void AddParkedCycles(i64 elapsed) {
-            RelaxedStore(&Stats->ParkedTicks, RelaxedLoad(&Stats->ParkedTicks) + elapsed);
+            if (Y_LIKELY(elapsed > 0)) {
+                RelaxedStore(&Stats->ParkedTicks, RelaxedLoad(&Stats->ParkedTicks) + elapsed);
+            }
         }
 
         void AddBlockedCycles(i64 elapsed) {
@@ -114,7 +137,7 @@ namespace NActors {
         }
 
         i64 AddEventProcessingStats(i64 deliveredTs, i64 processedTs, ui32 activityType, ui64 scheduled) {
-            i64 elapsed = processedTs - deliveredTs;
+            i64 elapsed = Max<i64>(0, processedTs - deliveredTs);
             ui64 usecElapsed = NHPTimer::GetSeconds(elapsed) * 1000000;
             activityType = (activityType >= Stats->MaxActivityType()) ? 0 : activityType;
             Stats->EventProcessingCountHistogram.Add(usecElapsed);
@@ -122,7 +145,6 @@ namespace NActors {
             RelaxedStore(&Stats->ReceivedEvents, RelaxedLoad(&Stats->ReceivedEvents) + 1);
             RelaxedStore(&Stats->ReceivedEventsByActivity[activityType], RelaxedLoad(&Stats->ReceivedEventsByActivity[activityType]) + 1);
             RelaxedStore(&Stats->ScheduledEventsByActivity[activityType], RelaxedLoad(&Stats->ScheduledEventsByActivity[activityType]) + scheduled);
-            AddElapsedCycles(activityType, elapsed);
             return elapsed;
         }
 
@@ -136,16 +158,17 @@ namespace NActors {
         }
 
         void UpdateThreadTime() {
-            RelaxedStore(&WorkerStats.SafeElapsedTicks, (ui64)RelaxedLoad(&WorkerStats.ElapsedTicks));
-            RelaxedStore(&WorkerStats.CpuUs, ThreadCPUTime());
+            RelaxedStore(&Stats->SafeElapsedTicks, (ui64)RelaxedLoad(&Stats->ElapsedTicks));
+            RelaxedStore(&Stats->CpuUs, (ui64)RelaxedLoad(&Stats->CpuUs) + CpuSensor.GetDiff());
         }
 
         void IncreaseNotEnoughCpuExecutions() {
-            RelaxedStore(&WorkerStats.NotEnoughCpuExecutions,
-                    (ui64)RelaxedLoad(&WorkerStats.NotEnoughCpuExecutions) + 1);
+            RelaxedStore(&Stats->NotEnoughCpuExecutions,
+                    (ui64)RelaxedLoad(&Stats->NotEnoughCpuExecutions) + 1);
         }
 #else
         void GetCurrentStats(TExecutorThreadStats&) const {}
+        void SetCurrentActivationTime(ui32, i64) {}
         inline void AddElapsedCycles(ui32, i64) {}
         inline void AddParkedCycles(i64) {}
         inline void AddBlockedCycles(i64) {}

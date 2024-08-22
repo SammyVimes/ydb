@@ -10,9 +10,9 @@ NO_SANITIZE()
 
 NO_SANITIZE_COVERAGE()
 
-OWNER(somov)
+SUBSCRIBER(somov)
 
-PYTHON(
+RUN_PYTHON3(
     generate_symbolizer.py ${CXX_COMPILER}
     STDOUT symbolizer.c
 )

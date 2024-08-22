@@ -5,12 +5,13 @@ the input in the :class:`~prompt_toolkit.inputstream.InputStream` instance.
 The `KeyProcessor` will according to the implemented keybindings call the
 correct callbacks when new key presses are feed through `feed`.
 """
+
 from __future__ import annotations
 
 import weakref
 from asyncio import Task, sleep
 from collections import deque
-from typing import TYPE_CHECKING, Any, Deque, Generator
+from typing import TYPE_CHECKING, Any, Generator
 
 from prompt_toolkit.application.current import get_app
 from prompt_toolkit.enums import EditingMode
@@ -103,7 +104,7 @@ class KeyProcessor:
         self._previous_handler: Binding | None = None
 
         # The queue of keys not yet send to our _process generator/state machine.
-        self.input_queue: Deque[KeyPress] = deque()
+        self.input_queue: deque[KeyPress] = deque()
 
         # The key buffer that is matched in the generator state machine.
         # (This is at at most the amount of keys that make up for one key binding.)
@@ -450,11 +451,7 @@ class KeyPressEvent:
         self._app = get_app()
 
     def __repr__(self) -> str:
-        return "KeyPressEvent(arg={!r}, key_sequence={!r}, is_repeat={!r})".format(
-            self.arg,
-            self.key_sequence,
-            self.is_repeat,
-        )
+        return f"KeyPressEvent(arg={self.arg!r}, key_sequence={self.key_sequence!r}, is_repeat={self.is_repeat!r})"
 
     @property
     def data(self) -> str:

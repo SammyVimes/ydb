@@ -6,14 +6,10 @@ namespace NKikimr::NGRpcProxy::V1 {
 TPartitionWriterCacheActor::TPartitionWriterCacheActor(const TActorId& owner,
                                                        ui32 partition,
                                                        ui64 tabletId,
-                                                       std::optional<ui32> expectedGeneration,
-                                                       const TString& sourceId,
                                                        const NPQ::TPartitionWriterOpts& opts) :
     Owner(owner),
     Partition(partition),
     TabletId(tabletId),
-    ExpectedGeneration(expectedGeneration),
-    SourceId(sourceId),
     Opts(opts)
 {
 }
@@ -50,7 +46,7 @@ STFUNC(TPartitionWriterCacheActor::StateWork)
         HFunc(NPQ::TEvPartitionWriter::TEvWriteAccepted, Handle);
         HFunc(NPQ::TEvPartitionWriter::TEvWriteResponse, Handle);
         HFunc(NPQ::TEvPartitionWriter::TEvDisconnected, Handle);
-        HFunc(TEvents::TEvPoisonPill, Handle);
+        HFunc(TEvents::TEvPoison, Handle);
     }
 }
 
@@ -110,6 +106,11 @@ void TPartitionWriterCacheActor::Handle(NPQ::TEvPartitionWriter::TEvInitResult::
 
     if (result.IsSuccess()) {
         p->second->OnEvInitResult(ev);
+    } else {
+        auto response = result.GetError().Response;
+        ctx.Send(Owner, new NPQ::TEvPartitionWriter::TEvWriteResponse(result.SessionId, result.TxId,
+                                                                      EErrorCode::InternalError, result.GetError().Reason,
+                                                                      std::move(response)));
     }
 
     if (!result.SessionId && !result.TxId) {
@@ -203,6 +204,8 @@ void TPartitionWriterCacheActor::Handle(TEvents::TEvPoisonPill::TPtr& ev, const 
     for (auto& [_, writer] : Writers) {
         ctx.Send(writer->Actor, new TEvents::TEvPoisonPill());
     }
+
+    Die(ctx);
 }
 
 auto TPartitionWriterCacheActor::GetPartitionWriter(const TString& sessionId, const TString& txId,
@@ -270,8 +273,7 @@ TActorId TPartitionWriterCacheActor::CreatePartitionWriter(const TString& sessio
     }
 
     return ctx.RegisterWithSameMailbox(NPQ::CreatePartitionWriter(
-        ctx.SelfID, {}, TabletId, Partition, ExpectedGeneration,
-        SourceId, opts
+        ctx.SelfID, TabletId, Partition, opts
     ));
 }
 
@@ -283,7 +285,7 @@ STFUNC(TPartitionWriterCacheActor::StateBroken)
         HFunc(NPQ::TEvPartitionWriter::TEvWriteAccepted, Handle);
         HFunc(NPQ::TEvPartitionWriter::TEvWriteResponse, Handle);
         HFunc(NPQ::TEvPartitionWriter::TEvDisconnected, Handle);
-        HFunc(TEvents::TEvPoisonPill, Handle);
+        HFunc(TEvents::TEvPoison, Handle);
     }
 }
 

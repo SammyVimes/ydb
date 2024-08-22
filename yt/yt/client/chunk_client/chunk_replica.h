@@ -2,6 +2,8 @@
 
 #include "public.h"
 
+#include <yt/yt/client/hydra/public.h>
+
 #include <yt/yt/client/node_tracker_client/public.h>
 
 namespace NYT::NChunkClient {
@@ -54,7 +56,6 @@ void ToProto(ui32* value, TChunkReplicaWithMedium replica) = delete;
 void FromProto(TChunkReplicaWithMedium* replica, ui32 value) = delete;
 
 void FormatValue(TStringBuilderBase* builder, TChunkReplicaWithMedium replica, TStringBuf spec);
-TString ToString(TChunkReplicaWithMedium replica);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -86,7 +87,15 @@ private:
 };
 
 void FormatValue(TStringBuilderBase* builder, TChunkReplicaWithLocation replica, TStringBuf spec);
-TString ToString(TChunkReplicaWithLocation replica);
+
+////////////////////////////////////////////////////////////////////////////////
+
+struct TWrittenChunkReplicasInfo
+{
+    TChunkReplicaWithLocationList Replicas;
+    // Revision upon confirmation of the chunk. Not every writer is expected to set this field.
+    NHydra::TRevision ConfirmationRevision = NHydra::NullRevision;
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -115,7 +124,6 @@ private:
 };
 
 void FormatValue(TStringBuilderBase* builder, TChunkReplica replica, TStringBuf spec);
-TString ToString(TChunkReplica replica);
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -126,6 +134,8 @@ struct TChunkIdWithIndex
 
     TChunkId Id;
     int ReplicaIndex;
+
+    bool operator==(const TChunkIdWithIndex& other) const = default;
 
     void Save(TStreamSaveContext& context) const;
     void Load(TStreamLoadContext& context);
@@ -142,29 +152,34 @@ struct TChunkIdWithIndexes
 
     int MediumIndex;
 
+    bool operator==(const TChunkIdWithIndexes& other) const = default;
+
     void Save(TStreamSaveContext& context) const;
     void Load(TStreamLoadContext& context);
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 
-bool operator==(const TChunkIdWithIndex& lhs, const TChunkIdWithIndex& rhs);
-bool operator!=(const TChunkIdWithIndex& lhs, const TChunkIdWithIndex& rhs);
 bool operator<(const TChunkIdWithIndex& lhs, const TChunkIdWithIndex& rhs);
 
-TString ToString(const TChunkIdWithIndex& id);
+void FormatValue(TStringBuilderBase* builder, const TChunkIdWithIndex& id, TStringBuf spec = {});
 
-bool operator==(const TChunkIdWithIndexes& lhs, const TChunkIdWithIndexes& rhs);
-bool operator!=(const TChunkIdWithIndexes& lhs, const TChunkIdWithIndexes& rhs);
+////////////////////////////////////////////////////////////////////////////////
+
 bool operator<(const TChunkIdWithIndexes& lhs, const TChunkIdWithIndexes& rhs);
 
-TString ToString(const TChunkIdWithIndexes& id);
+void FormatValue(TStringBuilderBase* builder, const TChunkIdWithIndexes& id, TStringBuf spec = {});
+
+////////////////////////////////////////////////////////////////////////////////
 
 //! Returns |true| iff this is an artifact chunk.
 bool IsArtifactChunkId(TChunkId id);
 
 //! Returns |true| iff this is a chunk or any type (journal or blob, replicated or erasure-coded).
 bool IsPhysicalChunkType(NObjectClient::EObjectType type);
+
+//! Returns |true| iff this is a chunk or any type (journal or blob, replicated or erasure-coded).
+bool IsPhysicalChunkId(TChunkId id);
 
 //! Returns |true| iff this is a journal chunk type.
 bool IsJournalChunkType(NObjectClient::EObjectType type);
@@ -183,6 +198,9 @@ bool IsErasureChunkType(NObjectClient::EObjectType type);
 
 //! Returns |true| iff this is an erasure chunk.
 bool IsErasureChunkId(TChunkId id);
+
+//! Returns |true| iff this is an erasure chunk part.
+bool IsErasureChunkPartType(NObjectClient::EObjectType type);
 
 //! Returns |true| iff this is an erasure chunk part.
 bool IsErasureChunkPartId(TChunkId id);

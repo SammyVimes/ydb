@@ -2,8 +2,13 @@
 #include "columnshard_ttl.h"
 #include "columnshard_private_events.h"
 #include "columnshard_schema.h"
+#include "blobs_action/storages_manager/manager.h"
 #include "hooks/abstract/abstract.h"
+#include "engines/column_engine_logs.h"
+#include "bg_tasks/manager/manager.h"
+#include "bg_tasks/adapter/adapter.h"
 #include <ydb/core/tx/columnshard/blobs_action/blob_manager_db.h>
+#include <ydb/core/tx/columnshard/transactions/locks_db.h>
 
 #include <ydb/core/tablet/tablet_exception.h>
 #include <ydb/core/tx/columnshard/operations/write.h>
@@ -14,6 +19,9 @@ namespace NKikimr::NColumnShard {
 using namespace NTabletFlatExecutor;
 
 class TTxInit : public TTransactionBase<TColumnShard> {
+private:
+    const TMonotonic StartInstant = TMonotonic::Now();
+
 public:
     TTxInit(TColumnShard* self)
         : TBase(self)
@@ -36,10 +44,9 @@ void TTxInit::SetDefaults() {
     Self->LastWriteId = TWriteId{0};
     Self->LastPlannedStep = 0;
     Self->LastPlannedTxId = 0;
+    Self->LastCompletedTx = NOlap::TSnapshot::Zero();
     Self->OwnerPathId = 0;
     Self->OwnerPath.clear();
-    Self->AltersInFlight.clear();
-    Self->CommitsInFlight.clear();
     Self->LongTxWrites.clear();
     Self->LongTxWritesByUniqueId.clear();
 }
@@ -62,16 +69,25 @@ bool TTxInit::Precharge(TTransactionContext& txc) {
     ready = ready & Schema::Precharge<Schema::IndexColumns>(db, txc.DB.GetScheme());
     ready = ready & Schema::Precharge<Schema::IndexCounters>(db, txc.DB.GetScheme());
 
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::CurrentSchemeShardId, Self->CurrentSchemeShardId);
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::LastSchemaSeqNoGeneration, Self->LastSchemaSeqNo.Generation);
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::LastSchemaSeqNoRound, Self->LastSchemaSeqNo.Round);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::CurrentSchemeShardId, Self->CurrentSchemeShardId);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::LastSchemaSeqNoGeneration, Self->LastSchemaSeqNo.Generation);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::LastSchemaSeqNoRound, Self->LastSchemaSeqNo.Round);
     ready = ready && Schema::GetSpecialProtoValue(db, Schema::EValueIds::ProcessingParams, Self->ProcessingParams);
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::LastWriteId, Self->LastWriteId);
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::LastPlannedStep, Self->LastPlannedStep);
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::LastPlannedTxId, Self->LastPlannedTxId);
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::LastExportNumber, Self->LastExportNo);
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::OwnerPathId, Self->OwnerPathId);
-    ready = ready && Schema::GetSpecialValue(db, Schema::EValueIds::OwnerPath, Self->OwnerPath);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::LastWriteId, Self->LastWriteId);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::LastPlannedStep, Self->LastPlannedStep);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::LastPlannedTxId, Self->LastPlannedTxId);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::LastExportNumber, Self->LastExportNo);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::OwnerPathId, Self->OwnerPathId);
+    ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::OwnerPath, Self->OwnerPath);
+
+
+    {
+        ui64 lastCompletedStep = 0;
+        ui64 lastCompletedTx = 0;
+        ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::LastCompletedStep, lastCompletedStep);
+        ready = ready && Schema::GetSpecialValueOpt(db, Schema::EValueIds::LastCompletedTxId, lastCompletedTx);
+        Self->LastCompletedTx = NOlap::TSnapshot(lastCompletedStep, lastCompletedTx);
+    }
 
     if (!ready) {
         return false;
@@ -88,67 +104,78 @@ bool TTxInit::ReadEverything(TTransactionContext& txc, const TActorContext& ctx)
     TBlobGroupSelector dsGroupSelector(Self->Info());
     NOlap::TDbWrapper dbTable(txc.DB, &dsGroupSelector);
     {
-        ACFL_INFO("step", "TInsertTable::Load_Start");
+        ACFL_DEBUG("step", "TInsertTable::Load_Start");
+        TMemoryProfileGuard g("TTxInit/InsertTable");
         auto localInsertTable = std::make_unique<NOlap::TInsertTable>();
         if (!localInsertTable->Load(dbTable, TAppData::TimeProvider->Now())) {
             ACFL_ERROR("step", "TInsertTable::Load_Fails");
             return false;
         }
-        ACFL_INFO("step", "TInsertTable::Load_Finish");
+        ACFL_DEBUG("step", "TInsertTable::Load_Finish");
         Self->InsertTable.swap(localInsertTable);
     }
 
     {
-        ACFL_INFO("step", "TTxController::Load_Start");
+        ACFL_DEBUG("step", "TTxController::Load_Start");
+        TMemoryProfileGuard g("TTxInit/TTxController");
         auto localTxController = std::make_unique<TTxController>(*Self);
          if (!localTxController->Load(txc)) {
             ACFL_ERROR("step", "TTxController::Load_Fails");
             return false;
         }
-        ACFL_INFO("step", "TTxController::Load_Finish");
+        ACFL_DEBUG("step", "TTxController::Load_Finish");
         Self->ProgressTxController.swap(localTxController);
     }
 
     {
-        ACFL_INFO("step", "TOperationsManager::Load_Start");
+        ACFL_DEBUG("step", "TOperationsManager::Load_Start");
+        TMemoryProfileGuard g("TTxInit/TOperationsManager");
         auto localOperationsManager = std::make_unique<TOperationsManager>();
          if (!localOperationsManager->Load(txc)) {
             ACFL_ERROR("step", "TOperationsManager::Load_Fails");
             return false;
         }
-        ACFL_INFO("step", "TOperationsManager::Load_Finish");
+        ACFL_DEBUG("step", "TOperationsManager::Load_Finish");
         Self->OperationsManager.swap(localOperationsManager);
     }
 
     {
-        TBlobManagerDb blobManagerDb(txc.DB);
-        for (auto&& i : Self->StoragesManager->GetStorages()) {
-            if (!i.second->Load(blobManagerDb)) {
-                ACFL_ERROR("event", "storages manager load")("storage", i.first);
+        ACFL_DEBUG("step", "TStoragesManager::Load_Start");
+        AFL_VERIFY(Self->StoragesManager);
+        TMemoryProfileGuard g("TTxInit/NDataSharing::TStoragesManager");
+        if (!Self->StoragesManager->LoadIdempotency(txc.DB)) {
+            return false;
+        }
+        ACFL_DEBUG("step", "TStoragesManager::Load_Finish");
+    }
+
+    {
+        ACFL_DEBUG("step", "TTablesManager::Load_Start");
+        TTablesManager tManagerLocal(Self->StoragesManager, Self->TabletID());
+        {
+            TMemoryProfileGuard g("TTxInit/TTablesManager");
+            if (!tManagerLocal.InitFromDB(db)) {
+                ACFL_ERROR("step", "TTablesManager::InitFromDB_Fails");
                 return false;
             }
         }
-    }
-    {
-        ACFL_INFO("step", "TTablesManager::Load_Start");
-        TTablesManager tManagerLocal(Self->StoragesManager, Self->TabletID());
-        if (!tManagerLocal.InitFromDB(db)) {
-            ACFL_ERROR("step", "TTablesManager::InitFromDB_Fails");
-            return false;
-        }
-        if (!tManagerLocal.LoadIndex(dbTable)) {
-            ACFL_ERROR("step", "TTablesManager::LoadIndex_Fails");
-            return false;
+        {
+            TMemoryProfileGuard g("TTxInit/LoadIndex");
+            if (!tManagerLocal.LoadIndex(dbTable)) {
+                ACFL_ERROR("step", "TTablesManager::LoadIndex_Fails");
+                return false;
+            }
         }
         Self->TablesManager = std::move(tManagerLocal);
 
-        Self->SetCounter(COUNTER_TABLES, Self->TablesManager.GetTables().size());
-        Self->SetCounter(COUNTER_TABLE_PRESETS, Self->TablesManager.GetSchemaPresets().size());
-        Self->SetCounter(COUNTER_TABLE_TTLS, Self->TablesManager.GetTtl().PathsCount());
-        ACFL_INFO("step", "TTablesManager::Load_Finish");
+        Self->Counters.GetTabletCounters()->SetCounter(COUNTER_TABLES, Self->TablesManager.GetTables().size());
+        Self->Counters.GetTabletCounters()->SetCounter(COUNTER_TABLE_PRESETS, Self->TablesManager.GetSchemaPresets().size());
+        Self->Counters.GetTabletCounters()->SetCounter(COUNTER_TABLE_TTLS, Self->TablesManager.GetTtl().PathsCount());
+        ACFL_DEBUG("step", "TTablesManager::Load_Finish");
     }
 
     {
+        TMemoryProfileGuard g("TTxInit/LongTxWrites");
         auto rowset = db.Table<Schema::LongTxWrites>().Select();
         if (!rowset.IsReady()) {
             return false;
@@ -161,23 +188,52 @@ bool TTxInit::ReadEverything(TTransactionContext& txc, const TActorContext& ctx)
             Y_ABORT_UNLESS(proto.ParseFromString(rowset.GetValue<Schema::LongTxWrites::LongTxId>()));
             const auto longTxId = NLongTxService::TLongTxId::FromProto(proto);
 
-            Self->LoadLongTxWrite(writeId, writePartId, longTxId);
+            std::optional<ui32> granuleShardingVersion;
+            if (rowset.HaveValue<Schema::LongTxWrites::GranuleShardingVersion>() && rowset.GetValue<Schema::LongTxWrites::GranuleShardingVersion>()) {
+                granuleShardingVersion = rowset.GetValue<Schema::LongTxWrites::GranuleShardingVersion>();
+            }
+
+            Self->LoadLongTxWrite(writeId, writePartId, longTxId, granuleShardingVersion);
 
             if (!rowset.Next()) {
                 return false;
             }
         }
     }
-
-    for (const auto& pr : Self->CommitsInFlight) {
-        ui64 txId = pr.first;
-        for (TWriteId writeId : pr.second.WriteIds) {
-            Y_ABORT_UNLESS(Self->LongTxWrites.contains(writeId),
-                "TTxInit at %" PRIu64 " : Commit %" PRIu64 " references local write %" PRIu64 " that doesn't exist",
-                Self->TabletID(), txId, writeId);
-            Self->AddLongTxWrite(writeId, txId);
+    {
+        TMemoryProfileGuard g("TTxInit/LocksDB");
+        if (txc.DB.GetScheme().GetTableInfo(Schema::Locks::TableId)) {
+            TColumnShardLocksDb locksDb(*Self, txc);
+            if (!Self->SysLocks.Load(locksDb)) {
+                return false;
+            }
         }
     }
+
+    {
+        TMemoryProfileGuard g("TTxInit/NDataSharing::TBackgroundSessionsManager");
+        if (!Self->BackgroundSessionsManager->LoadIdempotency(txc)) {
+            return false;
+        }
+    }
+
+    {
+        TMemoryProfileGuard g("TTxInit/NDataSharing::TSessionsManager");
+        auto local = std::make_shared<NOlap::NDataSharing::TSessionsManager>();
+        if (!local->Load(txc.DB, Self->TablesManager.GetPrimaryIndexAsOptional<NOlap::TColumnEngineForLogs>())) {
+            return false;
+        }
+        Self->SharingSessionsManager = local;
+    }
+    { 
+        TMemoryProfileGuard g("TTxInit/TInFlightReadsTracker");
+        TInFlightReadsTracker local(Self->StoragesManager, Self->Counters.GetRequestsTracingCounters());
+        if (!local.LoadFromDatabase(txc.DB)) {
+            return false;
+        }
+        Self->InFlightReadsTracker = std::move(local);
+    }
+
     Self->UpdateInsertTableCounters();
     Self->UpdateIndexCounters();
     Self->UpdateResourceMetrics(ctx, {});
@@ -205,11 +261,16 @@ bool TTxInit::Execute(TTransactionContext& txc, const TActorContext& ctx) {
 }
 
 void TTxInit::Complete(const TActorContext& ctx) {
+    Self->Counters.GetCSCounters().Initialization.OnTxInitFinished(TMonotonic::Now() - StartInstant);
+    Self->ProgressTxController->OnTabletInit();
     Self->SwitchToWork(ctx);
+    NYDBTest::TControllers::GetColumnShardController()->OnTabletInitCompleted(*Self);
 }
 
 class TTxUpdateSchema : public TTransactionBase<TColumnShard> {
     std::vector<NOlap::INormalizerTask::TPtr> NormalizerTasks;
+    const TMonotonic StartInstant = TMonotonic::Now();
+
 public:
     TTxUpdateSchema(TColumnShard* self)
         : TBase(self)
@@ -230,8 +291,11 @@ bool TTxUpdateSchema::Execute(TTransactionContext& txc, const TActorContext&) {
         if (result.IsSuccess()) {
             NormalizerTasks = result.DetachResult();
             if (!NormalizerTasks.empty()) {
+                ACFL_WARN("normalizer_controller", Self->NormalizerController.DebugString())("tasks_count", NormalizerTasks.size());
                 break;
             }
+            NIceDb::TNiceDb db(txc.DB);
+            Self->NormalizerController.OnNormalizerFinished(db);
             Self->NormalizerController.SwitchNormalizer();
         } else {
             Self->NormalizerController.GetCounters().OnNormalizerFails();
@@ -245,13 +309,15 @@ bool TTxUpdateSchema::Execute(TTransactionContext& txc, const TActorContext&) {
 
 void TTxUpdateSchema::Complete(const TActorContext& ctx) {
     AFL_INFO(NKikimrServices::TX_COLUMNSHARD)("step", "TTxUpdateSchema.Complete");
+    Self->Counters.GetCSCounters().Initialization.OnTxUpdateSchemaFinished(TMonotonic::Now() - StartInstant);
     if (NormalizerTasks.empty()) {
+        AFL_VERIFY(Self->NormalizerController.IsNormalizationFinished())("details", Self->NormalizerController.DebugString());
         Self->Execute(new TTxInit(Self), ctx);
         return;
     }
 
     NOlap::TNormalizationContext nCtx;
-    nCtx.SetColumnshardActor(Self->SelfId());
+    nCtx.SetShardActor(Self->SelfId());
     nCtx.SetResourceSubscribeActor(Self->ResourceSubscribeActor);
 
     for (auto&& task : NormalizerTasks) {
@@ -269,34 +335,49 @@ public:
 
     bool Execute(TTransactionContext& txc, const TActorContext& ctx) override;
     void Complete(const TActorContext& ctx) override;
-    TTxType GetTxType() const override { return TXTYPE_UPDATE_SCHEMA; }
+    TTxType GetTxType() const override { return TXTYPE_APPLY_NORMALIZER; }
 
 private:
     NOlap::INormalizerChanges::TPtr Changes;
 };
 
 bool TTxApplyNormalizer::Execute(TTransactionContext& txc, const TActorContext&) {
-    AFL_INFO(NKikimrServices::TX_COLUMNSHARD)("step", "TTxApplyNormalizer.Execute")("details", Self->NormalizerController.DebugString());;
-    Self->NormalizerController.GetNormalizer()->OnResultReady();
-    return Changes->Apply(txc, Self->NormalizerController);
+    NActors::TLogContextGuard gLogging = NActors::TLogContextBuilder::Build(NKikimrServices::TX_COLUMNSHARD)("tablet_id", Self->TabletID())("event", "initialize_shard");
+    AFL_INFO(NKikimrServices::TX_COLUMNSHARD)("step", "TTxApplyNormalizer.Execute")("details", Self->NormalizerController.DebugString());
+    if (!Changes->ApplyOnExecute(txc, Self->NormalizerController)) {
+        return false;
+    }
+
+    if (Self->NormalizerController.GetNormalizer()->GetActiveTasksCount() == 1) {
+        NIceDb::TNiceDb db(txc.DB);
+        Self->NormalizerController.OnNormalizerFinished(db);
+    }
+    return true;
 }
 
 void TTxApplyNormalizer::Complete(const TActorContext& ctx) {
-    AFL_INFO(NKikimrServices::TX_COLUMNSHARD)("step", "TTxApplyNormalizer.Complete");
-
-    if (Self->NormalizerController.GetNormalizer()->WaitResult()) {
+    AFL_INFO(NKikimrServices::TX_COLUMNSHARD)("step", "TTxApplyNormalizer.Complete")("tablet_id", Self->TabletID())("event", "initialize_shard");
+    AFL_VERIFY(!Self->NormalizerController.IsNormalizationFinished())("details", Self->NormalizerController.DebugString());
+    AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("tablet_id", Self->TabletID())("event", "apply_normalizer_changes")("details", Self->NormalizerController.DebugString())("size", Changes->GetSize());
+    Changes->ApplyOnComplete(Self->NormalizerController);
+    Self->NormalizerController.GetNormalizer()->OnResultReady();
+    if (Self->NormalizerController.GetNormalizer()->HasActiveTasks()) {
         return;
     }
 
     if (Self->NormalizerController.SwitchNormalizer()) {
         Self->Execute(new TTxUpdateSchema(Self), ctx);
     } else {
+        AFL_VERIFY(Self->NormalizerController.IsNormalizationFinished())("details", Self->NormalizerController.DebugString());
         Self->Execute(new TTxInit(Self), ctx);
     }
 }
 
 /// Create local database on tablet start if none
 class TTxInitSchema : public TTransactionBase<TColumnShard> {
+private:
+    const TMonotonic StartInstant = TMonotonic::Now();
+
 public:
     TTxInitSchema(TColumnShard* self)
         : TBase(self)
@@ -312,6 +393,17 @@ bool TTxInitSchema::Execute(TTransactionContext& txc, const TActorContext&) {
 
     const bool isFirstRun = txc.DB.GetScheme().IsEmpty();
     NIceDb::TNiceDb(txc.DB).Materialize<Schema>();
+
+    if (!NYDBTest::TControllers::GetColumnShardController()->BuildLocalBaseModifier()) {
+        NIceDb::TNiceDb db(txc.DB);
+        if (!Self->NormalizerController.InitControllerState(db)) {
+            return false;
+        }
+    }
+    {
+        NOlap::TNormalizationController::TInitContext initCtx(Self->Info());
+        Self->NormalizerController.InitNormalizers(initCtx);
+    }
 
     if (isFirstRun) {
         txc.DB.Alter().SetExecutorAllowLogBatching(gAllowLogBatchingDefaultValue);
@@ -348,7 +440,8 @@ bool TTxInitSchema::Execute(TTransactionContext& txc, const TActorContext&) {
 }
 
 void TTxInitSchema::Complete(const TActorContext& ctx) {
-    LOG_S_DEBUG("TxInitSchema.Complete at tablet " << Self->TabletID();)
+    Self->Counters.GetCSCounters().Initialization.OnTxInitSchemaFinished(TMonotonic::Now() - StartInstant);
+    LOG_S_DEBUG("TxInitSchema.Complete at tablet " << Self->TabletID(););
     Self->Execute(new TTxUpdateSchema(Self), ctx);
 }
 
@@ -358,33 +451,6 @@ ITransaction* TColumnShard::CreateTxInitSchema() {
 
 void TColumnShard::Handle(TEvPrivate::TEvNormalizerResult::TPtr& ev, const TActorContext& ctx) {
     Execute(new TTxApplyNormalizer(this, ev->Get()->GetChanges()), ctx);
-}
-
-bool TColumnShard::LoadTx(const ui64 txId, const NKikimrTxColumnShard::ETransactionKind& txKind, const TString& txBody) {
-    switch (txKind) {
-        case NKikimrTxColumnShard::TX_KIND_SCHEMA: {
-            TColumnShard::TAlterMeta meta;
-            Y_ABORT_UNLESS(meta.Body.ParseFromString(txBody));
-            AltersInFlight.emplace(txId, std::move(meta));
-            break;
-        }
-        case NKikimrTxColumnShard::TX_KIND_COMMIT: {
-            NKikimrTxColumnShard::TCommitTxBody body;
-            Y_ABORT_UNLESS(body.ParseFromString(txBody));
-
-            TColumnShard::TCommitMeta meta;
-            for (auto& id : body.GetWriteIds()) {
-                meta.AddWriteId(TWriteId{id});
-            }
-
-            CommitsInFlight.emplace(txId, std::move(meta));
-            break;
-        }
-        default: {
-            Y_ABORT("Unsupported TxKind stored in the TxInfo table");
-        }
-    }
-    return true;
 }
 
 }

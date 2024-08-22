@@ -7,8 +7,26 @@
 #include <util/string/cast.h>
 #include <util/string/printf.h>
 
+#include <library/cpp/testing/hook/hook.h>
+
+#include <aws/core/Aws.h>
+
 using namespace NSchemeShardUT_Private;
 using namespace NKikimr::NWrappers::NTestHelpers;
+
+namespace {
+
+Aws::SDKOptions Options;
+
+Y_TEST_HOOK_BEFORE_RUN(InitAwsAPI) {
+    Aws::InitAPI(Options);
+}
+
+Y_TEST_HOOK_AFTER_RUN(ShutdownAwsAPI) {
+    Aws::ShutdownAPI(Options);
+}
+
+}
 
 Y_UNIT_TEST_SUITE(TBackupTests) {
     using TFillFn = std::function<void(TTestBasicRuntime&)>;
@@ -73,11 +91,11 @@ Y_UNIT_TEST_SUITE(TBackupTests) {
 
         Backup(runtime, ToString(Codec), R"(
             Name: "Table"
-            Columns { Name: "key" Type: "Utf8" }
+            Columns { Name: "key" Type: "Uint32" }
             Columns { Name: "value" Type: "Utf8" }
             KeyColumnNames: ["key"]
         )", [](TTestBasicRuntime& runtime) {
-            WriteRow(runtime, "a", "valueA");
+            UpdateRow(runtime, "Table", 1, "valueA");
         });
     }
 
@@ -86,17 +104,41 @@ Y_UNIT_TEST_SUITE(TBackupTests) {
 
         Backup(runtime, ToString(Codec), R"(
             Name: "Table"
-            Columns { Name: "key" Type: "Utf8" }
+            Columns { Name: "key" Type: "Uint32" }
             Columns { Name: "value" Type: "Utf8" }
             KeyColumnNames: ["key"]
             SplitBoundary {
               KeyPrefix {
-                Tuple { Optional { Text: "b" } }
+                Tuple { Optional { Uint32: 2 } }
               }
             }
         )", [](TTestBasicRuntime& runtime) {
-            WriteRow(runtime, "a", "valueA", TTestTxConfig::FakeHiveTablets + 0);
-            WriteRow(runtime, "b", "valueb", TTestTxConfig::FakeHiveTablets + 1);
+            UpdateRow(runtime, "Table", 1, "valueA", TTestTxConfig::FakeHiveTablets + 0);
+            UpdateRow(runtime, "Table", 2, "valueb", TTestTxConfig::FakeHiveTablets + 1);
+        });
+    }
+
+    Y_UNIT_TEST_WITH_COMPRESSION(BackupUuidColumn) {
+        TTestBasicRuntime runtime;
+
+        Backup(runtime, ToString(Codec), R"(
+            Name: "Table"
+            Columns { Name: "key" Type: "Uint32" }
+            Columns { Name: "value" Type: "Uuid" }
+            KeyColumnNames: ["key"]
+        )", [](TTestBasicRuntime& runtime) {
+            NKikimrMiniKQL::TResult result;
+            TString error;
+            NKikimrProto::EReplyStatus status = LocalMiniKQL(runtime, TTestTxConfig::FakeHiveTablets, Sprintf(R"(
+                (
+                    (let key '( '('key (Uint32 '%d) ) ) )
+                    (let row '( '('value (Uuid '"%s") ) ) )
+                    (return (AsList (UpdateRow '__user__%s key row) ))
+                )
+            )", 1, "0000111122223333", "Table"), result, error);
+
+            UNIT_ASSERT_VALUES_EQUAL_C(status, NKikimrProto::EReplyStatus::OK, error);
+            UNIT_ASSERT_VALUES_EQUAL(error, "");
         });
     }
 
@@ -107,12 +149,12 @@ Y_UNIT_TEST_SUITE(TBackupTests) {
 
         const auto actualResult = Backup(runtime, ToString(Codec), R"(
             Name: "Table"
-            Columns { Name: "key" Type: "Utf8" }
+            Columns { Name: "key" Type: "Uint32" }
             Columns { Name: "value" Type: "Utf8" }
             KeyColumnNames: ["key"]
         )", [](TTestBasicRuntime& runtime) {
             for (ui32 i = 0; i < 100 * batchSize; ++i) {
-                WriteRow(runtime, Sprintf("a%d", i), "valueA");
+                UpdateRow(runtime, "Table", i, "valueA");
             }
         }, batchSize, minWriteBatchSize);
 
@@ -120,11 +162,11 @@ Y_UNIT_TEST_SUITE(TBackupTests) {
     }
 
     Y_UNIT_TEST_WITH_COMPRESSION(ShouldSucceedOnLargeData) {
-        ShouldSucceedOnLargeData<Codec>(0, std::make_pair(101, 2));
+        ShouldSucceedOnLargeData<Codec>(0, std::make_pair(101, 3));
     }
 
     Y_UNIT_TEST(ShouldSucceedOnLargeData_MinWriteBatch) {
-        ShouldSucceedOnLargeData<ECompressionCodec::Zstd>(1 << 20, std::make_pair(0, 3));
+        ShouldSucceedOnLargeData<ECompressionCodec::Zstd>(1 << 20, std::make_pair(0, 4));
     }
 
 } // TBackupTests

@@ -4,18 +4,14 @@ SRCS(
     background_controller.cpp
     blob.cpp
     blob_cache.cpp
-    blob_manager.cpp
     columnshard__init.cpp
     columnshard__notify_tx_completion.cpp
     columnshard__plan_step.cpp
     columnshard__progress_tx.cpp
     columnshard__propose_cancel.cpp
     columnshard__propose_transaction.cpp
-    columnshard__read.cpp
-    columnshard__read_base.cpp
     columnshard__scan.cpp
-    columnshard__index_scan.cpp
-    columnshard__stats_scan.cpp
+    columnshard__statistics.cpp
     columnshard__write.cpp
     columnshard__write_index.cpp
     columnshard.cpp
@@ -23,12 +19,12 @@ SRCS(
     columnshard_common.cpp
     columnshard_private_events.cpp
     columnshard_schema.cpp
+    columnshard_view.cpp
     counters.cpp
     defs.cpp
-    read_actor.cpp
+    inflight_request_tracker.cpp
     write_actor.cpp
     tables_manager.cpp
-    tx_controller.cpp
 )
 
 GENERATE_ENUM_SERIALIZATION(columnshard.h)
@@ -44,17 +40,25 @@ PEERDIR(
     ydb/core/protos
     ydb/core/tablet
     ydb/core/tablet_flat
+    ydb/core/tx/time_cast
     ydb/core/tx/columnshard/engines
     ydb/core/tx/columnshard/engines/writer
+    ydb/core/tx/columnshard/engines/reader/abstract
     ydb/core/tx/columnshard/counters
     ydb/core/tx/columnshard/common
     ydb/core/tx/columnshard/splitter
     ydb/core/tx/columnshard/operations
+    ydb/core/tx/columnshard/transactions
+    ydb/core/tx/columnshard/transactions/operators
     ydb/core/tx/columnshard/blobs_reader
     ydb/core/tx/columnshard/blobs_action
+    ydb/core/tx/columnshard/data_locks
+    ydb/core/tx/columnshard/data_sharing
+    ydb/core/tx/columnshard/subscriber
+    ydb/core/tx/columnshard/export
     ydb/core/tx/columnshard/resource_subscriber
-    ydb/core/tx/columnshard/normalizer/granule
-    ydb/core/tx/columnshard/normalizer/portion
+    ydb/core/tx/columnshard/normalizer
+    ydb/core/tx/columnshard/blobs_action/storages_manager
     ydb/core/tx/tiering
     ydb/core/tx/conveyor/usage
     ydb/core/tx/tracing

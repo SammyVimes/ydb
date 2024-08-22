@@ -2,7 +2,6 @@
 
 #include "algorithm_helpers.h"
 #include "binary_search.h"
-#include "vector_format.h"
 
 #include <library/cpp/testing/gtest/friend.h>
 
@@ -381,8 +380,6 @@ public:
     {
     public:
         TLeftToRightTraverser(const TPiecewiseLinearFunction& function, int segmentIndex = 0);
-
-        TLeftToRightTraverser(const TLeftToRightTraverser& other) = default;
 
         // See: |TPiecewiseLinearFunction::LeftSegmentAt|.
         // If |y > x|, |LeftSegmentAt(x)| cannot be called after |LeftSegmentAt(y)|.

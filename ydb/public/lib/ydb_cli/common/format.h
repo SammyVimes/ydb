@@ -9,6 +9,12 @@
 #include <ydb/public/sdk/cpp/client/ydb_types/status/status.h>
 
 namespace NYdb {
+
+    class TResultSetParquetPrinter;
+
+}
+
+namespace NYdb {
 namespace NConsoleClient {
 
 class TCommandWithResponseHeaders {
@@ -81,14 +87,17 @@ private:
     bool PrintedSomething = false;
     EOutputFormat Format;
     std::function<bool()> IsInterrupted;
+    std::unique_ptr<TResultSetParquetPrinter> ParquetPrinter;
 };
 
 class TQueryPlanPrinter {
 public:
-    TQueryPlanPrinter(EOutputFormat format, bool analyzeMode = false, IOutputStream& output = Cout)
+    TQueryPlanPrinter(EOutputFormat format, bool analyzeMode = false, IOutputStream& output = Cout, size_t maxWidth = 0)
         : Format(format)
         , AnalyzeMode(analyzeMode)
-        , Output(output) {}
+        , Output(output)
+        , MaxWidth(maxWidth)
+        {}
 
     void Print(const TString& plan);
 
@@ -98,17 +107,14 @@ private:
     void PrintPrettyTable(const NJson::TJsonValue& plan);
     void PrintPrettyTableImpl(const NJson::TJsonValue& plan, TString& offset, TPrettyTable& table);
     void PrintJson(const TString& plan);
+    void PrintSimplifyJson(const NJson::TJsonValue& plan);
     TString JsonToString(const NJson::TJsonValue& jsonValue);
-
-    void SimplifyQueryPlan(NJson::TJsonValue& plan);
-    TVector<NJson::TJsonValue> RemoveRedundantNodes(NJson::TJsonValue& plan, const THashSet<TString>& redundantNodes);
-    THashMap<TString, NJson::TJsonValue> ExtractPrecomputes(NJson::TJsonValue& planJson);
-    void ResolvePrecomputeLinks(NJson::TJsonValue& planJson, const THashMap<TString, NJson::TJsonValue>& precomputes);
 
 private:
     EOutputFormat Format;
     bool AnalyzeMode;
     IOutputStream& Output;
+    size_t MaxWidth;
 };
 
 }

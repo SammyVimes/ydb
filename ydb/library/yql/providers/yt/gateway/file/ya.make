@@ -5,6 +5,7 @@ SRCS(
     yql_yt_file_mkql_compiler.cpp
     yql_yt_file_services.cpp
     yql_yt_file.cpp
+    yql_yt_file_text_yson.cpp
 )
 
 PEERDIR(
@@ -15,7 +16,7 @@ PEERDIR(
     ydb/library/yql/core/file_storage
     ydb/library/yql/core/file_storage/proto
     ydb/library/yql/core/file_storage/http_download
-    ydb/library/yql/minikql/comp_nodes/llvm
+    ydb/library/yql/minikql/comp_nodes
     ydb/library/yql/public/udf
     ydb/library/yql/utils
     ydb/library/yql/utils/threading

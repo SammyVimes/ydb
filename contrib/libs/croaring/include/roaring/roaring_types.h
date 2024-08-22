@@ -8,10 +8,13 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#ifdef __cplusplus
-extern "C" { namespace roaring { namespace api {
-#endif
+#include <roaring/portability.h>
 
+#ifdef __cplusplus
+extern "C" {
+namespace roaring {
+namespace api {
+#endif
 
 /**
  * When building .c files as C++, there's added compile-time checking if the
@@ -26,12 +29,12 @@ extern "C" { namespace roaring { namespace api {
  * code #undefs that after declaring `typedef ROARING_CONTAINER_T container_t;`
  */
 #if defined(__cplusplus)
-    extern "C++" {
-      struct container_s {};
-    }
-    #define ROARING_CONTAINER_T ::roaring::api::container_s
+extern "C++" {
+struct container_s {};
+}
+#define ROARING_CONTAINER_T ::roaring::api::container_s
 #else
-    #define ROARING_CONTAINER_T void  // no compile-time checking
+#define ROARING_CONTAINER_T void  // no compile-time checking
 #endif
 
 #define ROARING_FLAG_COW UINT8_C(0x1)
@@ -56,15 +59,14 @@ typedef struct roaring_array_s {
     uint8_t flags;
 } roaring_array_t;
 
-
 typedef bool (*roaring_iterator)(uint32_t value, void *param);
 typedef bool (*roaring_iterator64)(uint64_t value, void *param);
 
 /**
-*  (For advanced users.)
-* The roaring_statistics_t can be used to collect detailed statistics about
-* the composition of a roaring bitmap.
-*/
+ *  (For advanced users.)
+ * The roaring_statistics_t can be used to collect detailed statistics about
+ * the composition of a roaring bitmap.
+ */
 typedef struct roaring_statistics_s {
     uint32_t n_containers; /* number of containers */
 
@@ -89,16 +91,63 @@ typedef struct roaring_statistics_s {
         max_value; /* the maximal value, undefined if cardinality is zero */
     uint32_t
         min_value; /* the minimal value, undefined if cardinality is zero */
-    uint64_t sum_value; /* the sum of all values (could be used to compute
-                           average) */
+
+    CROARING_DEPRECATED
+    uint64_t sum_value; /* deprecated always zero */
 
     uint64_t cardinality; /* total number of values stored in the bitmap */
 
     // and n_values_arrays, n_values_rle, n_values_bitmap
 } roaring_statistics_t;
 
+/**
+ *  (For advanced users.)
+ * The roaring64_statistics_t can be used to collect detailed statistics about
+ * the composition of a roaring64 bitmap.
+ */
+typedef struct roaring64_statistics_s {
+    uint64_t n_containers; /* number of containers */
+
+    uint64_t n_array_containers;  /* number of array containers */
+    uint64_t n_run_containers;    /* number of run containers */
+    uint64_t n_bitset_containers; /* number of bitmap containers */
+
+    uint64_t
+        n_values_array_containers;    /* number of values in array containers */
+    uint64_t n_values_run_containers; /* number of values in run containers */
+    uint64_t
+        n_values_bitset_containers; /* number of values in  bitmap containers */
+
+    uint64_t n_bytes_array_containers;  /* number of allocated bytes in array
+                                           containers */
+    uint64_t n_bytes_run_containers;    /* number of allocated bytes in run
+                                           containers */
+    uint64_t n_bytes_bitset_containers; /* number of allocated bytes in  bitmap
+                                           containers */
+
+    uint64_t
+        max_value; /* the maximal value, undefined if cardinality is zero */
+    uint64_t
+        min_value; /* the minimal value, undefined if cardinality is zero */
+
+    uint64_t cardinality; /* total number of values stored in the bitmap */
+
+    // and n_values_arrays, n_values_rle, n_values_bitmap
+} roaring64_statistics_t;
+
+/**
+ * Roaring-internal type used to iterate within a roaring container.
+ */
+typedef struct roaring_container_iterator_s {
+    // For bitset and array containers this is the index of the bit / entry.
+    // For run containers this points at the run.
+    int32_t index;
+} roaring_container_iterator_t;
+
 #ifdef __cplusplus
-} } }  // extern "C" { namespace roaring { namespace api {
+}
+}
+}  // extern "C" { namespace roaring { namespace api {
 #endif
 
 #endif /* ROARING_TYPES_H */

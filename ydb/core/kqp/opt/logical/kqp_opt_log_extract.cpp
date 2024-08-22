@@ -6,7 +6,6 @@
 
 #include <ydb/library/yql/core/yql_opt_utils.h>
 #include <ydb/library/yql/dq/opt/dq_opt_log.h>
-#include <ydb/library/yql/providers/common/provider/yql_table_lookup.h>
 
 namespace NKikimr::NKqp::NOpt {
 
@@ -121,6 +120,21 @@ TExprBase KqpApplyExtractMembersToReadTableRanges(TExprBase node, TExprContext& 
             .ExplainPrompt(read.ExplainPrompt())
             .Index(index.Index().Cast())
             .PrefixPointsExpr(index.PrefixPointsExpr())
+            .PredicateExpr(index.PredicateExpr())
+            .PredicateUsedColumns(index.PredicateUsedColumns())
+            .Done();
+    }
+
+    if (auto readRange = node.Maybe<TKqlReadTableRanges>()) {
+        return Build<TKqlReadTableRanges>(ctx, read.Pos())
+            .Table(read.Table())
+            .Ranges(read.Ranges())
+            .Columns(usedColumns.Cast())
+            .Settings(read.Settings())
+            .ExplainPrompt(read.ExplainPrompt())
+            .PrefixPointsExpr(readRange.PrefixPointsExpr())
+            .PredicateExpr(readRange.PredicateExpr())
+            .PredicateUsedColumns(readRange.PredicateUsedColumns())
             .Done();
     }
 
@@ -211,6 +225,17 @@ TExprBase KqpApplyExtractMembersToLookupTable(TExprBase node, TExprContext& ctx,
             .LookupKeys(indexLookup.LookupKeys())
             .Columns(usedColumns.Cast())
             .Index(indexLookup.Index())
+            .Done();
+    }
+
+    if (auto maybeStreamLookup = lookup.Maybe<TKqlStreamLookupTable>()) {
+        auto streamLookup = maybeStreamLookup.Cast();
+
+        return Build<TKqlStreamLookupTable>(ctx, lookup.Pos())
+            .Table(streamLookup.Table())
+            .LookupKeys(streamLookup.LookupKeys())
+            .Columns(usedColumns.Cast())
+            .LookupStrategy(streamLookup.LookupStrategy())
             .Done();
     }
 

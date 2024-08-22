@@ -9,6 +9,8 @@ IF (ARCH_X86_64)
     CFLAGS(-mpclmul)
 ENDIF()
 
+NO_LTO()
+
 SRCS(
     actions/cancelable_context.cpp
     actions/current_invoker.cpp
@@ -32,6 +34,7 @@ SRCS(
     compression/brotli.cpp
     compression/bzip2.cpp
     compression/codec.cpp
+    compression/dictionary_codec.cpp
     compression/stream.cpp
     compression/lz.cpp
     compression/lzma.cpp
@@ -42,6 +45,7 @@ SRCS(
 
     concurrency/action_queue.cpp
     concurrency/async_barrier.cpp
+    concurrency/async_looper.cpp
     concurrency/async_rw_lock.cpp
     concurrency/async_semaphore.cpp
     concurrency/async_stream_pipe.cpp
@@ -81,7 +85,7 @@ SRCS(
     concurrency/thread_pool.cpp
     concurrency/throughput_throttler.cpp
     concurrency/two_level_fair_share_thread_pool.cpp
-    concurrency/recurring_executor_base.cpp
+    concurrency/retrying_periodic_executor.cpp
     concurrency/scheduled_executor.cpp
 
     crypto/config.cpp
@@ -93,7 +97,7 @@ SRCS(
     logging/formatter.cpp
     logging/fluent_log.cpp
     GLOBAL logging/log.cpp
-    logging/log_manager.cpp
+    GLOBAL logging/log_manager.cpp
     logging/logger_owner.cpp
     logging/serializable_logger.cpp
     logging/stream_output.cpp
@@ -106,7 +110,6 @@ SRCS(
     misc/arithmetic_formula.cpp
     GLOBAL misc/assert.cpp
     misc/backoff_strategy.cpp
-    misc/backoff_strategy_config.cpp
     misc/bitmap.cpp
     misc/bit_packed_unsigned_vector.cpp
     misc/bit_packing.cpp
@@ -117,7 +120,6 @@ SRCS(
     misc/coro_pipe.cpp
     misc/crash_handler.cpp
     misc/digest.cpp
-    misc/dnf.cpp
     misc/error.cpp
     misc/error_code.cpp
     misc/ema_counter.cpp
@@ -128,18 +130,18 @@ SRCS(
     misc/hazard_ptr.cpp
     misc/hedging_manager.cpp
     misc/histogram.cpp
-    misc/historic_usage_aggregator.cpp
-    misc/hr_timer.cpp
+    misc/adjusted_exponential_moving_average.cpp
     misc/id_generator.cpp
     misc/linear_probe.cpp
-    misc/memory_reference_tracker.cpp
     misc/memory_usage_tracker.cpp
     misc/relaxed_mpsc_queue.cpp
+    misc/origin_attributes.cpp
     misc/parser_helpers.cpp
     misc/pattern_formatter.cpp
     misc/phoenix.cpp
     misc/pool_allocator.cpp
     misc/proc.cpp
+    misc/process_exit_profiler.cpp
     misc/protobuf_helpers.cpp
     misc/public.cpp
     misc/random.cpp
@@ -151,7 +153,10 @@ SRCS(
     misc/shutdown.cpp
     misc/signal_registry.cpp
     misc/slab_allocator.cpp
+    misc/statistic_path.cpp
     misc/statistics.cpp
+    misc/string_helpers.cpp
+    misc/stripped_error.cpp
     misc/cache_config.cpp
     misc/utf8_decoder.cpp
     misc/zerocopy_output_writer.cpp
@@ -171,6 +176,13 @@ SRCS(
     dns/dns_resolver.cpp
 
     profiling/timing.cpp
+
+    phoenix/context.cpp
+    phoenix/descriptors.cpp
+    phoenix/load.cpp
+    phoenix/schemas.cpp
+    phoenix/type_def.cpp
+    phoenix/type_registry.cpp
 
     rpc/authentication_identity.cpp
     rpc/authenticator.cpp
@@ -243,6 +255,7 @@ SRCS(
     yson/pull_parser_deserialize.cpp
     yson/stream.cpp
     yson/string.cpp
+    yson/string_builder_stream.cpp
     yson/string_filter.cpp
     yson/syntax_checker.cpp
     yson/token.cpp
@@ -251,7 +264,9 @@ SRCS(
     yson/writer.cpp
     yson/string_merger.cpp
     yson/ypath_designated_consumer.cpp
+    yson/ypath_filtering_consumer.cpp
     yson/depth_limiting_yson_consumer.cpp
+    yson/list_verb_lazy_yson_consumer.cpp
     yson/attributes_stripper.cpp
 
     ytree/attribute_consumer.cpp
@@ -279,7 +294,6 @@ SRCS(
     ytree/ypath_detail.cpp
     ytree/ypath_resolver.cpp
     ytree/ypath_service.cpp
-    ytree/yson_serializable.cpp
     ytree/yson_struct.cpp
     ytree/yson_struct_detail.cpp
 
@@ -316,6 +330,8 @@ PEERDIR(
     library/cpp/streams/brotli
     library/cpp/yt/assert
     library/cpp/yt/containers
+    library/cpp/yt/global
+    library/cpp/yt/error
     library/cpp/yt/logging
     library/cpp/yt/logging/plain_text_formatter
     library/cpp/yt/misc
@@ -398,6 +414,7 @@ IF (NOT OS_WINDOWS)
         crypto/unittests
         json/unittests
         logging/unittests
+        phoenix/unittests
         profiling/unittests
         rpc/unittests
         ypath/unittests

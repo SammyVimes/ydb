@@ -21,6 +21,7 @@ public:
 
 constexpr size_t MaxBlockSizeInBytes = 240_KB;
 static_assert(MaxBlockSizeInBytes < (size_t)std::numeric_limits<i32>::max());
+static_assert(MaxBlockSizeInBytes % 64 == 0, "arrow buffers are allocated with buffer size aligned to next 64 byte boundary");
 
 // maximum size of block item in bytes
 size_t CalcMaxBlockItemSize(const TType* type);
@@ -29,8 +30,44 @@ inline size_t CalcBlockLen(size_t maxBlockItemSize) {
     return MaxBlockSizeInBytes / std::max<size_t>(maxBlockItemSize, 1);
 }
 
-bool ConvertArrowType(TType* itemType, std::shared_ptr<arrow::DataType>& type);
+using TArrowConvertFailedCallback = std::function<void(TType*)>;
+bool ConvertArrowType(TType* itemType, std::shared_ptr<arrow::DataType>& type, const TArrowConvertFailedCallback& = {});
 bool ConvertArrowType(NUdf::EDataSlot slot, std::shared_ptr<arrow::DataType>& type);
+
+template<NUdf::EDataSlot slot>
+std::shared_ptr<arrow::DataType> MakeTzLayoutArrowType() {
+    static_assert(slot == NUdf::EDataSlot::TzDate || slot == NUdf::EDataSlot::TzDatetime || slot == NUdf::EDataSlot::TzTimestamp
+        || slot == NUdf::EDataSlot::TzDate32 || slot == NUdf::EDataSlot::TzDatetime64 || slot == NUdf::EDataSlot::TzTimestamp64,
+        "Expected tz date type slot");
+
+    if constexpr (slot == NUdf::EDataSlot::TzDate) {
+        return arrow::uint16();
+    }
+    if constexpr (slot == NUdf::EDataSlot::TzDatetime) {
+        return arrow::uint32();
+    }
+    if constexpr (slot == NUdf::EDataSlot::TzTimestamp) {
+        return arrow::uint64();
+    }
+    if constexpr (slot == NUdf::EDataSlot::TzDate32) {
+        return arrow::int32();
+    }
+    if constexpr (slot == NUdf::EDataSlot::TzDatetime64) {
+        return arrow::int64();
+    }
+    if constexpr (slot == NUdf::EDataSlot::TzTimestamp64) {
+        return arrow::int64();
+    }
+}
+
+template<NUdf::EDataSlot slot>
+std::shared_ptr<arrow::StructType> MakeTzDateArrowType() {
+    std::vector<std::shared_ptr<arrow::Field>> fields {
+        std::make_shared<arrow::Field>("datetime", MakeTzLayoutArrowType<slot>(), false),
+        std::make_shared<arrow::Field>("timezoneId", arrow::uint16(), false),
+    };
+    return std::make_shared<arrow::StructType>(fields);
+}
 
 class TArrowType : public NUdf::IArrowType {
 public:
@@ -162,8 +199,8 @@ public:
     void Unused2() override;
     void Unused3() override;
 
-    NUdf::IFunctionTypeInfoBuilder15& SupportsBlocks() override;
-    NUdf::IFunctionTypeInfoBuilder15& IsStrict() override;
+    NUdf::IFunctionTypeInfoBuilder15& SupportsBlocksImpl() override;
+    NUdf::IFunctionTypeInfoBuilder15& IsStrictImpl() override;
     const NUdf::IBlockTypeHelper& IBlockTypeHelper() const override;
 
     bool GetSecureParam(NUdf::TStringRef key, NUdf::TStringRef& value) const override;
@@ -235,6 +272,60 @@ ui64 CalcMaxBlockLength(T beginIt, T endIt, const NUdf::ITypeInfoHelper& helper)
     }
     return (maxBlockLen == Max<ui64>()) ? 0 : maxBlockLen;
 }
+
+class TTypeBuilder : public TMoveOnly {
+public:
+    TTypeBuilder(const TTypeEnvironment& env) 
+        : Env(env)
+    {}
+
+    const TTypeEnvironment& GetTypeEnvironment() const {
+        return Env;
+    }
+
+    TType* NewVoidType() const;
+    TType* NewNullType() const;
+
+    TType* NewDataType(NUdf::TDataTypeId schemeType, bool optional = false) const;
+    TType* NewDataType(NUdf::EDataSlot slot, bool optional = false) const {
+        return NewDataType(NUdf::GetDataTypeInfo(slot).TypeId, optional);
+    }
+
+    TType* NewDecimalType(ui8 precision, ui8 scale) const;
+    TType* NewPgType(ui32 typeId) const;
+
+    TType* NewOptionalType(TType* itemType) const;
+
+    TType* NewEmptyStructType() const;
+    TType* NewStructType(TType* baseStructType, const std::string_view& memberName, TType* memberType) const;
+    TType* NewStructType(const TArrayRef<const std::pair<std::string_view, TType*>>& memberTypes) const;
+    TType* NewArrayType(const TArrayRef<const std::pair<std::string_view, TType*>>& memberTypes) const;
+
+    TType* NewListType(TType* itemType) const;
+
+    TType* NewDictType(TType* keyType, TType* payloadType, bool multi) const;
+
+    TType* NewStreamType(TType* itemType) const;
+    TType* NewFlowType(TType* itemType) const;
+    TType* NewTaggedType(TType* baseType, const std::string_view& tag) const;
+    TType* NewBlockType(TType* itemType, TBlockType::EShape shape) const;
+
+    TType* NewEmptyTupleType() const;
+    TType* NewTupleType(const TArrayRef<TType* const>& elements) const;
+    TType* NewArrayType(const TArrayRef<TType* const>& elements) const;
+
+    TType* NewEmptyMultiType() const;
+    TType* NewMultiType(const TArrayRef<TType* const>& elements) const;
+
+    TType* NewResourceType(const std::string_view& tag) const;
+    TType* NewVariantType(TType* underlyingType) const;
+
+protected:
+    const TTypeEnvironment& Env;
+    bool UseNullType = true;
+};
+
+void RebuildTypeIndex();
 
 } // namespace NMiniKQL
 } // namespace Nkikimr

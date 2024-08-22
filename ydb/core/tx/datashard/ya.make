@@ -11,6 +11,7 @@ SRCS(
     build_distributed_erase_tx_out_rs_unit.cpp
     build_index.cpp
     build_kqp_data_tx_out_rs_unit.cpp
+    build_write_out_rs_unit.cpp    
     build_scheme_tx_out_rs_unit.cpp
     cdc_stream_heartbeat.cpp
     cdc_stream_scan.cpp
@@ -26,15 +27,15 @@ SRCS(
     change_sender.cpp
     change_sender_async_index.cpp
     change_sender_cdc_stream.cpp
-    change_sender_common_ops.cpp
-    change_sender_monitoring.cpp
     check_commit_writes_tx_unit.cpp
     check_data_tx_unit.cpp
     check_distributed_erase_tx_unit.cpp
     check_read_unit.cpp
     check_scheme_tx_unit.cpp
     check_snapshot_tx_unit.cpp
+    check_write_unit.cpp
     complete_data_tx_unit.cpp
+    complete_write_unit.cpp
     completed_operations_unit.cpp
     conflicts_cache.cpp
     create_cdc_stream_unit.cpp
@@ -42,6 +43,7 @@ SRCS(
     create_table_unit.cpp
     create_volatile_snapshot_unit.cpp
     datashard__cancel_tx_proposal.cpp
+    datashard__column_stats.cpp
     datashard__compact_borrowed.cpp
     datashard__compaction.cpp
     datashard__cleanup_borrowed.cpp
@@ -66,20 +68,19 @@ SRCS(
     datashard__read_columns.cpp
     datashard__s3_download_txs.cpp
     datashard__s3_upload_txs.cpp
+    datashard__object_storage_listing.cpp
     datashard__kqp_scan.cpp
     datashard__snapshot_txs.cpp
     datashard__stats.cpp
     datashard__store_table_path.cpp
     datashard__store_scan_state.cpp
+    datashard__write.cpp
     datashard_change_receiving.cpp
     datashard_change_sender_activation.cpp
     datashard_change_sending.cpp
-    datashard_counters.cpp
     datashard_loans.cpp
     datashard_locks_db.cpp
     datashard_locks_db.h
-    datashard_locks.h
-    datashard_locks.cpp
     datashard_split_dst.cpp
     datashard_split_src.cpp
     datashard_switch_mvcc_state.cpp
@@ -127,6 +128,7 @@ SRCS(
     datashard_repl_offsets_client.cpp
     datashard_repl_offsets_server.cpp
     datashard_subdomain_path_id.cpp
+    datashard_write_operation.cpp
     datashard_txs.h
     datashard.cpp
     datashard.h
@@ -140,6 +142,7 @@ SRCS(
     erase_rows_condition.cpp
     execute_commit_writes_tx_unit.cpp
     execute_data_tx_unit.cpp
+    execute_write_unit.cpp
     execute_distributed_erase_tx_unit.cpp
     execute_kqp_data_tx_unit.cpp
     execute_kqp_scan_tx_unit.cpp
@@ -152,13 +155,17 @@ SRCS(
     export_iface.h
     export_scan.cpp
     finalize_build_index_unit.cpp
+    finalize_plan_tx_unit.cpp
     finish_propose_unit.cpp
+    finish_propose_write_unit.cpp
     follower_edge.cpp
     initiate_build_index_unit.cpp
     key_conflicts.cpp
     key_conflicts.h
+    key_validator.cpp
     load_and_wait_in_rs_unit.cpp
     load_tx_details_unit.cpp
+    load_write_details_unit.cpp
     make_scan_snapshot_unit.cpp
     make_snapshot_unit.cpp
     move_index_unit.cpp
@@ -167,6 +174,7 @@ SRCS(
     operation.h
     plan_queue_unit.cpp
     prepare_data_tx_in_rs_unit.cpp
+    prepare_write_tx_in_rs_unit.cpp
     prepare_distributed_erase_tx_in_rs_unit.cpp
     prepare_kqp_data_tx_in_rs_unit.cpp
     prepare_scheme_tx_in_rs_unit.cpp
@@ -181,15 +189,18 @@ SRCS(
     receive_snapshot_unit.cpp
     remove_lock_change_records.cpp
     remove_locks.cpp
-    range_avl_tree.cpp
+    remove_schema_snapshots.cpp
     range_ops.cpp
-    range_treap.cpp
     read_iterator.h
     restore_unit.cpp
+    sample_k.cpp
+    scan_common.cpp
     setup_sys_locks.h
     store_and_send_out_rs_unit.cpp
+    store_and_send_write_out_rs_unit.cpp    
     store_commit_writes_tx_unit.cpp
     store_data_tx_unit.cpp
+    store_write_unit.cpp
     store_distributed_erase_tx_unit.cpp
     store_scheme_tx_unit.cpp
     store_snapshot_tx_unit.cpp
@@ -201,7 +212,6 @@ SRCS(
 
 GENERATE_ENUM_SERIALIZATION(backup_restore_traits.h)
 GENERATE_ENUM_SERIALIZATION(change_exchange.h)
-GENERATE_ENUM_SERIALIZATION(change_record.h)
 GENERATE_ENUM_SERIALIZATION(datashard.h)
 GENERATE_ENUM_SERIALIZATION(datashard_active_transaction.h)
 GENERATE_ENUM_SERIALIZATION(datashard_s3_upload.h)
@@ -216,6 +226,7 @@ RESOURCE(
 PEERDIR(
     contrib/libs/zstd
     ydb/library/actors/core
+    ydb/library/actors/http
     library/cpp/containers/absl_flat_hash
     library/cpp/containers/stack_vector
     library/cpp/digest/md5
@@ -229,10 +240,11 @@ PEERDIR(
     library/cpp/string_utils/quote
     ydb/core/actorlib_impl
     ydb/core/base
+    ydb/core/change_exchange
     ydb/core/engine
     ydb/core/engine/minikql
     ydb/core/formats
-    ydb/core/io_formats
+    ydb/core/io_formats/ydb_dump
     ydb/core/kqp/runtime
     ydb/core/persqueue/partition_key_range
     ydb/core/persqueue/writer
@@ -240,12 +252,14 @@ PEERDIR(
     ydb/core/tablet
     ydb/core/tablet_flat
     ydb/core/tx/long_tx_service/public
+    ydb/core/tx/locks
     ydb/core/util
     ydb/core/wrappers
     ydb/core/ydb_convert
     ydb/library/aclib
     ydb/library/binary_json
     ydb/library/dynumber
+    ydb/library/minsketch
     ydb/library/yql/parser/pg_wrapper/interface
     ydb/public/api/protos
     ydb/public/lib/deprecated/kicli
@@ -253,6 +267,7 @@ PEERDIR(
     ydb/library/yql/parser/pg_wrapper/interface
     ydb/services/lib/sharding
     ydb/library/chunks_limiter
+    ydb/library/uuid
 )
 
 YQL_LAST_ABI_VERSION()
@@ -278,9 +293,11 @@ RECURSE_FOR_TESTS(
     ut_build_index
     ut_change_collector
     ut_change_exchange
+    ut_column_stats
     ut_compaction
     ut_erase_rows
     ut_followers
+    ut_incremental_backup
     ut_init
     ut_keys
     ut_kqp
@@ -289,10 +306,9 @@ RECURSE_FOR_TESTS(
     ut_locks
     ut_minikql
     ut_minstep
+    ut_object_storage_listing
     ut_order
-    ut_range_avl_tree
     ut_range_ops
-    ut_range_treap
     ut_read_iterator
     ut_read_table
     ut_reassign
@@ -301,6 +317,8 @@ RECURSE_FOR_TESTS(
     ut_sequence
     ut_snapshot
     ut_stats
+    ut_trace
     ut_upload_rows
     ut_volatile
+    ut_write
 )

@@ -118,6 +118,7 @@ TIpv6Address TIpv6Address::FromString(TStringBuf str) noexcept {
 TString TIpv6Address::ToString(bool* ok) const noexcept {
     return ToString(true, ok);
 }
+
 TString TIpv6Address::ToString(bool PrintScopeId, bool* ok) const noexcept {
     TString result;
     bool isOk = true;
@@ -271,14 +272,17 @@ IOutputStream& operator<<(IOutputStream& out, const TIpv6Address& ipv6Address) n
 }
 
 TString THostAddressAndPort::ToString() const noexcept {
-    TStringStream Str;
-    Str << *this;
-    return Str.Str();
+    return ToString({});
 }
 
-IOutputStream& operator<<(IOutputStream& Out, const THostAddressAndPort& HostAddressAndPort) noexcept {
-    Out << HostAddressAndPort.Ip << ":" << HostAddressAndPort.Port;
-    return Out;
+TString THostAddressAndPort::ToString(THostAddressAndPortPrintOptions options) const noexcept {
+    bool isBrackets = Ip.IsIpv6();
+    return TString::Join(
+        isBrackets ? "[" : "",
+        Ip.ToString(options.PrintScopeId),
+        isBrackets ? "]:" : ":",
+        ::ToString(Port)
+    );
 }
 
 namespace {
@@ -310,7 +314,7 @@ NAddr::IRemoteAddr* ToIRemoteAddr(const TIpv6Address& Address, TIpPort Port) {
     return new TRemoteAddr(Address, Port);
 }
 
-std::tuple<THostAddressAndPort, TString, TIpPort> ParseHostAndMayBePortFromString(const TString& RawStr,
+std::tuple<THostAddressAndPort, TString, TIpPort> ParseHostAndMayBePortFromString(const TStringBuf RawStr,
                                                                                   TIpPort DefaultPort,
                                                                                   bool& Ok) noexcept {
     // Cout << "ParseHostAndMayBePortFromString: " << RawStr << ", Port: " << DefaultPort << Endl;
@@ -320,7 +324,7 @@ std::tuple<THostAddressAndPort, TString, TIpPort> ParseHostAndMayBePortFromStrin
     // ---------------------------------------------------------------------
 
     const size_t BracketColPos = RawStr.find("]:");
-    if (BracketColPos != TString::npos) {
+    if (BracketColPos != TStringBuf::npos) {
         // [ipv6]:port
         if (!RawStr.StartsWith('[')) {
             Ok = false;
@@ -375,7 +379,7 @@ std::tuple<THostAddressAndPort, TString, TIpPort> ParseHostAndMayBePortFromStrin
     // ---------------------------------------------------------------------
 
     const size_t ColPos = RawStr.find(':');
-    if (ColPos != TString::npos) {
+    if (ColPos != TStringBuf::npos) {
         // host:port
         // ipv4:port
         // ipv6

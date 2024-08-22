@@ -25,6 +25,7 @@ ENDIF()
         library/cpp/logger
         library/cpp/resource
         library/cpp/yson
+        library/cpp/digest/md5
         yt/cpp/mapreduce/interface
         ydb/library/yql/sql/pg
         ydb/library/yql/core/facade
@@ -33,15 +34,18 @@ ENDIF()
         ydb/library/yql/core/file_storage/http_download
         ydb/library/yql/core/services
         ydb/library/yql/core/services/mounts
+        ydb/library/yql/dq/actors/input_transforms
         ydb/library/yql/dq/comp_nodes
+        ydb/library/yql/dq/actors/input_transforms
         ydb/library/yql/dq/integration/transform
         ydb/library/yql/dq/transform
-        ydb/library/yql/minikql/comp_nodes/llvm
-        ydb/library/yql/minikql/invoke_builtins/llvm
+        ydb/library/yql/minikql/comp_nodes/llvm14
+        ydb/library/yql/minikql/invoke_builtins/llvm14
         ydb/library/yql/providers/clickhouse/actors
         ydb/library/yql/providers/clickhouse/provider
         ydb/library/yql/providers/common/comp_nodes
         ydb/library/yql/providers/common/proto
+        ydb/library/yql/providers/common/token_accessor/client
         ydb/library/yql/providers/common/udf_resolve
         ydb/library/yql/providers/generic/actors
         ydb/library/yql/providers/generic/provider
@@ -53,6 +57,7 @@ ENDIF()
         ydb/library/yql/providers/pq/provider
         ydb/library/yql/providers/s3/actors
         ydb/library/yql/providers/s3/provider
+        ydb/library/yql/providers/solomon/async_io
         ydb/library/yql/providers/solomon/gateway
         ydb/library/yql/providers/solomon/provider
         ydb/library/yql/providers/ydb/actors
@@ -64,19 +69,26 @@ ENDIF()
         ydb/library/yql/utils/backtrace
         ydb/library/yql/utils/bindings
         ydb/library/yql/utils/log
+        ydb/library/yql/utils/failure_injector
         ydb/library/yql/core/url_preprocessing
         ydb/library/yql/core/url_lister
+        ydb/library/yql/core/pg_ext
+        ydb/library/yql/providers/yt/actors
         ydb/library/yql/providers/yt/comp_nodes/dq
         ydb/library/yql/providers/yt/dq_task_preprocessor
         ydb/library/yql/providers/yt/gateway/file
         ydb/library/yql/providers/yt/gateway/native
+        ydb/library/yql/providers/yt/codec/codegen
         ydb/library/yql/providers/yt/mkql_dq
         ydb/library/yql/providers/yt/provider
+        ydb/library/yql/providers/yt/codec/codegen
+        ydb/library/yql/providers/yt/comp_nodes/llvm14
         ydb/library/yql/providers/yt/lib/yt_download
         ydb/library/yql/providers/yt/lib/yt_url_lister
         ydb/library/yql/providers/yt/lib/config_clusters
         ydb/library/yql/parser/pg_wrapper
         ydb/library/yql/utils/log/proto
+        ydb/library/yql/core/qplayer/storage/file
 
         ydb/library/yql/utils/actor_system
         ydb/core/fq/libs/actors

@@ -62,6 +62,11 @@ void TPDiskStatusComputer::AddState(EPDiskState state) {
 }
 
 EPDiskStatus TPDiskStatusComputer::Compute(EPDiskStatus current, TString& reason) const {
+    if (ForcedStatus) {
+        reason = "Forced status";
+        return *ForcedStatus;
+    }
+
     if (!StateCounter) {
         reason = "Uninitialized StateCounter";
         return current;
@@ -116,6 +121,14 @@ void TPDiskStatusComputer::Reset() {
     StateCounter = 0;
 }
 
+void TPDiskStatusComputer::SetForcedStatus(EPDiskStatus status) {
+    ForcedStatus = status;
+}
+
+void TPDiskStatusComputer::ResetForcedStatus() {
+    ForcedStatus.Clear();
+}
+
 /// TPDiskStatus
 
 TPDiskStatus::TPDiskStatus(EPDiskStatus initialStatus, const ui32& defaultStateLimit, const TLimitsMap& stateLimits)
@@ -129,13 +142,9 @@ void TPDiskStatus::AddState(EPDiskState state) {
     TPDiskStatusComputer::AddState(state);
 }
 
-bool TPDiskStatus::IsChanged(TString& reason) const {
-    return Current != Compute(Current, reason);
-}
-
 bool TPDiskStatus::IsChanged() const {
     TString unused;
-    return IsChanged(unused);
+    return Current != Compute(Current, unused);
 }
 
 void TPDiskStatus::ApplyChanges(TString& reason) {
@@ -194,6 +203,13 @@ TPDiskInfo::TPDiskInfo(EPDiskStatus initialStatus, const ui32& defaultStateLimit
 void TPDiskInfo::AddState(EPDiskState state) {
     TPDiskStatus::AddState(state);
     Touch();
+}
+
+/// TNodeInfo
+
+bool TNodeInfo::HasFaultyMarker() const {
+    return Markers.contains(NKikimrCms::MARKER_DISK_FAULTY)
+        || Markers.contains(NKikimrCms::MARKER_DISK_BROKEN);
 }
 
 /// TClusterMap
@@ -291,9 +307,7 @@ TClusterMap::TPDiskIDSet TGuardian::GetAllowedPDisks(const TClusterMap& all, TSt
 /// Misc
 
 IActor* CreateBSControllerPipe(TCmsStatePtr cmsState) {
-    auto domains = AppData()->DomainsInfo;
-    const ui32 domainUid = domains->GetDomainUidByTabletId(cmsState->CmsTabletId);
-    const ui64 bscId = MakeBSControllerID(domains->GetDefaultStateStorageGroup(domainUid));
+    const ui64 bscId = MakeBSControllerID();
 
     NTabletPipe::TClientConfig config;
     config.RetryPolicy = NTabletPipe::TClientRetryPolicy::WithRetries();
@@ -412,9 +426,15 @@ class TConfigUpdater: public TUpdaterBase<TEvSentinel::TEvConfigUpdated, TConfig
             SentinelState->Nodes.clear();
             for (const auto& host : record.GetState().GetHosts()) {
                 if (host.HasNodeId() && host.HasLocation() && host.HasName()) {
+                    THashSet<NKikimrCms::EMarker> markers;
+                    for (auto marker : host.GetMarkers()) {
+                        markers.insert(static_cast<NKikimrCms::EMarker>(marker));
+                    }
+
                     SentinelState->Nodes.emplace(host.GetNodeId(), TNodeInfo{
                         .Host = host.GetName(),
                         .Location = NActors::TNodeLocation(host.GetLocation()),
+                        .Markers = std::move(markers),
                     });
                 }
             }
@@ -862,11 +882,18 @@ class TSentinel: public TActorBootstrapped<TSentinel> {
             const TPDiskID& id = pdisk.first;
             TPDiskInfo& info = *(pdisk.second);
 
-            if (!SentinelState->Nodes.contains(id.NodeId)) {
+            auto it = SentinelState->Nodes.find(id.NodeId);
+            if (it == SentinelState->Nodes.end()) {
                 LOG_E("Missing node info"
                     << ": pdiskId# " << id);
                 info.IgnoreReason = NKikimrCms::TPDiskInfo::MISSING_NODE;
                 continue;
+            }
+
+            if (it->second.HasFaultyMarker()) {
+                info.SetForcedStatus(EPDiskStatus::FAULTY);
+            } else {
+                info.ResetForcedStatus();
             }
 
             all.AddPDisk(id);
@@ -957,8 +984,21 @@ class TSentinel: public TActorBootstrapped<TSentinel> {
             command.SetPDiskId(id.DiskId);
             command.SetStatus(info->GetStatus());
         }
+        request->Record.MutableRequest()->SetIgnoreDisintegratedGroupsChecks(true);
 
         NTabletPipe::SendData(SelfId(), CmsState->BSControllerPipe, request.Release(), ++SentinelState->ChangeRequestId);
+    }
+
+    void Handle(TEvSentinel::TEvUpdateHostMarkers::TPtr& ev) {
+        for (auto& [nodeId, markers] : ev->Get()->HostMarkers) {
+            auto it = SentinelState->Nodes.find(nodeId);
+            if (it == SentinelState->Nodes.end()) {
+                // markers will be updated upon next ConfigUpdate iteration
+                continue;
+            }
+
+            it->second.Markers = std::move(markers);
+        }
     }
 
     void Handle(TEvCms::TEvGetSentinelStateRequest::TPtr& ev) {
@@ -1076,6 +1116,7 @@ class TSentinel: public TActorBootstrapped<TSentinel> {
         }
 
         auto onPDiskStatusChanged = [&](const TPDiskID& id, TPDiskInfo& info) {
+            info.LastStatusChangeFailed = false;
             info.StatusChangeFailed = false;
             info.PrevStatus = info.ActualStatus;
             info.ActualStatus = info.GetStatus();
@@ -1089,21 +1130,22 @@ class TSentinel: public TActorBootstrapped<TSentinel> {
             (*Counters->PDisksChanged)++;
         };
 
-        if (!response.GetSuccess() || !response.StatusSize() || !response.GetStatus(0).GetSuccess()) {
-            Y_ABORT_UNLESS(SentinelState->ChangeRequests.size() == response.StatusSize());
+        if (!response.GetSuccess() || !response.StatusSize()) {
+            for (auto& [key, req] : SentinelState->ChangeRequests) {
+                req->LastStatusChangeFailed = false;
+                req->StatusChangeFailed = true;
+                req->StatusChangeAttempt = SentinelState->StatusChangeAttempt;
+            }
+
+            Y_ABORT_UNLESS(SentinelState->ChangeRequests.size() >= response.StatusSize());
             auto it = SentinelState->ChangeRequests.begin();
             for (const auto& status : response.GetStatus()) {
                 if (!status.GetSuccess()) {
+                    it->second->LastStatusChangeFailed = true;
                     LOG_E("Unsuccesful response from BSC"
                         << ": error# " << status.GetErrorDescription());
-
-                    it->second->StatusChangeFailed = true;
-                    it->second->StatusChangeAttempt = SentinelState->StatusChangeAttempt;
-                    ++it;
-                } else {
-                    onPDiskStatusChanged(it->first, *(it->second));
-                    it = SentinelState->ChangeRequests.erase(it);
                 }
+                ++it;
             }
 
             MaybeRetry();
@@ -1192,6 +1234,7 @@ public:
             sFunc(TEvSentinel::TEvConfigUpdated, OnConfigUpdated);
             sFunc(TEvSentinel::TEvUpdateState, UpdateState);
             sFunc(TEvSentinel::TEvStateUpdated, OnStateUpdated);
+            hFunc(TEvSentinel::TEvUpdateHostMarkers, Handle);
             sFunc(TEvSentinel::TEvBSCPipeDisconnected, OnPipeDisconnected);
 
             hFunc(TEvCms::TEvGetSentinelStateRequest, Handle);

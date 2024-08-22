@@ -1,23 +1,11 @@
 LIBRARY()
 
 SRCS(
-    scanner.cpp
-    source.cpp
-    constructor.cpp
-    interval.cpp
-    fetched_data.cpp
-    plain_read_data.cpp
-    filter_assembler.cpp
-    column_assembler.cpp
-    committed_assembler.cpp
-    columns_set.cpp
-    context.cpp
 )
 
 PEERDIR(
-    ydb/core/formats/arrow
-    ydb/core/tx/columnshard/blobs_action
-    ydb/core/tx/conveyor/usage
+    ydb/core/tx/columnshard/engines/reader/plain_reader/constructor
+    ydb/core/tx/columnshard/engines/reader/plain_reader/iterator
 )
 
 END()

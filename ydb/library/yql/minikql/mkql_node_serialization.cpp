@@ -760,6 +760,33 @@ namespace {
                     case NUdf::TDataType<NUdf::TInterval>::Id:
                         Owner.WriteVar64(ZigZagEncode(value.Get<NUdf::TDataType<NUdf::TInterval>::TLayout>()));
                         break;
+                    case NUdf::TDataType<NUdf::TDate32>::Id:
+                        Owner.WriteVar32(ZigZagEncode(value.Get<NUdf::TDataType<NUdf::TDate32>::TLayout>()));
+                        break;
+                    case NUdf::TDataType<NUdf::TDatetime64>::Id:
+                        Owner.WriteVar64(ZigZagEncode(value.Get<NUdf::TDataType<NUdf::TDatetime64>::TLayout>()));
+                        break;
+                    case NUdf::TDataType<NUdf::TTimestamp64>::Id:
+                        Owner.WriteVar64(ZigZagEncode(value.Get<NUdf::TDataType<NUdf::TTimestamp64>::TLayout>()));
+                        break;
+                    case NUdf::TDataType<NUdf::TInterval64>::Id:
+                        Owner.WriteVar64(ZigZagEncode(value.Get<NUdf::TDataType<NUdf::TInterval64>::TLayout>()));
+                        break;
+                    case NUdf::TDataType<NUdf::TTzDate32>::Id: {
+                        Owner.WriteVar32(ZigZagEncode(value.Get<NUdf::TDataType<NUdf::TTzDate32>::TLayout>()));
+                        Owner.WriteVar32(value.GetTimezoneId());
+                        break;
+                    }
+                    case NUdf::TDataType<NUdf::TTzDatetime64>::Id: {
+                        Owner.WriteVar64(ZigZagEncode(value.Get<NUdf::TDataType<NUdf::TTzDatetime64>::TLayout>()));
+                        Owner.WriteVar32(value.GetTimezoneId());
+                        break;
+                    }
+                    case NUdf::TDataType<NUdf::TTzTimestamp64>::Id: {
+                        Owner.WriteVar64(ZigZagEncode(value.Get<NUdf::TDataType<NUdf::TTzTimestamp64>::TLayout>()));
+                        Owner.WriteVar32(value.GetTimezoneId());
+                        break;
+                    }
                     case NUdf::TDataType<NUdf::TUuid>::Id: {
                         const auto v = value.AsStringRef();
                         Owner.WriteMany(v.Data(), v.Size());
@@ -1242,22 +1269,22 @@ namespace {
         }
 
         TNode* ReadTypeType() {
-            auto node = Env.GetTypeOfType();
+            auto node = Env.GetTypeOfTypeLazy();
             return node;
         }
 
         TNode* ReadVoidOrEmptyListOrEmptyDictType(char code) {
             switch ((TType::EKind)(code & TypeMask)) {
-            case TType::EKind::Void: return Env.GetTypeOfVoid();
-            case TType::EKind::EmptyList: return Env.GetTypeOfEmptyList();
-            case TType::EKind::EmptyDict: return Env.GetTypeOfEmptyDict();
+            case TType::EKind::Void: return Env.GetTypeOfVoidLazy();
+            case TType::EKind::EmptyList: return Env.GetTypeOfEmptyListLazy();
+            case TType::EKind::EmptyDict: return Env.GetTypeOfEmptyDictLazy();
             default:
                 ThrowCorrupted();
             }
         }
 
         TNode* ReadNullType() {
-            auto node = Env.GetTypeOfNull();
+            auto node = Env.GetTypeOfNullLazy();
             return node;
         }
 
@@ -1507,7 +1534,7 @@ namespace {
         }
 
         TNode* ReadAnyType() {
-            auto node = Env.GetAnyType();
+            auto node = Env.GetAnyTypeLazy();
             return node;
         }
 
@@ -1595,16 +1622,16 @@ namespace {
 
         TNode* ReadVoid(char code) {
             switch ((TType::EKind)(code & TypeMask)) {
-            case TType::EKind::Void: return Env.GetVoid();
-            case TType::EKind::EmptyList: return Env.GetEmptyList();
-            case TType::EKind::EmptyDict: return Env.GetEmptyDict();
+            case TType::EKind::Void: return Env.GetVoidLazy();
+            case TType::EKind::EmptyList: return Env.GetEmptyListLazy();
+            case TType::EKind::EmptyDict: return Env.GetEmptyDictLazy();
             default:
                 ThrowCorrupted();
             }
         }
 
         TNode* ReadNull() {
-            auto node = Env.GetNull();
+            auto node = Env.GetNullLazy();
             return node;
         }
 
@@ -1713,6 +1740,50 @@ namespace {
             case NUdf::TDataType<NUdf::TTzTimestamp>::Id:
             {
                 value = NUdf::TUnboxedValuePod(static_cast<NUdf::TDataType<NUdf::TTzTimestamp>::TLayout>(ReadVar64()));
+                const ui32 tzId = ReadVar32();
+                MKQL_ENSURE(tzId <= Max<ui16>() && IsValidTimezoneId((ui16)tzId), "Unknown timezone: " << tzId);
+                value.SetTimezoneId((ui16)tzId);
+                break;
+            }
+            case NUdf::TDataType<NUdf::TDate32>::Id:
+            {
+                value = NUdf::TUnboxedValuePod(static_cast<NUdf::TDataType<NUdf::TDate32>::TLayout>(ZigZagDecode(ReadVar32())));
+                break;
+            }
+            case NUdf::TDataType<NUdf::TDatetime64>::Id:
+            {
+                value = NUdf::TUnboxedValuePod(static_cast<NUdf::TDataType<NUdf::TDatetime64>::TLayout>(ZigZagDecode(ReadVar64())));
+                break;
+            }
+            case NUdf::TDataType<NUdf::TTimestamp64>::Id:
+            {
+                value = NUdf::TUnboxedValuePod(static_cast<NUdf::TDataType<NUdf::TTimestamp64>::TLayout>(ZigZagDecode(ReadVar64())));
+                break;
+            }
+            case NUdf::TDataType<NUdf::TInterval64>::Id:
+            {
+                value = NUdf::TUnboxedValuePod(static_cast<NUdf::TDataType<NUdf::TInterval64>::TLayout>(ZigZagDecode(ReadVar64())));
+                break;
+            }
+            case NUdf::TDataType<NUdf::TTzDate32>::Id:
+            {
+                value = NUdf::TUnboxedValuePod(static_cast<NUdf::TDataType<NUdf::TTzDate32>::TLayout>(ZigZagDecode(ReadVar32())));
+                const ui32 tzId = ReadVar32();
+                MKQL_ENSURE(tzId <= Max<ui16>() && IsValidTimezoneId((ui16)tzId), "Unknown timezone: " << tzId);
+                value.SetTimezoneId((ui16)tzId);
+                break;
+            }
+            case NUdf::TDataType<NUdf::TTzDatetime64>::Id:
+            {
+                value = NUdf::TUnboxedValuePod(static_cast<NUdf::TDataType<NUdf::TTzDatetime64>::TLayout>(ZigZagDecode(ReadVar64())));
+                const ui32 tzId = ReadVar32();
+                MKQL_ENSURE(tzId <= Max<ui16>() && IsValidTimezoneId((ui16)tzId), "Unknown timezone: " << tzId);
+                value.SetTimezoneId((ui16)tzId);
+                break;
+            }
+            case NUdf::TDataType<NUdf::TTzTimestamp64>::Id:
+            {
+                value = NUdf::TUnboxedValuePod(static_cast<NUdf::TDataType<NUdf::TTzTimestamp64>::TLayout>(ZigZagDecode(ReadVar64())));
                 const ui32 tzId = ReadVar32();
                 MKQL_ENSURE(tzId <= Max<ui16>() && IsValidTimezoneId((ui16)tzId), "Unknown timezone: " << tzId);
                 value.SetTimezoneId((ui16)tzId);

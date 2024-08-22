@@ -70,6 +70,62 @@ TExprNode::TPtr ExpandPgNot(const TExprNode::TPtr& input, TExprContext& ctx) {
         .Build();
 }
 
+TExprNode::TPtr ExpandPgIsTorF(const TExprNode::TPtr& input, bool value, TExprContext& ctx) {
+    return ctx.Builder(input->Pos())
+        .Callable("ToPg")
+            .Callable(0, "Coalesce")
+                .Callable(0, "FromPg")
+                    .Callable(0, "PgOp")
+                        .Atom(0, "=")
+                        .Add(1, input->ChildPtr(0))
+                        .Add(2, MakePgBool(input->Pos(), value, ctx))
+                    .Seal()
+                .Seal()
+            .Add(1, MakeBool<false>(input->Pos(), ctx))
+            .Seal()
+        .Seal()
+        .Build();
+}
+
+TExprNode::TPtr ExpandPgIsTrue(const TExprNode::TPtr& input, TExprContext& ctx) {
+    return ExpandPgIsTorF(input, true, ctx);
+}
+
+TExprNode::TPtr ExpandPgIsFalse(const TExprNode::TPtr& input, TExprContext& ctx) {
+    return ExpandPgIsTorF(input, false, ctx);
+}
+
+TExprNode::TPtr ExpandPgIsUnknown(const TExprNode::TPtr& input, TExprContext& ctx) {
+    return ctx.Builder(input->Pos())
+        .Callable("ToPg")
+            .Callable(0,"Not")
+                .Callable(0, "Exists")
+                    .Add(0, input->ChildPtr(0))
+                .Seal()
+            .Seal()
+        .Seal()
+        .Build();
+}
+
+TExprNode::TPtr OptimizePgCastOverPgConst(const TExprNode::TPtr& input, TExprContext& ctx) {
+    if (input->ChildrenSize() != 2) {
+        return input;
+    }
+    auto val = input->Child(0);
+    if (!val->IsCallable("PgConst")) {
+        return input;
+    }
+
+    auto castFromType = val->Child(1);
+    auto castToType = input->Child(1);
+    if (castFromType->Child(0)->Content() == "unknown" && castToType->Child(0)->Content() == "text") {
+        YQL_CLOG(DEBUG, Core) << "Remove PgCast unknown->text over PgConst";
+        return ctx.ChangeChild(*val, 1, castToType);
+    }
+
+    return input;
+}
+
 template<typename TInt>
 class TMinAggregate {
 public:
@@ -585,48 +641,6 @@ TExprNode::TPtr RemoveNothingFromCoalesce(const TExprNode& node, TExprContext& c
     return ctx.ChangeChildren(node, std::move(newChildren));
 }
 
-TExprNode::TPtr OptimizeTryMember(const TExprNode::TPtr& node, TExprContext& ctx) {
-    YQL_CLOG(DEBUG, Core) << "Optimize " << node->Content();
-    const bool isStructOptional = node->Head().GetTypeAnn()->GetKind() == ETypeAnnotationKind::Optional;
-    const TStructExprType* structType = RemoveOptionalType(node->Head().GetTypeAnn())->Cast<TStructExprType>();
-    const bool isOptional = node->Tail().GetTypeAnn()->GetKind() == ETypeAnnotationKind::Optional;
-    const auto memberName = node->Child(1)->Content();
-    const auto wrappedDefault = ctx.WrapByCallableIf(isStructOptional && !node->TailPtr()->IsCallable("Null") &&
-        node->TailPtr()->GetTypeAnn()->GetKind() != ETypeAnnotationKind::Optional, "Just", node->TailPtr());
-
-    for (const auto& field : structType->GetItems()) {
-        if (field->GetName() == memberName) {
-            const bool just = (isStructOptional || isOptional) && field->GetItemType()->GetKind() != ETypeAnnotationKind::Optional;
-            auto memberArg = isStructOptional ? ctx.NewArgument(node->Pos(), "x") : node->HeadPtr();
-            auto member = ctx.NewCallable(node->Pos(), "Member", { memberArg, node->ChildPtr(1) });
-            auto body = ctx.WrapByCallableIf(just, "Just", std::move(member));
-            if (!isStructOptional) {
-                return body;
-            }
-
-            auto lambda = ctx.NewLambda(node->Pos(), ctx.NewArguments(node->Pos(), { memberArg }), std::move(body));
-            if (node->TailPtr()->IsCallable("Null")) {
-                return ctx.Builder(node->Pos())
-                    .Callable("FlatMap")
-                        .Add(0, node->HeadPtr())
-                        .Add(1, lambda)
-                    .Seal()
-                    .Build();
-            }
-
-            return ctx.Builder(node->Pos())
-                .Callable("IfPresent")
-                    .Add(0, node->HeadPtr())
-                    .Add(1, lambda)
-                    .Add(2, wrappedDefault)
-                .Seal()
-                .Build();
-        }
-    }
-
-    return wrappedDefault;
-}
-
 TExprNode::TPtr RemoveOptionalReduceOverData(const TExprNode::TPtr& node, TExprContext& ctx) {
     if (node->Head().GetTypeAnn()->GetKind() != ETypeAnnotationKind::Optional) {
         YQL_CLOG(DEBUG, Core) << "Remove " << node->Content() << " over data";
@@ -640,7 +654,7 @@ TExprNode::TPtr RemoveOptionalReduceOverData(const TExprNode::TPtr& node, TExprC
 }
 
 TExprNode::TPtr PropagateCoalesceWithConstIntoLogicalOps(const TExprNode::TPtr& node, TExprContext& ctx) {
-    if (node->Head().IsCallable({"Likely", "AssumeStrict"})) {
+    if (node->Head().IsCallable({"Likely", "AssumeStrict", "AssumeNonStrict"})) {
         const auto value = FromString<bool>(node->Child(1)->Head().Content());
         if (!value) {
             YQL_CLOG(DEBUG, Core) << "PropagateCoalesceWithConst over " << node->Head().Content() << " (false)";
@@ -2064,6 +2078,27 @@ TExprNode::TPtr SimpleFlatMap(const TExprNode::TPtr& node, TExprContext& ctx, TO
         const auto& inputToCheck = SkipCallables(node->Head(), SkippableCallables);
         if (IsEmptyContainer(inputToCheck) || IsEmpty(inputToCheck, *optCtx.Types)) {
             YQL_CLOG(DEBUG, Core) << "Empty " << node->Content() << " over " << inputToCheck.Content();
+            const auto typeAnn = node->GetTypeAnn();
+            const auto kind = typeAnn->GetKind();
+            if (kind == ETypeAnnotationKind::Flow || kind == ETypeAnnotationKind::Stream) {
+                const auto scope = node->GetDependencyScope();
+                const auto outer = scope->first;
+                if (outer != nullptr) {
+                    auto res = ctx.Builder(node->Pos())
+                            .Callable(GetEmptyCollectionName(typeAnn))
+                                .Add(0, ExpandType(node->Pos(), *typeAnn, ctx))
+                                .Do(
+                                    [&](TExprNodeBuilder& parent) -> TExprNodeBuilder& {
+                                        for (ui32 i = 0; i < outer->Child(0)->ChildrenSize(); ++i) {
+                                            parent.Callable(i+1, "DependsOn").Add(0, outer->Child(0)->Child(i)).Seal();
+                                        }
+                                        return parent;
+                                    }
+                                )
+                            .Seal().Build();
+                    return KeepConstraints(res, *node, ctx);
+                }
+            }
             auto res = ctx.NewCallable(inputToCheck.Pos(), GetEmptyCollectionName(node->GetTypeAnn()), {ExpandType(node->Pos(), *node->GetTypeAnn(), ctx)});
             return KeepConstraints(res, *node, ctx);
         }
@@ -2230,6 +2265,24 @@ TExprNode::TPtr HasNullOverVariant(const TExprNode::TPtr& node, TExprContext& ct
 
 }
 
+constexpr std::initializer_list<std::string_view> FlowPriority = {
+    "AssumeSorted", "AssumeUnique", "AssumeDistinct",
+    "Map", "OrderedMap", "MapNext",
+    "Filter", "OrderedFilter",
+    "FlatMap", "OrderedFlatMap",
+    "MultiMap", "OrderedMultiMap",
+    "FoldMap", "Fold1Map", "Chain1Map",
+    "Take", "Skip",
+    "TakeWhile", "SkipWhile",
+    "TakeWhileInclusive", "SkipWhileInclusive",
+    "SkipNullMembers", "FilterNullMembers",
+    "SkipNullElements", "FilterNullElements",
+    "Condense", "Condense1",
+    "MapJoinCore", "CommonJoinCore",
+    "CombineCore", "ExtractMembers",
+    "PartitionByKey", "SqueezeToDict"
+};
+
 TExprNode::TPtr OptimizeToFlow(const TExprNode::TPtr& node, TExprContext& ctx) {
     if (node->Head().IsCallable("Nothing")) {
         YQL_CLOG(DEBUG, Core) << node->Content() << " over " << node->Head().Content();
@@ -2254,6 +2307,65 @@ TExprNode::TPtr OptimizeToFlow(const TExprNode::TPtr& node, TExprContext& ctx) {
     if (node->Head().IsCallable("ToList") && node->Head().Head().GetTypeAnn()->GetKind() == ETypeAnnotationKind::Optional) {
         YQL_CLOG(DEBUG, Core) << "Drop " << node->Head().Content() << " under " << node->Content();
         return ctx.ChangeChildren(*node, node->Head().ChildrenList());
+    }
+
+    if (node->Head().IsCallable(FlowPriority)) {
+        YQL_CLOG(DEBUG, Core) << "Swap " << node->Content() << " with " << node->Head().Content();
+        return ctx.SwapWithHead(*node);
+    }
+
+    if (node->Head().IsCallable("FromFlow")) {
+        YQL_CLOG(DEBUG, Core) << "Drop " << node->Content() << " with " << node->Head().Content();
+        return node->Head().HeadPtr();
+    }
+
+    if (node->Head().IsCallable("ForwardList")) {
+        YQL_CLOG(DEBUG, Core) << "Drop " << node->Head().Content() << " under " << node->Content();
+        return ctx.ChangeChild(*node, 0U,  node->Head().HeadPtr());
+    }
+
+    if (node->Head().IsCallable("Chopper")) {
+        YQL_CLOG(DEBUG, Core) << "Swap " << node->Head().Content() << " with " << node->Content();
+        auto children = node->Head().ChildrenList();
+        children.front() = ctx.ChangeChildren(*node, {std::move(children.front())});
+        children.back() = ctx.Builder(children.back()->Pos())
+            .Lambda()
+                .Param("key")
+                .Param("flow")
+                .Callable("ToFlow")
+                    .Apply(0, *children.back())
+                        .With(0, "key")
+                        .With(1)
+                            .Callable("FromFlow")
+                                .Arg(0, "flow")
+                            .Seal()
+                        .Done()
+                    .Seal()
+                .Seal()
+            .Seal().Build();
+        return ctx.ChangeChildren(node->Head(), std::move(children));
+    }
+
+    if (node->Head().IsCallable("Switch")) {
+        YQL_CLOG(DEBUG, Core) << "Swap " << node->Head().Content() << " with " << node->Content();
+        auto children = node->Head().ChildrenList();
+        children.front() = ctx.ChangeChildren(*node, {std::move(children.front())});
+        for (auto i = 3U; i < children.size(); ++++i) {
+            children[i] = ctx.Builder(children[i]->Pos())
+                .Lambda()
+                    .Param("flow")
+                    .Callable("ToFlow")
+                        .Apply(0, *children[i])
+                            .With(0)
+                                .Callable("FromFlow")
+                                    .Arg(0, "flow")
+                                .Seal()
+                            .Done()
+                        .Seal()
+                    .Seal()
+                .Seal().Build();
+        }
+        return ctx.ChangeChildren(node->Head(), std::move(children));
     }
 
     return node;
@@ -2397,7 +2509,10 @@ TExprNode::TPtr DropReorder(const TExprNode::TPtr& node, TExprContext& ctx) {
 template <bool IsTop, bool IsSort>
 TExprNode::TPtr OptimizeReorder(const TExprNode::TPtr& node, TExprContext& ctx) {
     const ui32 ascIndex = node->ChildrenSize() - 2U;
-    if ((IsSort || IsTop) && 1U == node->Head().ChildrenSize() && node->Head().IsCallable(GetEmptyCollectionName(node->Head().GetTypeAnn()))) {
+    if ((IsSort || IsTop) && (
+                                1U == node->Head().ChildrenSize() && node->Head().IsCallable(GetEmptyCollectionName(node->Head().GetTypeAnn()))
+                                || node->Head().IsCallable("EmptyIterator")
+                            )) {
         YQL_CLOG(DEBUG, Core) << node->Content() << " over " << node->Head().Content();
         return IsSort ?
             ctx.Builder(node->Pos())
@@ -2414,7 +2529,7 @@ TExprNode::TPtr OptimizeReorder(const TExprNode::TPtr& node, TExprContext& ctx) 
         return ctx.ChangeChild(*node, 0U, node->Head().HeadPtr());
     }
 
-    if (const auto& lambda = node->Tail(); lambda.Tail().GetDependencyScope()->second != &lambda) {
+    if (const auto& lambda = node->Tail(); lambda.Tail().GetDependencyScope()->second != &lambda && IsStrict(lambda.TailPtr())) {
         YQL_CLOG(DEBUG, Core) << node->Content() << " by constant";
         return IsTop ?
             ctx.Builder(node->Pos())
@@ -2834,7 +2949,76 @@ TExprNode::TPtr DoNormalizeFrames(const TExprNode::TPtr& frames, TExprContext& c
     bool changed = false;
     TExprNode::TPtr unboundedCurrentNode;
 
+    auto hasAnsiCumeDists = [](const TExprNode::TPtr& winOn) {
+        for (ui32 i = 1; i < winOn->ChildrenSize(); ++i) {
+            auto item = winOn->Child(i)->Child(1);
+            if (item->IsCallable("CumeDist") && HasSetting(item->Tail(), "ansi")) {
+                return true;
+            }
+        }
+
+        return false;
+    };
+
+    TExprNodeList ansiCumeDistNodes; // we should isolate them into default RANGE frame
     for (auto& winOn : frames->ChildrenList()) {
+        if (!hasAnsiCumeDists(winOn)) {
+            continue;
+        }
+
+        TWindowFrameSettings frameSettings = TWindowFrameSettings::Parse(*winOn, ctx);
+        if (frameSettings.GetFrameType() == EFrameType::FrameByRange) {
+            YQL_ENSURE(IsUnbounded(frameSettings.GetFirst()));
+            YQL_ENSURE(IsCurrentRow(frameSettings.GetLast()));
+            continue;
+        }
+
+        TExprNodeList winOnChildrenNormalized;
+        winOnChildrenNormalized.push_back(winOn->HeadPtr());
+        for (ui32 i = 1; i < winOn->ChildrenSize(); ++i) {
+            auto item = winOn->Child(i)->Child(1);
+            if (item->IsCallable("CumeDist") && HasSetting(item->Tail(), "ansi")) {
+                ansiCumeDistNodes.push_back(winOn->ChildPtr(i));
+            } else {
+                winOnChildrenNormalized.push_back(winOn->ChildPtr(i));
+            }
+        }
+
+        if (winOnChildrenNormalized.size() > 1) {
+            normalized.push_back(ctx.ChangeChildren(*winOn, std::move(winOnChildrenNormalized)));
+        }
+    }
+
+    if (!ansiCumeDistNodes.empty()) {
+        ansiCumeDistNodes.insert(ansiCumeDistNodes.begin(), ctx.Builder(frames->Pos())
+            .List()
+                .List(0)
+                    .Atom(0, "begin", TNodeFlags::Default)
+                    .List(1)
+                        .Atom(0, "preceding", TNodeFlags::Default)
+                        .Atom(1, "unbounded", TNodeFlags::Default)
+                    .Seal()
+                .Seal()
+                .List(1)
+                    .Atom(0, "end", TNodeFlags::Default)
+                    .List(1)
+                        .Atom(0, "currentRow", TNodeFlags::Default)
+                    .Seal()
+                .Seal()
+            .Seal()
+            .Build());
+
+        normalized.push_back(ctx.NewCallable(frames->Pos(), "WinOnRange", std::move(ansiCumeDistNodes)));
+        return ctx.ChangeChildren(*frames, std::move(normalized));
+    }
+
+    normalized.clear();
+    for (auto& winOn : frames->ChildrenList()) {
+        if (hasAnsiCumeDists(winOn)) {
+            normalized.push_back(winOn);
+            continue;
+        }
+
         TWindowFrameSettings frameSettings = TWindowFrameSettings::Parse(*winOn, ctx);
         if (frameSettings.GetFrameType() == EFrameType::FrameByRows) {
             // TODO: maybe we need to rewrite non-trivial ROWS frames also
@@ -3024,6 +3208,97 @@ TExprNode::TPtr Normalize(const TCoAggregate& node, TExprContext& ctx) {
         .Done().Ptr();
 }
 
+TExprNode::TPtr RemoveDeadPayloadColumns(const TCoAggregate& aggr, TExprContext& ctx) {
+    const TExprNode::TPtr outputColumnsSetting = GetSetting(aggr.Settings().Ref(), "output_columns");
+    if (!outputColumnsSetting) {
+        return aggr.Ptr();
+    }
+    const TExprNode::TPtr outputColumns = outputColumnsSetting->ChildPtr(1);
+
+    TSet<TStringBuf> outMembers;
+    for (const auto& x : outputColumns->ChildrenList()) {
+        outMembers.insert(x->Content());
+    }
+
+    TExprNodeList newHandlers;
+    bool rebuildHandlers = false;
+    for (const auto& handler : aggr.Handlers()) {
+        if (handler.ColumnName().Ref().IsList()) {
+            // many columns
+            auto columns = handler.ColumnName().Cast<TCoAtomList>();
+            TVector<size_t> liveIndexes;
+            for (size_t i = 0; i < columns.Size(); ++i) {
+                if (outMembers.contains(columns.Item(i).Value())) {
+                    liveIndexes.push_back(i);
+                }
+            }
+
+            if (liveIndexes.empty()) {
+                // drop handler
+                rebuildHandlers = true;
+                continue;
+            } else if (liveIndexes.size() < columns.Size() && handler.Trait().Maybe<TCoAggregationTraits>()) {
+                auto traits = handler.Trait().Cast<TCoAggregationTraits>();
+
+                TExprNodeList nameNodes;
+                TExprNodeList finishBody;
+                TExprNode::TPtr arg = ctx.NewArgument(traits.FinishHandler().Pos(), "arg");
+                auto originalTuple = ctx.Builder(traits.FinishHandler().Pos())
+                    .Apply(traits.FinishHandler().Ref())
+                        .With(0, arg)
+                    .Seal()
+                    .Build();
+
+                for (auto& idx : liveIndexes) {
+                    nameNodes.emplace_back(columns.Item(idx).Ptr());
+                    finishBody.emplace_back(ctx.Builder(traits.FinishHandler().Pos())
+                        .Callable("Nth")
+                            .Add(0, originalTuple)
+                            .Atom(1, idx)
+                        .Seal()
+                        .Build());
+                }
+
+                auto finishLambda = ctx.NewLambda(traits.FinishHandler().Pos(),
+                    ctx.NewArguments(traits.FinishHandler().Pos(), { arg }),
+                    ctx.NewList(traits.FinishHandler().Pos(), std::move(finishBody)));
+
+                auto newHandler = Build<TCoAggregateTuple>(ctx, handler.Pos())
+                    .InitFrom(handler)
+                    .ColumnName(ctx.NewList(handler.ColumnName().Pos(), std::move(nameNodes)))
+                    .Trait<TCoAggregationTraits>()
+                        .InitFrom(traits)
+                        .FinishHandler(finishLambda)
+                    .Build()
+                    .Done().Ptr();
+
+                newHandlers.emplace_back(std::move(newHandler));
+                rebuildHandlers = true;
+                continue;
+            }
+        } else {
+            if (!outMembers.contains(handler.ColumnName().Cast<TCoAtom>().Value())) {
+                // drop handler
+                rebuildHandlers = true;
+                continue;
+            }
+        }
+
+        newHandlers.push_back(handler.Ptr());
+    }
+
+    if (rebuildHandlers) {
+        YQL_CLOG(DEBUG, Core) << "Drop unused payloads in " << aggr.CallableName();
+        return Build<TCoAggregate>(ctx, aggr.Pos())
+            .InitFrom(aggr)
+            .Handlers(ctx.NewList(aggr.Pos(), std::move(newHandlers)))
+            .Done()
+            .Ptr();
+    }
+
+    return aggr.Ptr();
+}
+
 TExprNode::TPtr PullAssumeColumnOrderOverEquiJoin(const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
     TVector<ui32> withAssume;
     for (ui32 i = 0; i < node->ChildrenSize() - 2; i++) {
@@ -3068,8 +3343,8 @@ std::unordered_set<ui32> GetUselessSortedJoinInputs(const TCoEquiJoin& equiJoin)
         if (!joinTree->Head().IsAtom("Cross")) {
             std::unordered_map<std::string_view, TPartOfConstraintBase::TSetType> tableJoinKeys;
             for (const auto keys : {joinTree->Child(3), joinTree->Child(4)})
-                for (ui32 i = 0U; i < keys->ChildrenSize(); ++i)
-                    tableJoinKeys[keys->Child(i)->Content()].insert_unique(TPartOfConstraintBase::TPathType(1U, keys->Child(++i)->Content()));
+                for (ui32 i = 0U; i < keys->ChildrenSize(); i += 2)
+                    tableJoinKeys[keys->Child(i)->Content()].insert_unique(TPartOfConstraintBase::TPathType(1U, keys->Child(i + 1)->Content()));
 
             for (const auto& [label, joinKeys]: tableJoinKeys) {
                 if (const auto it = sorteds.find(label); sorteds.cend() != it) {
@@ -3342,6 +3617,12 @@ TExprNode::TPtr OptimizeMerge(const TExprNode::TPtr& node, TExprContext& ctx, TO
     return OptimizeExtend<true>(node, ctx, optCtx);
 }
 
+bool IsEarlyExpandOfSkipNullAllowed(const TOptimizeContext& optCtx) {
+    YQL_ENSURE(optCtx.Types);
+    static const TString skipNullFlags = to_lower(TString("EarlyExpandSkipNull"));
+    return optCtx.Types->OptimizerFlags.contains(skipNullFlags);
+}
+
 } // namespace
 
 void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
@@ -3496,7 +3777,10 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
             return ConvertSqlInPredicatesToJoins(self, ctx);
     };
 
-    map["SkipNullMembers"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& /*optCtx*/) {
+    map["SkipNullMembers"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+        if (IsEarlyExpandOfSkipNullAllowed(optCtx)) {
+            return ExpandSkipNullFields(node, ctx);
+        }
         const auto skipNullMembers = TCoSkipNullMembers(node);
         if (!skipNullMembers.Members()) {
             return node;
@@ -3537,7 +3821,10 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
         return node;
     };
 
-    map["SkipNullElements"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& /*optCtx*/) {
+    map["SkipNullElements"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+        if (IsEarlyExpandOfSkipNullAllowed(optCtx)) {
+            return ExpandSkipNullFields(node, ctx);
+        }
         const auto skipNullElements = TCoSkipNullElements(node);
         if (!skipNullElements.Elements()) {
             return node;
@@ -3672,7 +3959,7 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
     map["Lookup"] = std::bind(&OptimizeContains<false, true>, _1, _2);
     map["Contains"] = std::bind(&OptimizeContains<false>, _1, _2);
     map["ListHas"] = std::bind(&OptimizeContains<true>, _1, _2);
-    map["ListUniq"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext&) {
+    map["Uniq"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext&) {
         return ctx.Builder(node->Pos())
             .Callable("DictKeys")
                 .Callable(0, "ToDict")
@@ -3694,7 +3981,7 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
             .Seal()
             .Build();
     };
-    map["ListUniqStable"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext&) {
+    map["UniqStable"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext&) {
         const TTypeAnnotationNode* itemType = node->Head().GetTypeAnn()->Cast<TListExprType>()->GetItemType();
         auto expandedItemType = ExpandType(node->Pos(), *itemType, ctx);
         auto setCreate = ctx.Builder(node->Pos())
@@ -3912,6 +4199,20 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
                       });
 
             if (!tupleElementsHaveSameType) {
+                if (!collection->IsList()) {
+                    TExprNodeList collectionItems;
+                    for (ui32 i = 0; i < tupleType->GetSize(); ++i) {
+                        collectionItems.push_back(ctx.Builder(collection->Pos())
+                            .Callable("Nth")
+                                .Add(0, collection)
+                                .Atom(1, i)
+                            .Seal()
+                            .Build()
+                        );
+                    }
+                    YQL_CLOG(DEBUG, Core) << "IN non-literal heterogeneous tuple";
+                    return ctx.ChangeChild(*node, TCoSqlIn::idx_Collection, ctx.NewList(collection->Pos(), std::move(collectionItems)));
+                }
                 YQL_CLOG(DEBUG, Core) << "IN heterogeneous tuple";
                 auto collections = DeduplicateAndSplitTupleCollectionByTypes(*collection, ctx);
                 YQL_ENSURE(collections.size() > 1);
@@ -4047,7 +4348,7 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
     map["FromFlow"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& /*optCtx*/) {
         if (node->Head().IsCallable("EmptyIterator")) {
             YQL_CLOG(DEBUG, Core) << node->Content() << " over " << node->Head().Content();
-            return ctx.ChangeChildren(node->Head(), {ExpandType(node->Pos(), *node->GetTypeAnn(), ctx)});
+            return ctx.ChangeChild(node->Head(), 0, ExpandType(node->Pos(), *node->GetTypeAnn(), ctx));
         }
 
         return node;
@@ -4309,6 +4610,23 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
             return ctx.ChangeChild(node->Head(), 0U, ExpandType(node->Pos(), *node->GetTypeAnn(), ctx));
         }
 
+        if (node->Head().IsCallable("If") && node->Head().ChildrenSize() == 3) {
+            TCoIf childIf(node->HeadPtr());
+            YQL_CLOG(DEBUG, Core) << node->Content() << " over " << node->Head().Content();
+            return Build<TCoIf>(ctx, node->Pos())
+                .InitFrom(childIf)
+                .ThenValue<TCoNth>()
+                    .InitFrom(TCoNth(node))
+                    .Tuple(childIf.ThenValue())
+                .Build()
+                .ElseValue<TCoNth>()
+                    .InitFrom(TCoNth(node))
+                    .Tuple(childIf.ElseValue())
+                .Build()
+                .Done()
+                .Ptr();
+        }
+
         return node;
     };
 
@@ -4511,8 +4829,6 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
 
     map["IfPresent"] = std::bind(&OptimizeIfPresent<true>, _1, _2);
 
-    map["TryMember"] = std::bind(&OptimizeTryMember, _1, _2);
-
     map["Optional"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& /*optCtx*/) {
         YQL_CLOG(DEBUG, Core) << node->Content();
         return ctx.NewCallable(node->Pos(), "Just", {node->TailPtr()});
@@ -4646,6 +4962,16 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
     map["IsDistinctFrom"] = std::bind(&OptimizeDistinctFrom<false>, _1, _2);
 
     map["StartsWith"] = map["EndsWith"] = map["StringContains"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& /*optCtx*/) {
+        if (node->Head().GetTypeAnn()->GetKind() == ETypeAnnotationKind::Pg || node->Tail().GetTypeAnn()->GetKind() == ETypeAnnotationKind::Pg) {
+            TExprNodeList converted;
+            for (auto& child : node->ChildrenList()) {
+                const bool isPg = child->GetTypeAnn()->GetKind() == ETypeAnnotationKind::Pg;
+                converted.emplace_back(ctx.WrapByCallableIf(isPg, "FromPg", std::move(child)));
+            }
+            YQL_CLOG(DEBUG, Core) << "Converting Pg strings to YQL strings in " << node->Content();
+            return ctx.ChangeChildren(*node, std::move(converted));
+        }
+
         if (node->Tail().IsCallable("String") && node->Tail().Head().Content().empty()) {
             YQL_CLOG(DEBUG, Core) << node->Content() << " with empty string in second argument";
             if (node->GetTypeAnn()->GetKind() == ETypeAnnotationKind::Optional) {
@@ -4674,6 +5000,20 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
 
     map["Top"] = std::bind(&OptimizeReorder<true, false>, _1, _2);
     map["TopSort"] = std::bind(&OptimizeReorder<true, true>, _1, _2);
+
+    map["AssumeStrict"] = map["AssumeNonStrict"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& /*optCtx*/) {
+        if (node->Head().IsCallable({"AssumeStrict", "AssumeNonStrict"})) {
+            YQL_CLOG(DEBUG, Core) << node->Content() << " over " << node->Head().Content();
+            return ctx.ChangeChild(*node, 0, node->Head().HeadPtr());
+        }
+        const auto maybeStrict = IsStrictNoRecurse(node->Head());
+        if (maybeStrict.Defined() && *maybeStrict == node->IsCallable("AssumeStrict")) {
+            YQL_CLOG(DEBUG, Core) << "Drop " << node->Content() << " over "
+                << (*maybeStrict ? "strict " : "non strict ") << node->Head().Content();
+            return node->HeadPtr();
+        }
+        return node;
+    };
 
     map["Minus"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& /*optCtx*/) {
         if (node->Head().IsCallable("Minus")) {
@@ -4732,6 +5072,10 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
         if (auto normalized = Normalize(self, ctx); normalized != node) {
             YQL_CLOG(DEBUG, Core) << "Normalized " << node->Content() << " payloads";
             return normalized;
+        }
+
+        if (auto clean = RemoveDeadPayloadColumns(self, ctx); clean != node) {
+            return clean;
         }
 
         return DropReorder<false>(node, ctx);
@@ -6160,11 +6504,11 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
     };
 
     map["PgSelect"] = &ExpandPgSelect;
+    map["PgIterate"] = &ExpandPgIterate;
+    map["PgIterateAll"] = &ExpandPgIterate;
 
     map["PgLike"] = &ExpandPgLike;
     map["PgILike"] = &ExpandPgLike;
-
-    map["PgIn"] = &ExpandPgIn;
 
     map["PgBetween"] = &ExpandPgBetween;
     map["PgBetweenSym"] = &ExpandPgBetween;
@@ -6235,6 +6579,10 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
     map["PgAnd"] = std::bind(&ExpandPgAnd, _1, _2);
     map["PgOr"] = std::bind(&ExpandPgOr, _1, _2);
     map["PgNot"] = std::bind(&ExpandPgNot, _1, _2);
+    map["PgIsTrue"] = std::bind(&ExpandPgIsTrue, _1, _2);
+    map["PgIsFalse"] = std::bind(&ExpandPgIsFalse, _1, _2);
+    map["PgIsUnknown"] = std::bind(&ExpandPgIsUnknown, _1, _2);
+    map["PgCast"] = std::bind(&OptimizePgCastOverPgConst, _1, _2);
 
     map["Ensure"] = [](const TExprNode::TPtr& node, TExprContext& /*ctx*/, TOptimizeContext& /*optCtx*/) {
         TCoEnsure self(node);
@@ -6252,17 +6600,37 @@ void RegisterCoSimpleCallables1(TCallableOptimizerMap& map) {
         return node;
     };
 
-    map["ShuffleByKeys"] = map["PartitionsByKeys"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+    map["PartitionsByKeys"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
+        if (IsEmpty(node->Head(), *optCtx.Types)) {
+            if (FindNode(&node->Tail(),
+                    [](const TExprNode::TPtr& child) { return child->IsCallable({"EmptyIterator", "ToFlow"}) && child->ChildrenSize() > 1;})) {
+                return node;
+            }
+            YQL_CLOG(DEBUG, Core) << node->Content() << " over empty input.";
+
+            TExprNode::TPtr sequence = KeepConstraints(node->HeadPtr(), node->Tail().Head().Head(), ctx);
+            auto lambdaResult = ctx.Builder(node->Pos()).Apply(node->Tail()).With(0, sequence).Seal().Build();
+            return lambdaResult;
+        }
+        return node;
+    };
+
+    map["ShuffleByKeys"] = [](const TExprNode::TPtr& node, TExprContext& ctx, TOptimizeContext& optCtx) {
         if (IsEmpty(node->Head(), *optCtx.Types)) {
             YQL_CLOG(DEBUG, Core) << node->Content() << " over empty input.";
-            auto lambdaResult = ctx.Builder(node->Pos()).Apply(node->Tail()).With(0, KeepConstraints(node->HeadPtr(), node->Tail().Head().Head(), ctx)).Seal().Build();
-            if (node->IsCallable("ShuffleByKeys")) {
-                auto lambdaType = node->Tail().GetTypeAnn();
-                if (lambdaType->GetKind() == ETypeAnnotationKind::Optional) {
-                    lambdaResult = ctx.NewCallable(lambdaResult->Pos(), "ToList", { lambdaResult });
-                } else if (lambdaType->GetKind() == ETypeAnnotationKind::Stream) {
-                    lambdaResult = ctx.NewCallable(lambdaResult->Pos(), "ForwardList", { lambdaResult });
-                }
+
+            auto& lambdaArg = node->Tail().Head().Head();
+
+            TExprNode::TPtr sequence = node->HeadPtr(); // param (list)
+            sequence = ctx.NewCallable(sequence->Pos(), "ToStream", { sequence }); // lambda accepts stream, but we have list type
+            sequence = KeepConstraints(sequence, lambdaArg, ctx);
+
+            auto lambdaResult = ctx.Builder(node->Pos()).Apply(node->Tail()).With(0, sequence).Seal().Build();
+            auto lambdaType = node->Tail().GetTypeAnn();
+            if (lambdaType->GetKind() == ETypeAnnotationKind::Optional) {
+                lambdaResult = ctx.NewCallable(lambdaResult->Pos(), "ToList", { lambdaResult });
+            } else if (lambdaType->GetKind() == ETypeAnnotationKind::Stream || lambdaType->GetKind() == ETypeAnnotationKind::Flow) {
+                lambdaResult = ctx.NewCallable(lambdaResult->Pos(), "ForwardList", { lambdaResult });
             }
             return lambdaResult;
         }

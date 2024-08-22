@@ -150,9 +150,6 @@ void TToken::ExpectTypes(const std::vector<ETokenType>& expectedTypes) const
     if (expectedTypes.size() == 1) {
         ExpectType(expectedTypes.front());
     } else if (std::find(expectedTypes.begin(), expectedTypes.end(), Type_) == expectedTypes.end()) {
-        auto typeStrings = ConvertToStrings(expectedTypes, [] (TStringBuilderBase* builder, ETokenType type) {
-            builder->AppendFormat("Qlv", type);
-        });
         auto typesString = JoinToString(
             expectedTypes,
             [] (TStringBuilderBase* builder, ETokenType type) {
@@ -208,29 +205,37 @@ void TToken::Reset()
     BooleanValue_ = false;
 }
 
-TString ToString(const TToken& token)
+// TODO(arkady-e1ppa): Consider doing ToString anyway (e.g. with spec = 'v')
+// and then applying spec to the string value.
+void FormatValue(TStringBuilderBase* builder, const TToken& token, TStringBuf spec)
 {
     switch (token.GetType()) {
         case ETokenType::EndOfStream:
-            return TString();
+            FormatValue(builder, TStringBuf{}, spec);
+            break;
 
         case ETokenType::String:
-            return TString(token.GetStringValue());
+            FormatValue(builder, token.GetStringValue(), spec);
+            break;
 
         case ETokenType::Int64:
-            return ::ToString(token.GetInt64Value());
+            FormatValue(builder, token.GetInt64Value(), spec);
+            break;
 
         case ETokenType::Uint64:
-            return ::ToString(token.GetUint64Value());
+            FormatValue(builder, token.GetUint64Value(), spec);
+            break;
 
         case ETokenType::Double:
-            return ::ToString(token.GetDoubleValue());
+            FormatValue(builder, token.GetDoubleValue(), spec);
+            break;
 
         case ETokenType::Boolean:
-            return TString(FormatBool(token.GetBooleanValue()));
+            FormatValue(builder, FormatBool(token.GetBooleanValue()), spec);
+            break;
 
         default:
-            return TokenTypeToString(token.GetType());
+            FormatValue(builder, TokenTypeToString(token.GetType()), spec);
     }
 }
 

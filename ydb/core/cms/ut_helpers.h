@@ -4,6 +4,7 @@
 
 #include <ydb/core/blobstorage/base/blobstorage_events.h>
 #include <ydb/core/protos/cms.pb.h>
+#include <ydb/public/api/protos/draft/ydb_maintenance.pb.h>
 #include <ydb/library/aclib/aclib.h>
 
 namespace NKikimr::NCmsTest {
@@ -67,16 +68,47 @@ void AddActions(TAutoPtr<NCms::TEvCms::TEvPermissionRequest> &event, const NKiki
     AddActions(event, actions...);
 }
 
+struct TRequestOptions {
+    TString User;
+    bool Partial;
+    bool DryRun;
+    bool Schedule;
+    bool EvictVDisks;
+
+    explicit TRequestOptions(const TString &user, bool partial, bool dry, bool schedule)
+        : User(user)
+        , Partial(partial)
+        , DryRun(dry)
+        , Schedule(schedule)
+        , EvictVDisks(false)
+    {}
+
+    explicit TRequestOptions(const TString &user)
+        : TRequestOptions(user, false, false, false)
+    {}
+
+    TRequestOptions& WithEvictVDisks() {
+        EvictVDisks = true;
+        return *this;
+    }
+};
+
 template <typename... Ts>
-TAutoPtr<NCms::TEvCms::TEvPermissionRequest> MakePermissionRequest(const TString &user, bool partial, bool dry, bool schedule, Ts... actions) {
+TAutoPtr<NCms::TEvCms::TEvPermissionRequest> MakePermissionRequest(const TRequestOptions &opts, Ts... actions) {
     TAutoPtr<NCms::TEvCms::TEvPermissionRequest> event = new NCms::TEvCms::TEvPermissionRequest;
-    event->Record.SetUser(user);
-    event->Record.SetPartialPermissionAllowed(partial);
-    event->Record.SetDryRun(dry);
-    event->Record.SetSchedule(schedule);
+    event->Record.SetUser(opts.User);
+    event->Record.SetPartialPermissionAllowed(opts.Partial);
+    event->Record.SetDryRun(opts.DryRun);
+    event->Record.SetSchedule(opts.Schedule);
+    event->Record.SetEvictVDisks(opts.EvictVDisks);
     AddActions(event, actions...);
 
     return event;
+}
+
+template <typename... Ts>
+TAutoPtr<NCms::TEvCms::TEvPermissionRequest> MakePermissionRequest(const TString &user, bool partial, bool dry, bool schedule, Ts... actions) {
+    return MakePermissionRequest(TRequestOptions(user, partial, dry, schedule), actions...);
 }
 
 inline void AddPermissions(TAutoPtr<NCms::TEvCms::TEvManagePermissionRequest> &ev, const TString &id) {
@@ -309,6 +341,63 @@ inline NKikimrWhiteboard::TSystemStateInfo MakeSystemStateInfo(const TString &ve
     }
 
     return result;
+}
+
+inline void AddActionsToGroup(
+        Ydb::Maintenance::ActionGroup &group,
+        const Ydb::Maintenance::Action &action) 
+{
+    group.add_actions()->CopyFrom(action);
+}
+
+template <typename... Ts>
+void AddActionsToGroup(
+        Ydb::Maintenance::ActionGroup &group,
+        const Ydb::Maintenance::Action &action, Ts... actions) 
+{
+    AddActionsToGroup(group, action);
+    AddActionsToGroup(group, actions...);
+}
+
+template <typename... Ts>
+Ydb::Maintenance::ActionGroup MakeActionGroup(Ts... actions) 
+{
+    Ydb::Maintenance::ActionGroup group;
+    AddActionsToGroup(group, actions...);
+    return group;
+}
+
+inline Ydb::Maintenance::ActionGroup MakeActionGroup(const Ydb::Maintenance::Action &action) 
+{
+    Ydb::Maintenance::ActionGroup group;
+    AddActionsToGroup(group, action);
+    return group;
+}
+
+inline Ydb::Maintenance::Action MakeLockAction(ui32 nodeId, TDuration duration) {
+    Ydb::Maintenance::Action action;
+    auto *lockAction = action.mutable_lock_action();
+
+    lockAction->mutable_scope()->set_node_id(nodeId);
+    lockAction->mutable_duration()->set_seconds(static_cast<i64>(duration.Seconds()));
+
+    return action;
+}
+
+inline void AddActionGroups(
+        Ydb::Maintenance::CreateMaintenanceTaskRequest &req,
+        const Ydb::Maintenance::ActionGroup &actionGroup) 
+{
+    req.add_action_groups()->CopyFrom(actionGroup);
+}
+
+template <typename... Ts>
+void AddActionGroups(
+        Ydb::Maintenance::CreateMaintenanceTaskRequest &req,
+        const Ydb::Maintenance::ActionGroup &actionGroup, Ts... actionGroups) 
+{
+    AddActionGroups(req, actionGroup);
+    AddActionGroups(req, actionGroups...);
 }
 
 }

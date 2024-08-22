@@ -5,7 +5,7 @@
 
 from shlex import quote
 
-bashcode = r"""
+bashcode = r"""#compdef %(executables)s
 # Run something, muting output or redirecting it to the debug stream
 # depending on the value of _ARC_DEBUG.
 # If ARGCOMPLETE_USE_TEMPFILES is set, use tempfiles for IPC.
@@ -24,9 +24,9 @@ __python_argcomplete_run() {
 
 __python_argcomplete_run_inner() {
     if [[ -z "${_ARC_DEBUG-}" ]]; then
-        "$@" 8>&1 9>&2 1>/dev/null 2>&1
+        "$@" 8>&1 9>&2 1>/dev/null 2>&1 </dev/null
     else
-        "$@" 8>&1 9>&2 1>&9 2>&1
+        "$@" 8>&1 9>&2 1>&9 2>&1 </dev/null
     fi
 }
 
@@ -42,7 +42,15 @@ _python_argcomplete%(function_suffix)s() {
             _ARGCOMPLETE_SHELL="zsh" \
             _ARGCOMPLETE_SUPPRESS_SPACE=1 \
             __python_argcomplete_run ${script:-${words[1]}}))
-        _describe "${words[1]}" completions -o nosort
+        local nosort=()
+        local nospace=()
+        if is-at-least 5.8; then
+            nosort=(-o nosort)
+        fi
+        if [[ "${completions-}" =~ ([^\\]): && "${match[1]}" =~ [=/:] ]]; then
+            nospace=(-S '')
+        fi
+        _describe "${words[1]}" completions "${nosort[@]}" "${nospace[@]}"
     else
         local SUPPRESS_SPACE=0
         if compopt +o nospace 2> /dev/null; then
@@ -67,7 +75,16 @@ _python_argcomplete%(function_suffix)s() {
 if [[ -z "${ZSH_VERSION-}" ]]; then
     complete %(complete_opts)s -F _python_argcomplete%(function_suffix)s %(executables)s
 else
-    compdef _python_argcomplete%(function_suffix)s %(executables)s
+    # When called by the Zsh completion system, this will end with
+    # "loadautofunc" when initially autoloaded and "shfunc" later on, otherwise,
+    # the script was "eval"-ed so use "compdef" to register it with the
+    # completion system
+    autoload is-at-least
+    if [[ $zsh_eval_context == *func ]]; then
+        _python_argcomplete%(function_suffix)s "$@"
+    else
+        compdef _python_argcomplete%(function_suffix)s %(executables)s
+    fi
 fi
 """
 

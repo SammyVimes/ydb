@@ -7,7 +7,7 @@
 #include <yt/yt/core/yson/public.h>
 #include <yt/yt/core/ytree/public.h>
 
-#include <yt/yt/core/misc/ref_counted.h>
+#include <library/cpp/yt/memory/ref_counted.h>
 
 #include <library/cpp/yt/misc/enum.h>
 
@@ -104,6 +104,7 @@ private:
 DEFINE_REFCOUNTED_TYPE(TLogicalType)
 
 TString ToString(const TLogicalType& logicalType);
+void FormatValue(TStringBuilderBase* builder, const TLogicalType& logicalType, TStringBuf /*spec*/);
 
 //! Debug printers for Gtest unittests.
 void PrintTo(ELogicalMetatype type, std::ostream* os);
@@ -111,9 +112,7 @@ void PrintTo(const TLogicalType& type, std::ostream* os);
 void PrintTo(const TLogicalTypePtr& type, std::ostream* os);
 
 bool operator == (const TLogicalType& lhs, const TLogicalType& rhs);
-bool operator != (const TLogicalType& lhs, const TLogicalType& rhs);
 bool operator == (const TLogicalTypePtr& lhs, const TLogicalTypePtr& rhs) = delete;
-bool operator != (const TLogicalTypePtr& lhs, const TLogicalTypePtr& rhs) = delete;
 
 void ValidateLogicalType(const TComplexTypeFieldDescriptor& descriptor, std::optional<int> depthLimit = std::nullopt);
 

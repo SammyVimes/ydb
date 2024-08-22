@@ -6,14 +6,6 @@ assert sys.platform == "win32"
 
 import os
 from ctypes import ArgumentError, byref, c_char, c_long, c_uint, c_ulong, pointer
-
-from ..utils import SPHINX_AUTODOC_RUNNING
-
-# Do not import win32-specific stuff when generating documentation.
-# Otherwise RTD would be unable to generate docs for this module.
-if not SPHINX_AUTODOC_RUNNING:
-    from ctypes import windll
-
 from ctypes.wintypes import DWORD, HANDLE
 from typing import Callable, TextIO, TypeVar
 
@@ -29,8 +21,15 @@ from prompt_toolkit.win32_types import (
     STD_OUTPUT_HANDLE,
 )
 
+from ..utils import SPHINX_AUTODOC_RUNNING
 from .base import Output
 from .color_depth import ColorDepth
+
+# Do not import win32-specific stuff when generating documentation.
+# Otherwise RTD would be unable to generate docs for this module.
+if not SPHINX_AUTODOC_RUNNING:
+    from ctypes import windll
+
 
 __all__ = [
     "Win32Output",
@@ -74,11 +73,11 @@ class NoConsoleScreenBufferError(Exception):
 
         if xterm:
             message = (
-                "Found %s, while expecting a Windows console. "
+                "Found {}, while expecting a Windows console. "
                 'Maybe try to run this program using "winpty" '
                 "or run it in cmd.exe instead. Or otherwise, "
                 "in case of Cygwin, use the Python executable "
-                "that is compiled for Cygwin." % os.environ["TERM"]
+                "that is compiled for Cygwin.".format(os.environ["TERM"])
             )
         else:
             message = "No Windows console found. Are you running cmd.exe?"
@@ -164,13 +163,13 @@ class Win32Output(Output):
         self.flush()
 
         if _DEBUG_RENDER_OUTPUT:
-            self.LOG.write(("%r" % func.__name__).encode("utf-8") + b"\n")
+            self.LOG.write((f"{func.__name__!r}").encode() + b"\n")
             self.LOG.write(
-                b"     " + ", ".join(["%r" % i for i in a]).encode("utf-8") + b"\n"
+                b"     " + ", ".join([f"{i!r}" for i in a]).encode("utf-8") + b"\n"
             )
             self.LOG.write(
                 b"     "
-                + ", ".join(["%r" % type(i) for i in a]).encode("utf-8")
+                + ", ".join([f"{type(i)!r}" for i in a]).encode("utf-8")
                 + b"\n"
             )
             self.LOG.flush()
@@ -371,7 +370,7 @@ class Win32Output(Output):
         data = "".join(self._buffer)
 
         if _DEBUG_RENDER_OUTPUT:
-            self.LOG.write(("%r" % data).encode("utf-8") + b"\n")
+            self.LOG.write((f"{data!r}").encode() + b"\n")
             self.LOG.flush()
 
         # Print characters one by one. This appears to be the best solution

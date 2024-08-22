@@ -8,6 +8,8 @@
 
 namespace NKikimr::NArrow {
 
+class TGeneralContainer;
+
 enum class ECompareType {
     LESS = 1,
     LESS_OR_EQUAL,
@@ -46,19 +48,24 @@ private:
 
     static ui32 CrossSize(const ui32 s1, const ui32 f1, const ui32 s2, const ui32 f2);
     class TMergerImpl;
-    void Add(const bool value, const ui32 count = 1);
     void Reset(const ui32 count);
     void ResetCaches() const {
         FilterPlain.reset();
         FilteredCount.reset();
     }
 public:
+    void Append(const TColumnFilter& filter);
+    void Add(const bool value, const ui32 count = 1);
     std::optional<ui32> GetFilteredCount() const;
     const std::vector<bool>& BuildSimpleFilter() const;
     std::shared_ptr<arrow::BooleanArray> BuildArrowFilter(const ui32 expectedSize, const std::optional<ui32> startPos = {}, const std::optional<ui32> count = {}) const;
 
     ui64 GetDataSize() const {
         return Filter.capacity() * sizeof(ui32) + Count * sizeof(bool);
+    }
+
+    static ui64 GetPredictedMemorySize(const ui32 recordsCount) {
+        return 2 /* capacity */ * recordsCount * (sizeof(ui32) + sizeof(bool));
     }
 
     class TIterator {
@@ -147,6 +154,27 @@ public:
         Add(currentValue, sameValueCount);
     }
 
+    template <class TGetterLambda>
+    struct TAdapterLambda {
+    private:
+        TGetterLambda Getter;
+    public:
+        TAdapterLambda(const TGetterLambda& getter)
+            : Getter(getter)
+        {
+
+        }
+
+        bool operator[](const ui32 index) const {
+            return Getter(index);
+        }
+    };
+
+    template <class TGetterLambda>
+    void ResetWithLambda(const ui32 count, const TGetterLambda getter) {
+        return Reset(count, TAdapterLambda<TGetterLambda>(getter));
+    }
+
     ui32 Size() const {
         return Count;
     }
@@ -171,8 +199,9 @@ public:
     // It makes a filter using composite predicate
     static TColumnFilter MakePredicateFilter(const arrow::Datum& datum, const arrow::Datum& border, ECompareType compareType);
 
-    bool Apply(std::shared_ptr<arrow::Table>& batch, const std::optional<ui32> startPos = {}, const std::optional<ui32> count = {});
-    bool Apply(std::shared_ptr<arrow::RecordBatch>& batch, const std::optional<ui32> startPos = {}, const std::optional<ui32> count = {});
+    bool Apply(std::shared_ptr<TGeneralContainer>& batch, const std::optional<ui32> startPos = {}, const std::optional<ui32> count = {}) const;
+    bool Apply(std::shared_ptr<arrow::Table>& batch, const std::optional<ui32> startPos = {}, const std::optional<ui32> count = {}) const;
+    bool Apply(std::shared_ptr<arrow::RecordBatch>& batch, const std::optional<ui32> startPos = {}, const std::optional<ui32> count = {}) const;
     void Apply(const ui32 expectedRecordsCount, std::vector<arrow::Datum*>& datums) const;
 
     // Combines filters by 'and' operator (extFilter count is true positions count in self, thought extFitler patch exactly that positions)

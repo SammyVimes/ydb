@@ -1,8 +1,25 @@
 #pragma once
-#include <library/cpp/monlib/dynamic_counters/counters.h>
 #include "common/owner.h"
+#include "initialization.h"
+#include "tx_progress.h"
+
+#include <ydb/core/tx/columnshard/counters/tablet_counters.h>
+
+#include <library/cpp/monlib/dynamic_counters/counters.h>
+#include <util/generic/hash_set.h>
 
 namespace NKikimr::NColumnShard {
+
+enum class EWriteFailReason {
+    Disabled /* "disabled" */,
+    PutBlob /* "put_blob" */,
+    LongTxDuplication /* "long_tx_duplication" */,
+    NoTable /* "no_table" */,
+    IncorrectSchema /* "incorrect_schema" */,
+    Overload /* "overload" */,
+    OverlimitReadRawMemory /* "overlimit_read_raw_memory" */,
+    OverlimitReadBlobMemory /* "overlimit_read_blob_memory" */
+};
 
 class TCSCounters: public TCommonCountersOwner {
 private:
@@ -22,10 +39,18 @@ private:
     NMonitoring::TDynamicCounters::TCounterPtr FutureIndexationInputBytes;
     NMonitoring::TDynamicCounters::TCounterPtr IndexationInputBytes;
 
+    NMonitoring::TDynamicCounters::TCounterPtr IndexMetadataLimitBytes;
+
     NMonitoring::TDynamicCounters::TCounterPtr OverloadInsertTableBytes;
     NMonitoring::TDynamicCounters::TCounterPtr OverloadInsertTableCount;
-    NMonitoring::TDynamicCounters::TCounterPtr OverloadShardBytes;
-    NMonitoring::TDynamicCounters::TCounterPtr OverloadShardCount;
+    NMonitoring::TDynamicCounters::TCounterPtr OverloadMetadataBytes;
+    NMonitoring::TDynamicCounters::TCounterPtr OverloadMetadataCount;
+    NMonitoring::TDynamicCounters::TCounterPtr OverloadShardTxBytes;
+    NMonitoring::TDynamicCounters::TCounterPtr OverloadShardTxCount;
+    NMonitoring::TDynamicCounters::TCounterPtr OverloadShardWritesBytes;
+    NMonitoring::TDynamicCounters::TCounterPtr OverloadShardWritesCount;
+    NMonitoring::TDynamicCounters::TCounterPtr OverloadShardWritesSizeBytes;
+    NMonitoring::TDynamicCounters::TCounterPtr OverloadShardWritesSizeCount;
 
     std::shared_ptr<TValueAggregationClient> InternalCompactionGranuleBytes;
     std::shared_ptr<TValueAggregationClient> InternalCompactionGranulePortionsCount;
@@ -39,54 +64,61 @@ private:
     NMonitoring::THistogramPtr HistogramSuccessWriteMiddle3PutBlobsDurationMs;
     NMonitoring::THistogramPtr HistogramSuccessWriteMiddle4PutBlobsDurationMs;
     NMonitoring::THistogramPtr HistogramSuccessWriteMiddle5PutBlobsDurationMs;
+    NMonitoring::THistogramPtr HistogramSuccessWriteMiddle6PutBlobsDurationMs;
     NMonitoring::THistogramPtr HistogramFailedWritePutBlobsDurationMs;
     NMonitoring::THistogramPtr HistogramWriteTxCompleteDurationMs;
+
     NMonitoring::TDynamicCounters::TCounterPtr WritePutBlobsCount;
     NMonitoring::TDynamicCounters::TCounterPtr WriteRequests;
-    NMonitoring::TDynamicCounters::TCounterPtr FailedWriteRequests;
+    THashMap<EWriteFailReason, NMonitoring::TDynamicCounters::TCounterPtr> FailedWriteRequests;
     NMonitoring::TDynamicCounters::TCounterPtr SuccessWriteRequests;
+
 public:
+    const TCSInitialization Initialization;
+    TTxProgressCounters TxProgress;
+
     void OnStartWriteRequest() const {
         WriteRequests->Add(1);
     }
 
-    void OnFailedWriteResponse() const {
-        WriteRequests->Sub(1);
-        FailedWriteRequests->Add(1);
-    }
+    void OnFailedWriteResponse(const EWriteFailReason reason) const;
 
     void OnSuccessWriteResponse() const {
         WriteRequests->Sub(1);
         SuccessWriteRequests->Add(1);
     }
 
-    void OnWritePutBlobsSuccess(const ui32 milliseconds) const {
-        HistogramSuccessWritePutBlobsDurationMs->Collect(milliseconds);
+    void OnWritePutBlobsSuccess(const TDuration d) const {
+        HistogramSuccessWritePutBlobsDurationMs->Collect(d.MilliSeconds());
         WritePutBlobsCount->Sub(1);
     }
 
-    void OnWriteMiddle1PutBlobsSuccess(const ui32 milliseconds) const {
-        HistogramSuccessWriteMiddle1PutBlobsDurationMs->Collect(milliseconds);
+    void OnWriteMiddle1PutBlobsSuccess(const TDuration d) const {
+        HistogramSuccessWriteMiddle1PutBlobsDurationMs->Collect(d.MilliSeconds());
     }
 
-    void OnWriteMiddle2PutBlobsSuccess(const ui32 milliseconds) const {
-        HistogramSuccessWriteMiddle2PutBlobsDurationMs->Collect(milliseconds);
+    void OnWriteMiddle2PutBlobsSuccess(const TDuration d) const {
+        HistogramSuccessWriteMiddle2PutBlobsDurationMs->Collect(d.MilliSeconds());
     }
 
-    void OnWriteMiddle3PutBlobsSuccess(const ui32 milliseconds) const {
-        HistogramSuccessWriteMiddle3PutBlobsDurationMs->Collect(milliseconds);
+    void OnWriteMiddle3PutBlobsSuccess(const TDuration d) const {
+        HistogramSuccessWriteMiddle3PutBlobsDurationMs->Collect(d.MilliSeconds());
     }
 
-    void OnWriteMiddle4PutBlobsSuccess(const ui32 milliseconds) const {
-        HistogramSuccessWriteMiddle4PutBlobsDurationMs->Collect(milliseconds);
+    void OnWriteMiddle4PutBlobsSuccess(const TDuration d) const {
+        HistogramSuccessWriteMiddle4PutBlobsDurationMs->Collect(d.MilliSeconds());
     }
 
-    void OnWriteMiddle5PutBlobsSuccess(const ui32 milliseconds) const {
-        HistogramSuccessWriteMiddle5PutBlobsDurationMs->Collect(milliseconds);
+    void OnWriteMiddle5PutBlobsSuccess(const TDuration d) const {
+        HistogramSuccessWriteMiddle5PutBlobsDurationMs->Collect(d.MilliSeconds());
     }
 
-    void OnWritePutBlobsFail(const ui32 milliseconds) const {
-        HistogramFailedWritePutBlobsDurationMs->Collect(milliseconds);
+    void OnWriteMiddle6PutBlobsSuccess(const TDuration d) const {
+        HistogramSuccessWriteMiddle6PutBlobsDurationMs->Collect(d.MilliSeconds());
+    }
+
+    void OnWritePutBlobsFail(const TDuration d) const {
+        HistogramFailedWritePutBlobsDurationMs->Collect(d.MilliSeconds());
         WritePutBlobsCount->Sub(1);
     }
 
@@ -94,8 +126,8 @@ public:
         WritePutBlobsCount->Add(1);
     }
 
-    void OnWriteTxComplete(const ui32 milliseconds) const {
-        HistogramWriteTxCompleteDurationMs->Collect(milliseconds);
+    void OnWriteTxComplete(const TDuration d) const {
+        HistogramWriteTxCompleteDurationMs->Collect(d.MilliSeconds());
     }
 
     void OnInternalCompactionInfo(const ui64 bytes, const ui32 portionsCount) const {
@@ -108,14 +140,29 @@ public:
         SplitCompactionGranulePortionsCount->SetValue(portionsCount);
     }
 
-    void OnOverloadInsertTable(const ui64 size) const {
+    void OnWriteOverloadInsertTable(const ui64 size) const {
         OverloadInsertTableBytes->Add(size);
         OverloadInsertTableCount->Add(1);
     }
 
-    void OnOverloadShard(const ui64 size) const {
-        OverloadShardBytes->Add(size);
-        OverloadShardCount->Add(1);
+    void OnWriteOverloadMetadata(const ui64 size) const {
+        OverloadMetadataBytes->Add(size);
+        OverloadMetadataCount->Add(1);
+    }
+
+    void OnWriteOverloadShardTx(const ui64 size) const {
+        OverloadShardTxBytes->Add(size);
+        OverloadShardTxCount->Add(1);
+    }
+
+    void OnWriteOverloadShardWrites(const ui64 size) const {
+        OverloadShardWritesBytes->Add(size);
+        OverloadShardWritesCount->Add(1);
+    }
+
+    void OnWriteOverloadShardWritesSize(const ui64 size) const {
+        OverloadShardWritesSizeBytes->Add(size);
+        OverloadShardWritesSizeCount->Add(1);
     }
 
     void SkipIndexationInputDueToSplitCompaction(const ui64 size) const {
@@ -134,6 +181,10 @@ public:
 
     void IndexationInput(const ui64 size) const {
         IndexationInputBytes->Add(size);
+    }
+
+    void OnIndexMetadataLimit(const ui64 limit) const {
+        IndexMetadataLimitBytes->Set(limit);
     }
 
     void OnStartBackground() const {

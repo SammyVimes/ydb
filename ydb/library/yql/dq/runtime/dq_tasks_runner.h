@@ -22,6 +22,10 @@
 #include <util/generic/size_literals.h>
 #include <util/system/types.h>
 
+namespace NActors {
+    class TActorSystem;
+};
+
 namespace NYql::NDq {
 
 enum class ERunStatus : ui32 {
@@ -44,6 +48,14 @@ struct TTaskRunnerStatsBase {
     TDuration ComputeCpuTime;
     TDuration WaitInputTime;
     TDuration WaitOutputTime;
+
+    ui64 SpillingComputeWriteBytes;
+    ui64 SpillingChannelWriteBytes;
+
+    TDuration SpillingComputeReadTime;
+    TDuration SpillingComputeWriteTime;
+    TDuration SpillingChannelReadTime;
+    TDuration SpillingChannelWriteTime;
 
     // profile stats
     NMonitoring::IHistogramCollectorPtr ComputeCpuTimeByRun; // in millis
@@ -117,7 +129,6 @@ struct TDqTaskRunnerContext {
     NKikimr::NMiniKQL::TComputationNodeFactory ComputationFactory;
     NUdf::IApplyContext* ApplyCtx = nullptr;
     NKikimr::NMiniKQL::TCallableVisitFuncProvider FuncProvider;
-    NKikimr::NMiniKQL::TScopedAlloc* Alloc = nullptr;
     NKikimr::NMiniKQL::TTypeEnvironment* TypeEnv = nullptr;
     std::shared_ptr<NKikimr::NMiniKQL::TComputationPatternLRUCache> PatternCache;
 };
@@ -132,7 +143,13 @@ public:
         const NKikimr::NMiniKQL::THolderFactory& holderFactory,
         TVector<IDqOutput::TPtr>&& outputs) const = 0;
 
-    virtual IDqChannelStorage::TPtr CreateChannelStorage(ui64 channelId) const = 0;
+    virtual IDqChannelStorage::TPtr CreateChannelStorage(ui64 channelId, bool withSpilling) const = 0;
+    virtual IDqChannelStorage::TPtr CreateChannelStorage(ui64 channelId, bool withSpilling, NActors::TActorSystem* actorSystem) const = 0;
+
+    virtual TWakeUpCallback GetWakeupCallback() const = 0;
+    virtual TErrorCallback GetErrorCallback() const = 0;
+    virtual TIntrusivePtr<TSpillingTaskCounters> GetSpillingTaskCounters() const = 0;
+    virtual TTxId GetTxId() const = 0;
 };
 
 class TDqTaskRunnerExecutionContextBase : public IDqTaskRunnerExecutionContext {
@@ -146,9 +163,30 @@ public:
 
 class TDqTaskRunnerExecutionContextDefault : public TDqTaskRunnerExecutionContextBase {
 public:
-    IDqChannelStorage::TPtr CreateChannelStorage(ui64 /*channelId*/) const override {
+    IDqChannelStorage::TPtr CreateChannelStorage(ui64 /*channelId*/, bool /*withSpilling*/) const override {
         return {};
     };
+
+    IDqChannelStorage::TPtr CreateChannelStorage(ui64 /*channelId*/, bool /*withSpilling*/, NActors::TActorSystem* /*actorSystem*/) const override {
+        return {};
+    };
+
+    TWakeUpCallback GetWakeupCallback() const override {
+        return {};
+    }
+
+    TErrorCallback GetErrorCallback() const override {
+        return {};
+    }
+
+    TIntrusivePtr<TSpillingTaskCounters> GetSpillingTaskCounters() const override {
+        return {};
+    }
+
+    TTxId GetTxId() const override {
+        return {};
+    }
+
 };
 
 struct TDqTaskRunnerSettings {
@@ -332,6 +370,10 @@ public:
         return Task_->GetRequestContext();
     }
 
+    bool GetEnableSpilling() const {
+        return Task_->HasEnableSpilling() && Task_->GetEnableSpilling();
+    }
+
 private:
 
     // external callback to retrieve parameter value.
@@ -358,7 +400,7 @@ public:
     virtual IDqAsyncInputBuffer::TPtr GetSource(ui64 inputIndex) = 0;
     virtual IDqOutputChannel::TPtr GetOutputChannel(ui64 channelId) = 0;
     virtual IDqAsyncOutputBuffer::TPtr GetSink(ui64 outputIndex) = 0;
-    virtual std::pair<NUdf::TUnboxedValue, IDqAsyncInputBuffer::TPtr> GetInputTransform(ui64 inputIndex) = 0;
+    virtual std::optional<std::pair<NUdf::TUnboxedValue, IDqAsyncInputBuffer::TPtr>> GetInputTransform(ui64 inputIndex) = 0;
     virtual std::pair<IDqAsyncOutputBuffer::TPtr, IDqOutputConsumer::TPtr> GetOutputTransform(ui64 outputIndex) = 0;
 
     virtual IRandomProvider* GetRandomProvider() const = 0;
@@ -370,7 +412,7 @@ public:
     virtual bool IsAllocatorAttached() = 0;
     virtual const NKikimr::NMiniKQL::TTypeEnvironment& GetTypeEnv() const = 0;
     virtual const NKikimr::NMiniKQL::THolderFactory& GetHolderFactory() const = 0;
-    virtual std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> GetAllocatorPtr() const = 0;
+    virtual NKikimr::NMiniKQL::TScopedAlloc& GetAllocator() const = 0;
 
     virtual const THashMap<TString, TString>& GetSecureParams() const = 0;
     virtual const THashMap<TString, TString>& GetTaskParams() const = 0;
@@ -385,10 +427,16 @@ public:
 
     virtual void SetWatermarkIn(TInstant time) = 0;
     virtual const NKikimr::NMiniKQL::TWatermark& GetWatermark() const = 0;
+
+    virtual void SetSpillerFactory(std::shared_ptr<NKikimr::NMiniKQL::ISpillerFactory> spillerFactory) = 0;
 };
 
-TIntrusivePtr<IDqTaskRunner> MakeDqTaskRunner(const TDqTaskRunnerContext& ctx, const TDqTaskRunnerSettings& settings,
-    const TLogFunc& logFunc);
+TIntrusivePtr<IDqTaskRunner> MakeDqTaskRunner(
+    std::shared_ptr<NKikimr::NMiniKQL::TScopedAlloc> alloc, 
+    const TDqTaskRunnerContext& ctx, 
+    const TDqTaskRunnerSettings& settings,
+    const TLogFunc& logFunc
+);
 
 } // namespace NYql::NDq
 

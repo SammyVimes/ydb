@@ -5,15 +5,27 @@
 
 namespace NSQLTranslationPG {
 
-NYql::TAstParseResult PGToYql(const TString& query, const NSQLTranslation::TTranslationSettings& settings) {
+NYql::TAstParseResult PGToYql(const TString& query, const NSQLTranslation::TTranslationSettings& settings, NYql::TStmtParseInfo* stmtParseInfo) {
     Y_UNUSED(query);
     Y_UNUSED(settings);
+    Y_UNUSED(stmtParseInfo);
     NYql::TAstParseResult result;
     result.Issues.AddIssue(NYql::TIssue("PostgreSQL parser is not available"));
     return result;
 }
 
-}  // NSQLTranslationPG
+TVector<NYql::TAstParseResult> PGToYqlStatements(const TString& query, const NSQLTranslation::TTranslationSettings& settings, TVector<NYql::TStmtParseInfo>* stmtParseInfo) {
+    Y_UNUSED(query);
+    Y_UNUSED(settings);
+    Y_UNUSED(stmtParseInfo);
+    return {};
+}
+
+std::unique_ptr<NYql::NPg::IExtensionSqlParser> CreateExtensionSqlParser() {
+    throw yexception() << "CreateExtensionSqlParser: PG types are not supported";
+}
+
+} // NSQLTranslationPG
 
 namespace NYql {
 namespace NCommon {
@@ -71,10 +83,11 @@ void WriteYsonValuePg(TYsonResultWriter& writer, const NUdf::TUnboxedValuePod& v
     throw yexception() << "WriteYsonValuePg: PG types are not supported";
 }
 
-void WriteYsonValueInTableFormatPg(TOutputBuf& buf, NKikimr::NMiniKQL::TPgType* type, const NKikimr::NUdf::TUnboxedValuePod& value) {
+void WriteYsonValueInTableFormatPg(TOutputBuf& buf, NKikimr::NMiniKQL::TPgType* type, const NKikimr::NUdf::TUnboxedValuePod& value, bool topLevel) {
     Y_UNUSED(buf);
     Y_UNUSED(type);
     Y_UNUSED(value);
+    Y_UNUSED(topLevel);
     throw yexception() << "WriteYsonValueInTableFormatPg: PG types are not supported";
 }
 
@@ -145,6 +158,20 @@ void PgAcquireThreadContext(void* ctx) {
 
 void PgReleaseThreadContext(void* ctx) {
     Y_UNUSED(ctx);
+}
+
+void PgSetGUCSettings(void* ctx, const TGUCSettings::TPtr& GUCSettings) {
+    Y_UNUSED(ctx);
+    Y_UNUSED(GUCSettings);
+}
+
+std::unique_ptr<NYql::NPg::IExtensionLoader> CreateExtensionLoader() {
+    throw yexception() << "PG types are not supported";
+}
+
+std::optional<std::string> PGGetGUCSetting(const std::string& key) {
+    Y_UNUSED(key);
+    throw yexception() << "PG types are not supported";
 }
 
 ui64 PgValueSize(const NUdf::TUnboxedValuePod& value, i32 typeLen) {
@@ -271,9 +298,9 @@ TColumnConverter BuildPgColumnConverter(const std::shared_ptr<arrow::DataType>& 
     return {};
 }
 
-TMaybe<ui32> ConvertToPgType(NKikimr::NUdf::EDataSlot slot) {
+ui32 ConvertToPgType(NKikimr::NUdf::EDataSlot slot) {
     Y_UNUSED(slot);
-    return Nothing();
+    throw yexception() << "PG types are not supported";
 }
 
 TMaybe<NKikimr::NUdf::EDataSlot> ConvertFromPgType(ui32 typeId) {
@@ -373,9 +400,17 @@ std::function<NKikimr::NMiniKQL::IComputationNode* (NKikimr::NMiniKQL::TCallable
     };
 }
 
-IOptimizer* MakePgOptimizer(const IOptimizer::TInput& input, const std::function<void(const TString&)>& log)
+IOptimizer* MakePgOptimizerInternal(const IOptimizer::TInput& input, const std::function<void(const TString&)>& log)
 {
     Y_UNUSED(input);
+    Y_UNUSED(log);
+    ythrow yexception() << "PgJoinSearch does nothing";
+}
+
+IOptimizerNew* MakePgOptimizerNew(IProviderContext& pctx, TExprContext& ctx, const std::function<void(const TString&)>& log)
+{
+    Y_UNUSED(pctx);
+    Y_UNUSED(ctx);
     Y_UNUSED(log);
     ythrow yexception() << "PgJoinSearch does nothing";
 }
@@ -497,3 +532,15 @@ TString GetPostgresServerVersionStr() {
 }
 
 } // namespace NKikimr::NPg
+
+namespace NYql {
+
+ui64 HexEncode(const char *src, size_t len, char *dst) {
+    Y_UNUSED(src);
+    Y_UNUSED(len);
+    Y_UNUSED(dst);
+
+    throw yexception() << "HexEncode in pg_dummy does nothing";
+}
+
+} // NYql

@@ -58,9 +58,12 @@ LLVM_BC(
     arrow_int8range_canonical
     arrow_int8range_subdiff
     arrow_jsonb_agg_finalfn
+    arrow_jsonb_agg_strict_transfn
     arrow_jsonb_agg_transfn
     arrow_jsonb_bool
+    arrow_jsonb_build_array
     arrow_jsonb_build_array_noargs
+    arrow_jsonb_build_object
     arrow_jsonb_build_object_noargs
     arrow_jsonb_float4
     arrow_jsonb_float8
@@ -71,7 +74,10 @@ LLVM_BC(
     arrow_jsonb_numeric
     arrow_jsonb_object
     arrow_jsonb_object_agg_finalfn
+    arrow_jsonb_object_agg_strict_transfn
     arrow_jsonb_object_agg_transfn
+    arrow_jsonb_object_agg_unique_strict_transfn
+    arrow_jsonb_object_agg_unique_transfn
     arrow_jsonb_object_two_arg
     arrow_jsonb_out
     arrow_jsonb_recv

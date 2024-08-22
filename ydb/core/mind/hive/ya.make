@@ -5,6 +5,7 @@ SRCS(
     balancer.h
     boot_queue.cpp
     boot_queue.h
+    domain_info.cpp
     domain_info.h
     drain.cpp
     fill.cpp
@@ -24,6 +25,7 @@ SRCS(
     leader_tablet_info.h
     metrics.h
     monitoring.cpp
+    monitoring.h
     node_info.cpp
     node_info.h
     object_distribution.h
@@ -32,6 +34,7 @@ SRCS(
     follower_group.h
     follower_tablet_info.cpp
     follower_tablet_info.h
+    storage_balancer.cpp
     storage_group_info.cpp
     storage_group_info.h
     storage_pool_info.cpp
@@ -80,6 +83,7 @@ SRCS(
 )
 
 PEERDIR(
+    ydb/library/aclib
     ydb/library/actors/core
     ydb/library/actors/interconnect
     library/cpp/containers/ring_buffer

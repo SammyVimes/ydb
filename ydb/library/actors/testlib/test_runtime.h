@@ -249,12 +249,19 @@ namespace NActors {
         }
         TDuration SetReschedulingDelay(TDuration delay);
         void SetLogBackend(const TAutoPtr<TLogBackend> logBackend);
+        void SetLogBackendFactory(std::function<TAutoPtr<TLogBackend>()> logBackendFactory);
         void SetLogPriority(NActors::NLog::EComponent component, NActors::NLog::EPriority priority);
         TIntrusivePtr<ITimeProvider> GetTimeProvider();
         TIntrusivePtr<IMonotonicTimeProvider> GetMonotonicTimeProvider();
         TInstant GetCurrentTime() const;
         TMonotonic GetCurrentMonotonicTime() const;
-        void UpdateCurrentTime(TInstant newTime);
+        /**
+         * When `rewind` is true allows time to go backwards. This is unsafe,
+         * since both wallclock and monotonic times are currently linked and
+         * both go backwards, but it may be necessary for testing wallclock
+         * time oddities.
+         */
+        void UpdateCurrentTime(TInstant newTime, bool rewind = false);
         void AdvanceCurrentTime(TDuration duration);
         void AddLocalService(const TActorId& actorId, TActorSetupCmd cmd, ui32 nodeIndex = 0);
         virtual void Initialize();
@@ -291,18 +298,43 @@ namespace NActors {
         TActorId GetInterconnectProxy(ui32 nodeIndexFrom, ui32 nodeIndexTo);
         void BlockOutputForActor(const TActorId& actorId);
         IActor* FindActor(const TActorId& actorId, ui32 nodeIndex = Max<ui32>()) const;
+        TStringBuf FindActorName(const TActorId& actorId, ui32 nodeIndex = Max<ui32>()) const;
         void EnableScheduleForActor(const TActorId& actorId, bool allow = true);
         bool IsScheduleForActorEnabled(const TActorId& actorId) const;
         TIntrusivePtr<NMonitoring::TDynamicCounters> GetDynamicCounters(ui32 nodeIndex = 0);
-        void SetupMonitoring();
+        void SetupMonitoring(ui16 monitoringPortOffset = 0, bool monitoringTypeAsync = false);
 
         using TEventObserverCollection = std::list<std::function<void(TAutoPtr<IEventHandle>& event)>>;
         class TEventObserverHolder {
         public:
-            TEventObserverHolder(TEventObserverCollection& list, TEventObserverCollection::iterator&& iter)
+            TEventObserverHolder()
+                : List(nullptr)
+            {
+            }
+
+            TEventObserverHolder(TEventObserverCollection* list, TEventObserverCollection::iterator&& iter)
                 : List(list)
                 , Iter(iter)
             {
+            }
+
+            TEventObserverHolder(TEventObserverHolder&& other)
+                : List(nullptr)
+            {
+                *this = std::move(other);
+            }
+
+            TEventObserverHolder& operator=(TEventObserverHolder&& other) noexcept {
+                if (this != &other)
+                {
+                    Remove();
+
+                    List = std::move(other.List);
+                    Iter = std::move(other.Iter);
+
+                    other.List = nullptr;
+                }
+                return *this;
             }
 
             ~TEventObserverHolder()
@@ -312,23 +344,26 @@ namespace NActors {
 
             void Remove()
             {
-                if (Iter == List.end()) {
+                if (List == nullptr || Iter == List->end()) {
                     return;
                 }
 
-                List.erase(Iter);
-                Iter = List.end();
+                List->erase(Iter);
+                Iter = List->end();
+
+                List = nullptr;
             }
         private:
-            TEventObserverCollection& List;
+            TEventObserverCollection* List;
             TEventObserverCollection::iterator Iter;
         };
+        using TEventObserverHolderPair = std::pair<TEventObserverHolder,TEventObserverHolder>;
 
         // An example of using AddObserver in unit tests
         /*
             auto observerHolder = runtime.AddObserver<TEvDataShard::TEvRead>([&](TEvDataShard::TEvRead::TPtr& event) {
-                // Do something with the event inside the calback
-                Cout << "An event is observed " << ev->Get()->Record.ShortDebugString() << Endl;
+                // Do something with the event inside the callback
+                Cout << "An event is observed " << event->Get()->Record.ShortDebugString() << Endl;
 
                 // Optionally reset the event, all subsequent handlers of this event will not be called
                 event.Reset();
@@ -349,13 +384,13 @@ namespace NActors {
             };
 
             auto iter = ObserverFuncs.insert(ObserverFuncs.end(), baseFunc);
-            return TEventObserverHolder(ObserverFuncs, std::move(iter));
+            return TEventObserverHolder(&ObserverFuncs, std::move(iter));
         }
 
         TEventObserverHolder AddObserver(std::function<void(TAutoPtr<IEventHandle>&)> observerFunc)
         {
             auto iter = ObserverFuncs.insert(ObserverFuncs.end(), observerFunc);
-            return TEventObserverHolder(ObserverFuncs, std::move(iter));
+            return TEventObserverHolder(&ObserverFuncs, std::move(iter));
         }
 
         template<typename T>
@@ -583,8 +618,8 @@ namespace NActors {
 
         THolder<TActorSystemSetup> MakeActorSystemSetup(ui32 nodeIndex, TNodeDataBase* node);
         THolder<TActorSystem> MakeActorSystem(ui32 nodeIndex, TNodeDataBase* node);
-        virtual void InitActorSystemSetup(TActorSystemSetup& setup) {
-            Y_UNUSED(setup);
+        virtual void InitActorSystemSetup(TActorSystemSetup& setup, TNodeDataBase* node) {
+            Y_UNUSED(setup, node);
         }
 
    private:
@@ -626,7 +661,10 @@ namespace NActors {
         ui64 DispatcherRandomSeed;
         TIntrusivePtr<IRandomProvider> DispatcherRandomProvider;
         TAutoPtr<TLogBackend> LogBackend;
+        std::function<TAutoPtr<TLogBackend>()> LogBackendFactory;
         bool NeedMonitoring;
+        ui16 MonitoringPortOffset = 0;
+        bool MonitoringTypeAsync = false;
 
         TIntrusivePtr<IRandomProvider> RandomProvider;
         TIntrusivePtr<ITimeProvider> TimeProvider;
@@ -663,8 +701,9 @@ namespace NActors {
             std::shared_ptr<void> AppData0;
             THolder<TActorSystem> ActorSystem;
             THolder<IExecutorPool> SchedulerPool;
-            TVector<IExecutorPool*> ExecutorPools;
+            THashMap<ui32, IExecutorPool*> ExecutorPools;
             THolder<TExecutorThread> ExecutorThread;
+            std::unique_ptr<IHarmonizer> Harmonizer;
         };
 
         struct INodeFactory {

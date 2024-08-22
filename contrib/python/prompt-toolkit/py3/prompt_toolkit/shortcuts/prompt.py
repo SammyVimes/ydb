@@ -24,6 +24,7 @@ Example::
         s = PromptSession()
         result = s.prompt('Say something: ')
 """
+
 from __future__ import annotations
 
 from asyncio import get_running_loop
@@ -45,6 +46,7 @@ from prompt_toolkit.cursor_shapes import (
 )
 from prompt_toolkit.document import Document
 from prompt_toolkit.enums import DEFAULT_BUFFER, SEARCH_BUFFER, EditingMode
+from prompt_toolkit.eventloop import InputHook
 from prompt_toolkit.filters import (
     Condition,
     FilterOrBool,
@@ -322,6 +324,10 @@ class PromptSession(Generic[_T]):
     :param input: `Input` object. (Note that the preferred way to change the
         input/output is by creating an `AppSession`.)
     :param output: `Output` object.
+    :param interrupt_exception: The exception type that will be raised when
+        there is a keyboard interrupt (control-c keypress).
+    :param eof_exception: The exception type that will be raised when there is
+        an end-of-file/exit event (control-d keypress).
     """
 
     _fields = (
@@ -408,6 +414,8 @@ class PromptSession(Generic[_T]):
         refresh_interval: float = 0,
         input: Input | None = None,
         output: Output | None = None,
+        interrupt_exception: type[BaseException] = KeyboardInterrupt,
+        eof_exception: type[BaseException] = EOFError,
     ) -> None:
         history = history or InMemoryHistory()
         clipboard = clipboard or InMemoryClipboard()
@@ -457,6 +465,8 @@ class PromptSession(Generic[_T]):
         self.reserve_space_for_menu = reserve_space_for_menu
         self.tempfile_suffix = tempfile_suffix
         self.tempfile = tempfile
+        self.interrupt_exception = interrupt_exception
+        self.eof_exception = eof_exception
 
         # Create buffers, layout and Application.
         self.history = history
@@ -809,7 +819,7 @@ class PromptSession(Generic[_T]):
         @handle("<sigint>")
         def _keyboard_interrupt(event: E) -> None:
             "Abort when Control-C has been pressed."
-            event.app.exit(exception=KeyboardInterrupt, style="class:aborting")
+            event.app.exit(exception=self.interrupt_exception(), style="class:aborting")
 
         @Condition
         def ctrl_d_condition() -> bool:
@@ -824,7 +834,7 @@ class PromptSession(Generic[_T]):
         @handle("c-d", filter=ctrl_d_condition & default_focused)
         def _eof(event: E) -> None:
             "Exit when Control-D has been pressed."
-            event.app.exit(exception=EOFError, style="class:exiting")
+            event.app.exit(exception=self.eof_exception(), style="class:exiting")
 
         suspend_supported = Condition(suspend_to_background_supported)
 
@@ -892,6 +902,7 @@ class PromptSession(Generic[_T]):
         set_exception_handler: bool = True,
         handle_sigint: bool = True,
         in_thread: bool = False,
+        inputhook: InputHook | None = None,
     ) -> _T:
         """
         Display the prompt.
@@ -1025,6 +1036,7 @@ class PromptSession(Generic[_T]):
             set_exception_handler=set_exception_handler,
             in_thread=in_thread,
             handle_sigint=handle_sigint,
+            inputhook=inputhook,
         )
 
     @contextmanager
@@ -1393,11 +1405,14 @@ def prompt(
     enable_open_in_editor: FilterOrBool | None = None,
     tempfile_suffix: str | Callable[[], str] | None = None,
     tempfile: str | Callable[[], str] | None = None,
-    in_thread: bool = False,
     # Following arguments are specific to the current `prompt()` call.
     default: str = "",
     accept_default: bool = False,
     pre_run: Callable[[], None] | None = None,
+    set_exception_handler: bool = True,
+    handle_sigint: bool = True,
+    in_thread: bool = False,
+    inputhook: InputHook | None = None,
 ) -> str:
     """
     The global `prompt` function. This will create a new `PromptSession`
@@ -1448,7 +1463,10 @@ def prompt(
         default=default,
         accept_default=accept_default,
         pre_run=pre_run,
+        set_exception_handler=set_exception_handler,
+        handle_sigint=handle_sigint,
         in_thread=in_thread,
+        inputhook=inputhook,
     )
 
 

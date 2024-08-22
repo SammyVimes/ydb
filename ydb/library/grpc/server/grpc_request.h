@@ -73,12 +73,11 @@ public:
         , RequestLimiter_(std::move(limiter))
         , Writer_(new grpc::ServerAsyncResponseWriter<TUniversalResponseRef<TOut>>(&this->Context))
         , StateFunc_(&TThis::SetRequestDone)
+        , Request_(google::protobuf::Arena::CreateMessage<TIn>(&Arena_))
+        , AuthState_(Server_->NeedAuth())
     {
-        AuthState_ = Server_->NeedAuth() ? TAuthState(true) : TAuthState(false);
-        Request_ = google::protobuf::Arena::CreateMessage<TIn>(&Arena_);
         Y_ABORT_UNLESS(Request_);
         GRPC_LOG_DEBUG(Logger_, "[%p] created request Name# %s", this, Name_);
-        FinishPromise_ = NThreading::NewPromise<EFinishStatus>();
     }
 
     TGRpcRequestImpl(TService* server,
@@ -101,13 +100,12 @@ public:
         , RequestLimiter_(std::move(limiter))
         , StreamWriter_(new grpc::ServerAsyncWriter<TUniversalResponse<TOut>>(&this->Context))
         , StateFunc_(&TThis::SetRequestDone)
+        , Request_(google::protobuf::Arena::CreateMessage<TIn>(&Arena_))
+        , AuthState_(Server_->NeedAuth())
+        , StreamAdaptor_(CreateStreamAdaptor())
     {
-        AuthState_ = Server_->NeedAuth() ? TAuthState(true) : TAuthState(false);
-        Request_ = google::protobuf::Arena::CreateMessage<TIn>(&Arena_);
         Y_ABORT_UNLESS(Request_);
         GRPC_LOG_DEBUG(Logger_, "[%p] created streaming request Name# %s", this, Name_);
-        FinishPromise_ = NThreading::NewPromise<EFinishStatus>();
-        StreamAdaptor_ = CreateStreamAdaptor();
     }
 
     TAsyncFinishResult GetFinishFuture() override {
@@ -116,6 +114,10 @@ public:
 
     bool IsClientLost() const override {
         return ClientLost_.load();
+    }
+
+    bool IsStreamCall() const override {
+        return bool(StreamAdaptor_);
     }
 
     TString GetPeer() const override {
@@ -204,8 +206,8 @@ public:
         WriteDataOk(resp, status);
     }
 
-    void Reply(grpc::ByteBuffer* resp, ui32 status) override {
-        WriteByteDataOk(resp, status);
+    void Reply(grpc::ByteBuffer* resp, ui32 status, EStreamCtrl ctrl) override {
+        WriteByteDataOk(resp, status, ctrl);
     }
 
     void ReplyError(grpc::StatusCode code, const TString& msg, const TString& details) override {
@@ -314,7 +316,7 @@ private:
         }
     }
 
-    void WriteByteDataOk(grpc::ByteBuffer* resp, ui32 status) {
+    void WriteByteDataOk(grpc::ByteBuffer* resp, ui32 status, EStreamCtrl ctrl) {
         auto sz = resp->Length();
         if (Writer_) {
             GRPC_LOG_DEBUG(Logger_, "[%p] issuing response Name# %s data# byteString peer# %s", this, Name_,
@@ -332,14 +334,23 @@ private:
             // because of std::function cannot hold move-only captured object
             // we allocate shared object on heap to avoid buffer copy
             auto uResp = MakeIntrusive<TUniversalResponse<TOut>>(resp);
-            auto cb = [this, uResp = std::move(uResp), sz, status]() {
+            const bool finish = ctrl == EStreamCtrl::FINISH;
+            auto cb = [this, uResp = std::move(uResp), sz, status, finish]() {
                 GRPC_LOG_DEBUG(Logger_, "[%p] issuing response Name# %s data# byteString peer# %s (pushed to grpc)",
                     this, Name_, this->Context.peer().c_str());
-                StateFunc_ = &TThis::NextReply;
+
+                StateFunc_ = finish ? &TThis::SetFinishDone : &TThis::NextReply;
+
                 ResponseSize += sz;
                 ResponseStatus = status;
                 OnBeforeCall();
-                StreamWriter_->Write(*uResp, GetGRpcTag());
+                if (finish) {
+                    Finished_ = true;
+                    const auto option = grpc::WriteOptions().set_last_message();
+                    StreamWriter_->WriteAndFinish(*uResp, option, grpc::Status::OK, GetGRpcTag());
+                } else {
+                    StreamWriter_->Write(*uResp, GetGRpcTag());
+                }
             };
             StreamAdaptor_->Enqueue(std::move(cb), false);
         }
@@ -536,7 +547,7 @@ private:
     }
 
     using TStateFunc = bool (TThis::*)(bool);
-    TService* Server_;
+    TService* Server_ = nullptr;
     TOnRequest Cb_;
     TRequestCallback RequestCallback_;
     TStreamRequestCallback StreamRequestCallback_;
@@ -548,9 +559,9 @@ private:
     THolder<grpc::ServerAsyncResponseWriter<TUniversalResponseRef<TOut>>> Writer_;
     THolder<grpc::ServerAsyncWriterInterface<TUniversalResponse<TOut>>> StreamWriter_;
     TStateFunc StateFunc_;
-    TIn* Request_;
 
     google::protobuf::Arena Arena_;
+    TIn* Request_ = nullptr;
     TOnNextReply NextReplyCb_;
     ui32 RequestSize = 0;
     ui32 ResponseSize = 0;
@@ -564,7 +575,7 @@ private:
 
     using TFixedEvent = TQueueFixedEvent<TGRpcRequestImpl>;
     TFixedEvent OnFinishTag = { this, &TGRpcRequestImpl::OnFinish };
-    NThreading::TPromise<EFinishStatus> FinishPromise_;
+    NThreading::TPromise<EFinishStatus> FinishPromise_ = NThreading::NewPromise<EFinishStatus>();
     bool SkipUpdateCountersOnError = false;
     IStreamAdaptor::TPtr StreamAdaptor_;
     std::atomic<bool> ClientLost_ = false;

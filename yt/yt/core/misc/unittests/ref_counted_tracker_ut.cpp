@@ -6,15 +6,15 @@
 
 #include <yt/yt/core/misc/blob.h>
 #include <yt/yt/core/misc/protobuf_helpers.h>
-#include <yt/yt/core/misc/ref_counted.h>
 #include <yt/yt/core/misc/ref_counted_tracker.h>
-#include <yt/yt/core/misc/ref_tracked.h>
 
 #include <yt/yt/core/actions/future.h>
 
 #include <yt/yt/core/concurrency/action_queue.h>
 
 #include <library/cpp/yt/memory/new.h>
+#include <library/cpp/yt/memory/ref_tracked.h>
+#include <library/cpp/yt/memory/ref_counted.h>
 
 namespace NYT {
 namespace {
@@ -123,7 +123,7 @@ TYPED_TEST_SUITE(TRefCountedTrackerTest, TypeList);
 TYPED_TEST(TRefCountedTrackerTest, SinglethreadedRefCounted)
 {
     const auto instanceSize = TRefCountedTraits<TypeParam>::GetInstanceSize();
-    auto create = [] () {
+    auto create = [] {
         return TRefCountedTraits<TypeParam>::Create();
     };
 
@@ -174,7 +174,7 @@ TYPED_TEST(TRefCountedTrackerTest, SinglethreadedRefCounted)
 TYPED_TEST(TRefCountedTrackerTest, MultithreadedRefCounted)
 {
     const auto instanceSize = TRefCountedTraits<TypeParam>::GetInstanceSize();
-    auto create = [] () {
+    auto create = [] {
         return TRefCountedTraits<TypeParam>::Create();
     };
 
@@ -184,7 +184,7 @@ TYPED_TEST(TRefCountedTrackerTest, MultithreadedRefCounted)
     auto obj1 = create();
 
     auto queue = New<TActionQueue>();
-    BIND([&] () {
+    BIND([&] {
         auto obj2 = create();
         EXPECT_EQ(countBase + 2u, GetAllocatedCount<TypeParam>());
         EXPECT_EQ(2u, GetAliveCount<TypeParam>());

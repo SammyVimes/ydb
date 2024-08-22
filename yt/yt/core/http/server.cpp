@@ -25,7 +25,7 @@ using namespace NConcurrency;
 using namespace NProfiling;
 using namespace NNet;
 
-static const auto& Logger = HttpLogger;
+static constexpr auto& Logger = HttpLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -190,7 +190,14 @@ private:
 
             NProfiling::TWallTimer timer;
 
-            YT_LOG_DEBUG("Received HTTP request (ConnectionId: %v, RequestId: %v, Method: %v, Path: %v, L7RequestId: %v, L7RealIP: %v, UserAgent: %v)",
+            YT_LOG_DEBUG("Received HTTP request ("
+                "ConnectionId: %v, "
+                "RequestId: %v, "
+                "Method: %v, "
+                "Path: %v, "
+                "L7RequestId: %v, "
+                "L7RealIP: %v, "
+                "UserAgent: %v)",
                 request->GetConnectionId(),
                 request->GetRequestId(),
                 request->GetMethod(),
@@ -257,10 +264,15 @@ private:
             connection->SubscribePeerDisconnect(BIND([config = Config_, canceler = GetCurrentFiberCanceler(), connectionId = connectionId] {
                 YT_LOG_DEBUG("Client closed TCP socket (ConnectionId: %v)", connectionId);
 
-                if (config->CancelFiberOnConnectionClose) {
+                if (config->CancelFiberOnConnectionClose.value_or(false)) {
                     canceler(TError("Client closed TCP socket; HTTP connection closed"));
                 }
             }));
+
+            auto finally = Finally([&] {
+                auto count = ActiveConnections_.fetch_sub(1) - 1;
+                ConnectionsActive_.Update(count);
+            });
 
             if (Config_->NoDelay) {
                 connection->SetNoDelay();
@@ -274,11 +286,6 @@ private:
 
     void DoHandleConnection(const IConnectionPtr& connection, TGuid connectionId)
     {
-        auto finally = Finally([&] {
-            auto count = ActiveConnections_.fetch_sub(1) - 1;
-            ConnectionsActive_.Update(count);
-        });
-
         auto request = New<THttpInput>(
             connection,
             connection->RemoteAddress(),

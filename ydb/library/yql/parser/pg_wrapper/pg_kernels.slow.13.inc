@@ -121,6 +121,7 @@ TExecFunc arrow_phraseto_tsquery() { return MakeIndirectExec<true, false>(&phras
 TExecFunc arrow_phraseto_tsquery_byid() { return MakeIndirectExec<true, false>(&phraseto_tsquery_byid); }
 TExecFunc arrow_plainto_tsquery() { return MakeIndirectExec<true, false>(&plainto_tsquery); }
 TExecFunc arrow_plainto_tsquery_byid() { return MakeIndirectExec<true, false>(&plainto_tsquery_byid); }
+TExecFunc arrow_satisfies_hash_partition() { return MakeIndirectExec<false, true>(&satisfies_hash_partition); }
 TExecFunc arrow_spg_range_quad_choose() { return MakeIndirectExec<true, true>(&spg_range_quad_choose); }
 TExecFunc arrow_spg_range_quad_config() { return MakeIndirectExec<true, true>(&spg_range_quad_config); }
 TExecFunc arrow_spg_range_quad_inner_consistent() { return MakeIndirectExec<true, true>(&spg_range_quad_inner_consistent); }

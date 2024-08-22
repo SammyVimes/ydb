@@ -19,12 +19,6 @@ using namespace Ydb::Import;
 /// Common
 namespace {
 
-TInstant ProtoTimestampToInstant(const NProtoBuf::Timestamp& timestamp) {
-    ui64 us = timestamp.seconds() * 1000000;
-    us += timestamp.nanos() / 1000;
-    return TInstant::MicroSeconds(us);
-}
-
 TVector<TImportItemProgress> ItemsProgressFromProto(const google::protobuf::RepeatedPtrField<Ydb::Import::ImportItemProgress>& proto) {
     TVector<TImportItemProgress> result(Reserve(proto.size()));
 
@@ -158,6 +152,8 @@ TFuture<TImportFromS3Response> TImportClient::ImportFromS3(const TImportFromS3Se
     if (settings.NumberOfRetries_) {
         request.mutable_settings()->set_number_of_retries(settings.NumberOfRetries_.GetRef());
     }
+
+    request.mutable_settings()->set_disable_virtual_addressing(!settings.UseVirtualAddressing_);
 
     return Impl_->ImportFromS3(std::move(request), settings);
 }

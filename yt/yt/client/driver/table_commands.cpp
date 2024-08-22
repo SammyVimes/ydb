@@ -7,8 +7,12 @@
 
 #include <yt/yt/client/chaos_client/replication_card_serialization.h>
 
+#include <yt/yt/client/formats/config.h>
+#include <yt/yt/client/formats/parser.h>
+
 #include <yt/yt/client/table_client/adapters.h>
 #include <yt/yt/client/table_client/blob_reader.h>
+#include <yt/yt/client/table_client/columnar_statistics.h>
 #include <yt/yt/client/table_client/row_buffer.h>
 #include <yt/yt/client/table_client/table_consumer.h>
 #include <yt/yt/client/table_client/table_output.h>
@@ -17,9 +21,6 @@
 #include <yt/yt/client/table_client/wire_protocol.h>
 
 #include <yt/yt/client/tablet_client/table_mount_cache.h>
-
-#include <yt/yt/client/formats/config.h>
-#include <yt/yt/client/formats/parser.h>
 
 #include <yt/yt/client/ypath/public.h>
 
@@ -109,7 +110,7 @@ void TReadTableCommand::DoExecute(ICommandContextPtr context)
         BuildYsonMapFragmentFluently(consumer)
             .Item("approximate_row_count").Value(reader->GetTotalRowCount())
             .Item("omitted_inaccessible_columns").Value(reader->GetOmittedInaccessibleColumns())
-            .DoIf(reader->GetTotalRowCount() > 0, [&](auto fluent) {
+            .DoIf(reader->GetTotalRowCount() > 0, [&] (auto fluent) {
                 fluent
                     .Item("start_row_index").Value(reader->GetStartRowIndex());
             });
@@ -129,7 +130,7 @@ void TReadTableCommand::DoExecute(ICommandContextPtr context)
         ControlAttributes,
         0);
 
-    auto finally = Finally([&] () {
+    auto finally = Finally([&] {
         auto dataStatistics = reader->GetDataStatistics();
         YT_LOG_DEBUG("Command statistics (RowCount: %v, WrittenSize: %v, "
             "ReadUncompressedDataSize: %v, ReadCompressedDataSize: %v, "
@@ -290,7 +291,7 @@ void TWriteTableCommand::DoExecute(ICommandContextPtr context)
         context->GetInputFormat(),
         &valueConsumer));
 
-    PipeInputToOutput(context->Request().InputStream, &output, MaxRowBufferSize);
+    PipeInputToOutput(context->Request().InputStream, &output);
 
     WaitFor(valueConsumer.Flush())
         .ThrowOnError();
@@ -403,6 +404,15 @@ void TGetTableColumnarStatisticsCommand::DoExecute(ICommandContextPtr context)
                                         }
                                     });
                             })
+                            .DoIf(statistics.HasLargeStatistics(), [&](TFluentMap fluent) {
+                                fluent
+                                    .Item("column_estimated_unique_counts").DoMap([&](TFluentMap fluent) {
+                                        const auto& largeStat = statistics.LargeStatistics;
+                                        for (int index = 0; index < std::ssize(largeStat.ColumnHyperLogLogDigests); ++index) {
+                                            fluent.Item(columns[index]).Value(largeStat.ColumnHyperLogLogDigests[index].EstimateCardinality());
+                                        }
+                                    });
+                            })
                             .OptionalItem("chunk_row_count", statistics.ChunkRowCount)
                             .OptionalItem("legacy_chunk_row_count", statistics.LegacyChunkRowCount)
                         .EndMap();
@@ -418,8 +428,10 @@ void TPartitionTablesCommand::Register(TRegistrar registrar)
     registrar.Parameter("paths", &TThis::Paths);
     registrar.Parameter("partition_mode", &TThis::PartitionMode)
         .Default(ETablePartitionMode::Unordered);
-    registrar.Parameter("data_weight_per_partition", &TThis::DataWeightPerPartition);
+    registrar.Parameter("data_weight_per_partition", &TThis::DataWeightPerPartition)
+        .GreaterThan(0);
     registrar.Parameter("max_partition_count", &TThis::MaxPartitionCount)
+        .GreaterThan(0)
         .Default();
     registrar.Parameter("enable_key_guarantee", &TThis::EnableKeyGuarantee)
         .Default(false);
@@ -440,7 +452,7 @@ void TPartitionTablesCommand::DoExecute(ICommandContextPtr context)
     Options.AdjustDataWeightPerPartition = AdjustDataWeightPerPartition;
 
     auto partitions = WaitFor(context->GetClient()->PartitionTables(Paths, Options))
-       .ValueOrThrow();
+        .ValueOrThrow();
 
     context->ProduceOutputValue(ConvertToYsonString(partitions));
 }
@@ -789,6 +801,27 @@ void TSelectRowsCommand::Register(TRegistrar registrar)
             return command->Options.UseCanonicalNullRelations;
         })
         .Optional(/*init*/ false);
+
+    registrar.ParameterWithUniversalAccessor<bool>(
+        "merge_versioned_rows",
+        [] (TThis* command) -> auto& {
+            return command->Options.MergeVersionedRows;
+        })
+        .Optional(/*init*/ false);
+
+    registrar.ParameterWithUniversalAccessor<std::optional<NApi::EExecutionBackend>>(
+        "execution_backend",
+        [] (TThis* command) -> auto& {
+            return command->Options.ExecutionBackend;
+        })
+        .Optional(/*init*/ false);
+
+    registrar.ParameterWithUniversalAccessor<TVersionedReadOptions>(
+        "versioned_read_options",
+        [] (TThis* command) -> auto& {
+            return command->Options.VersionedReadOptions;
+        })
+        .Optional(/*init*/ false);
 }
 
 bool TSelectRowsCommand::HasResponseParameters() const
@@ -802,6 +835,15 @@ void TSelectRowsCommand::DoExecute(ICommandContextPtr context)
 
     if (PlaceholderValues) {
         Options.PlaceholderValues = ConvertToYsonString(PlaceholderValues);
+
+        YT_LOG_DEBUG("Query: %v, Timestamp: %v, PlaceholderValues: %v",
+            Query,
+            Options.Timestamp,
+            Options.PlaceholderValues);
+    } else {
+        YT_LOG_DEBUG("Query: %v, Timestamp: %v",
+            Query,
+            Options.Timestamp);
     }
 
     auto result = WaitFor(clientBase->SelectRows(Query, Options))
@@ -822,7 +864,7 @@ void TSelectRowsCommand::DoExecute(ICommandContextPtr context)
     auto output = context->Request().OutputStream;
     auto writer = CreateSchemafulWriterForFormat(format, rowset->GetSchema(), output);
 
-    writer->Write(rowset->GetRows());
+    Y_UNUSED(writer->Write(rowset->GetRows()));
 
     WaitFor(writer->Close())
         .ThrowOnError();
@@ -860,7 +902,7 @@ static std::vector<TUnversionedRow> ParseRows(
         context->GetInputFormat(),
         valueConsumer));
 
-    PipeInputToOutput(context->Request().InputStream, &output, 64_KB);
+    PipeInputToOutput(context->Request().InputStream, &output);
     return valueConsumer->GetRows();
 }
 
@@ -1049,6 +1091,7 @@ void TLookupRowsCommand::DoExecute(ICommandContextPtr context)
 
     if (ColumnNames) {
         TColumnFilter::TIndexes columnFilterIndexes;
+        columnFilterIndexes.reserve(ColumnNames->size());
         for (const auto& name : *ColumnNames) {
             auto optionalIndex = nameTable->FindId(name);
             if (!optionalIndex) {
@@ -1069,6 +1112,15 @@ void TLookupRowsCommand::DoExecute(ICommandContextPtr context)
 
     auto clientBase = GetClientBase(context);
 
+    auto produceResponseParameters = [&] (const auto& result) {
+        ProduceResponseParameters(context, [&] (NYson::IYsonConsumer* consumer) {
+            if (!result.UnavailableKeyIndexes.empty()) {
+                BuildYsonMapFragmentFluently(consumer)
+                    .Item("unavailable_key_indexes").Value(result.UnavailableKeyIndexes);
+            }
+        });
+    };
+
     if (Versioned) {
         TVersionedLookupRowsOptions versionedOptions;
         versionedOptions.ColumnFilter = Options.ColumnFilter;
@@ -1079,32 +1131,37 @@ void TLookupRowsCommand::DoExecute(ICommandContextPtr context)
         versionedOptions.CachedSyncReplicasTimeout = Options.CachedSyncReplicasTimeout;
         versionedOptions.RetentionConfig = RetentionConfig;
         versionedOptions.ReplicaConsistency = Options.ReplicaConsistency;
-        auto asyncRowset = clientBase->VersionedLookupRows(
+        auto resultFuture = clientBase->VersionedLookupRows(
             Path.GetPath(),
             std::move(nameTable),
             std::move(keyRange),
             versionedOptions);
-        auto rowset = WaitFor(asyncRowset)
-            .ValueOrThrow()
-            .Rowset;
-        auto writer = CreateVersionedWriterForFormat(format, rowset->GetSchema(), output);
-        writer->Write(rowset->GetRows());
+        auto result = WaitFor(resultFuture)
+            .ValueOrThrow();
+        produceResponseParameters(result);
+        auto writer = CreateVersionedWriterForFormat(format, result.Rowset->GetSchema(), output);
+        Y_UNUSED(writer->Write(result.Rowset->GetRows()));
         WaitFor(writer->Close())
             .ThrowOnError();
     } else {
-        auto asyncRowset = clientBase->LookupRows(
+        auto resultFuture = clientBase->LookupRows(
             Path.GetPath(),
             std::move(nameTable),
             std::move(keyRange),
             Options);
-        auto rowset = WaitFor(asyncRowset)
-            .ValueOrThrow()
-            .Rowset;
-        auto writer = CreateSchemafulWriterForFormat(format, rowset->GetSchema(), output);
-        writer->Write(rowset->GetRows());
+        auto result = WaitFor(resultFuture)
+            .ValueOrThrow();
+        produceResponseParameters(result);
+        auto writer = CreateSchemafulWriterForFormat(format, result.Rowset->GetSchema(), output);
+        Y_UNUSED(writer->Write(result.Rowset->GetRows()));
         WaitFor(writer->Close())
             .ThrowOnError();
     }
+}
+
+bool TLookupRowsCommand::HasResponseParameters() const
+{
+    return true;
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1167,12 +1224,12 @@ void TPullRowsCommand::DoExecute(ICommandContextPtr context)
 
     if (pullResult.Versioned) {
         auto writer = CreateVersionedWriterForFormat(format, pullResult.Rowset->GetSchema(), output);
-        writer->Write(ReinterpretCastRange<TVersionedRow>(pullResult.Rowset->GetRows()));
+        Y_UNUSED(writer->Write(ReinterpretCastRange<TVersionedRow>(pullResult.Rowset->GetRows())));
         WaitFor(writer->Close())
             .ThrowOnError();
     } else {
         auto writer = CreateSchemafulWriterForFormat(format, pullResult.Rowset->GetSchema(), output);
-        writer->Write(ReinterpretCastRange<TUnversionedRow>(pullResult.Rowset->GetRows()));
+        Y_UNUSED(writer->Write(ReinterpretCastRange<TUnversionedRow>(pullResult.Rowset->GetRows())));
         WaitFor(writer->Close())
             .ThrowOnError();
     }
@@ -1554,6 +1611,13 @@ void TCreateTableBackupCommand::Register(TRegistrar registrar)
             return command->Options.Force;
         })
         .Default(false);
+
+    registrar.ParameterWithUniversalAccessor<bool>(
+        "preserve_account",
+        [] (TThis* command) -> auto& {
+            return command->Options.PreserveAccount;
+        })
+        .Default(false);
 }
 
 void TCreateTableBackupCommand::DoExecute(ICommandContextPtr context)
@@ -1588,6 +1652,13 @@ void TRestoreTableBackupCommand::Register(TRegistrar registrar)
         "enable_replicas",
         [] (TThis* command) -> auto& {
             return command->Options.EnableReplicas;
+        })
+        .Default(false);
+
+    registrar.ParameterWithUniversalAccessor<bool>(
+        "preserve_account",
+        [] (TThis* command) -> auto& {
+            return command->Options.PreserveAccount;
         })
         .Default(false);
 }

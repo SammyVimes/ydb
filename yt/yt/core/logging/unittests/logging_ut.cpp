@@ -28,6 +28,8 @@
 
 #include <library/cpp/streams/zstd/zstd.h>
 
+#include <library/cpp/yt/misc/global.h>
+
 #include <util/system/fs.h>
 #include <util/system/tempfile.h>
 
@@ -50,7 +52,7 @@ using namespace NJson;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-const TLogger Logger("Test");
+YT_DEFINE_GLOBAL(NLogging::TLogger, Logger, "Test");
 
 TString GenerateLogFileName()
 {
@@ -87,7 +89,7 @@ protected:
     {
         TLogEvent event;
         event.Family = ELogFamily::PlainText;
-        event.Category = Logger.GetCategory();
+        event.Category = Logger().GetCategory();
         event.Level = ELogLevel::Debug;
         event.MessageRef = TSharedRef::FromString("message");
         event.MessageKind = ELogMessageKind::Unstructured;
@@ -99,7 +101,7 @@ protected:
     {
         EXPECT_EQ(
             Format("\tD\t%v\t%v\t%v\t\t\n",
-                Logger.GetCategory()->Name,
+                Logger().GetCategory()->Name,
                 "message",
                 "ba"),
             line.substr(DateLength));
@@ -119,7 +121,7 @@ protected:
             TString line;
             std::vector<TString> lines;
             while (input->ReadLine(line)) {
-                if (line.Contains(Logger.GetCategory()->Name)) {
+                if (line.Contains(Logger().GetCategory()->Name)) {
                     lines.push_back(line + "\n");
                 }
             }
@@ -507,7 +509,7 @@ TEST_F(TLoggingTest, PlainTextLoggingStructuredFormatter)
 {
     TLogEvent event;
     event.Family = ELogFamily::PlainText;
-    event.Category = Logger.GetCategory();
+    event.Category = Logger().GetCategory();
     event.Level = ELogLevel::Debug;
     event.MessageRef = TSharedRef::FromString("test_message");
     event.MessageKind = ELogMessageKind::Unstructured;
@@ -538,7 +540,7 @@ TEST_F(TLoggingTest, PlainTextLoggingStructuredFormatter)
             auto message = DeserializeStructuredEvent(lines[0], format);
             EXPECT_EQ(message->GetChildOrThrow("message")->AsString()->GetValue(), "test_message");
             EXPECT_EQ(message->GetChildOrThrow("level")->AsString()->GetValue(), "debug");
-            EXPECT_EQ(message->GetChildOrThrow("category")->AsString()->GetValue(), Logger.GetCategory()->Name);
+            EXPECT_EQ(message->GetChildOrThrow("category")->AsString()->GetValue(), Logger().GetCategory()->Name);
             EXPECT_EQ(message->GetChildOrThrow("fiber_id")->AsString()->GetValue(), "1f");
             EXPECT_EQ(message->GetChildOrThrow("trace_id")->AsString()->GetValue(), "4-3-2-1");
 
@@ -555,7 +557,7 @@ TEST_F(TLoggingTest, StructuredLogging)
 {
     TLogEvent event;
     event.Family = ELogFamily::Structured;
-    event.Category = Logger.GetCategory();
+    event.Category = Logger().GetCategory();
     event.Level = ELogLevel::Debug;
     event.MessageRef = BuildYsonStringFluently<EYsonType::MapFragment>()
         .Item("message").Value("test_message")
@@ -587,7 +589,7 @@ TEST_F(TLoggingTest, StructuredLogging)
         auto message = DeserializeStructuredEvent(lines[0], format);
         EXPECT_EQ(message->GetChildOrThrow("message")->AsString()->GetValue(), "test_message");
         EXPECT_EQ(message->GetChildOrThrow("level")->AsString()->GetValue(), "debug");
-        EXPECT_EQ(message->GetChildOrThrow("category")->AsString()->GetValue(), Logger.GetCategory()->Name);
+        EXPECT_EQ(message->GetChildOrThrow("category")->AsString()->GetValue(), Logger().GetCategory()->Name);
 
         EXPECT_EQ(message->FindChild("fiber_id"), nullptr);
         EXPECT_EQ(message->FindChild("trace_id"), nullptr);
@@ -598,7 +600,7 @@ TEST_F(TLoggingTest, UnstructuredLogging)
 {
     TLogEvent event;
     event.Family = ELogFamily::Structured;
-    event.Category = Logger.GetCategory();
+    event.Category = Logger().GetCategory();
     event.Level = ELogLevel::Debug;
     event.MessageRef = TSharedRef::FromString("test_message");
     event.MessageKind = ELogMessageKind::Unstructured;
@@ -624,7 +626,7 @@ TEST_F(TLoggingTest, UnstructuredLogging)
         auto message = DeserializeStructuredEvent(lines[0], format);
         EXPECT_EQ(message->GetChildOrThrow("message")->AsString()->GetValue(), "test_message");
         EXPECT_EQ(message->GetChildOrThrow("level")->AsString()->GetValue(), FormatEnum(ELogLevel::Debug));
-        EXPECT_EQ(message->GetChildOrThrow("category")->AsString()->GetValue(), Logger.GetCategory()->Name);
+        EXPECT_EQ(message->GetChildOrThrow("category")->AsString()->GetValue(), Logger().GetCategory()->Name);
     }
 }
 
@@ -635,7 +637,7 @@ TEST_F(TLoggingTest, StructuredLoggingJsonFormat)
 
     TLogEvent event;
     event.Family = ELogFamily::Structured;
-    event.Category = Logger.GetCategory();
+    event.Category = Logger().GetCategory();
     event.Level = ELogLevel::Debug;
     event.MessageRef = BuildYsonStringFluently<EYsonType::MapFragment>()
         .Item("message").Value("test_message")
@@ -659,7 +661,7 @@ TEST_F(TLoggingTest, StructuredLoggingJsonFormat)
         /*commonFields*/ THashMap<TString, INodePtr>{},
         /*enableControlMessages*/ true,
         /*enableSourceLocation*/ false,
-        /*enableInstant*/ true,
+        /*enableSystemFields*/ true,
         jsonFormat);
 
     auto writer = CreateFileLogWriter(
@@ -679,7 +681,7 @@ TEST_F(TLoggingTest, StructuredLoggingJsonFormat)
     EXPECT_EQ(message->GetChildOrThrow("nan_value")->AsString()->GetValue(), "nan");
     EXPECT_EQ(message->GetChildOrThrow("long_string_value")->AsString()->GetValue(), longStringPrefix);
     EXPECT_EQ(message->GetChildOrThrow("level")->AsString()->GetValue(), FormatEnum(ELogLevel::Debug));
-    EXPECT_EQ(message->GetChildOrThrow("category")->AsString()->GetValue(), Logger.GetCategory()->Name);
+    EXPECT_EQ(message->GetChildOrThrow("category")->AsString()->GetValue(), Logger().GetCategory()->Name);
 }
 
 TEST_F(TLoggingTest, StructuredLoggingWithValidator)
@@ -703,7 +705,7 @@ TEST_F(TLoggingTest, StructuredLoggingWithValidator)
         "structured_validation_sampling_rate" = 1.0;
     })", logFile.Name()));
 
-    auto logger = Logger.WithStructuredValidator([] (const TYsonString& yson) {
+    auto logger = Logger().WithStructuredValidator([] (const TYsonString& yson) {
         auto message = ConvertToNode(yson)->AsMap();
         auto testField = message->FindChild("test_field");
         if (!testField) {
@@ -730,7 +732,7 @@ TEST_F(TLoggingTest, StructuredLoggingWithValidator)
 TEST_F(TLoggingTest, StructuredValidationWithSamplingRate)
 {
     int counter = 0;
-    auto logger = Logger.WithStructuredValidator([&counter] (const TYsonString& /*yson*/) {
+    auto logger = Logger().WithStructuredValidator([&counter] (const TYsonString& /*yson*/) {
         counter++;
     });
 
@@ -761,6 +763,36 @@ TEST_F(TLoggingTest, StructuredValidationWithSamplingRate)
 
     EXPECT_LT(counter, iterations);
     EXPECT_GT(counter, 0);
+}
+
+TEST_F(TLoggingTest, StructuredLoggingDisableSystemFields)
+{
+    TLogEvent event;
+    event.Family = ELogFamily::Structured;
+    event.Category = Logger().GetCategory();
+    event.Level = ELogLevel::Debug;
+    event.MessageRef = BuildYsonStringFluently<EYsonType::MapFragment>()
+        .Item("message").Value("test_message")
+        .Finish()
+        .ToSharedRef();
+    event.MessageKind = ELogMessageKind::Structured;
+
+    auto formatter = std::make_unique<TStructuredLogFormatter>(
+        ELogFormat::Yson,
+        /*commonFields*/ THashMap<TString, INodePtr>{},
+        /*enableControlMessages*/ true,
+        /*enableSourceLocation*/ false,
+        /*enableSystemFields*/ false);
+
+    TStringStream stringStream;
+    formatter->WriteFormatted(&stringStream, event);
+
+    auto message = DeserializeStructuredEvent(stringStream.Str(), ELogFormat::Yson);
+    EXPECT_EQ(message->GetChildOrThrow("message")->AsString()->GetValue(), "test_message");
+
+    EXPECT_EQ(message->FindChild("instant"), nullptr);
+    EXPECT_EQ(message->FindChild("level"), nullptr);
+    EXPECT_EQ(message->FindChild("category"), nullptr);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1125,14 +1157,14 @@ TEST_P(TLoggingTagsTest, All)
 
 INSTANTIATE_TEST_SUITE_P(ValueParametrized, TLoggingTagsTest,
     ::testing::Values(
-        std::make_tuple(false, false, false, "Log message"),
-        std::make_tuple(false, false,  true, "Log message (TraceContextTag)"),
-        std::make_tuple(false,  true, false, "Log message (LoggerTag)"),
-        std::make_tuple(false,  true,  true, "Log message (LoggerTag, TraceContextTag)"),
-        std::make_tuple( true, false, false, "Log message (Value: 123)"),
-        std::make_tuple( true, false,  true, "Log message (Value: 123, TraceContextTag)"),
-        std::make_tuple( true,  true, false, "Log message (Value: 123, LoggerTag)"),
-        std::make_tuple( true,  true,  true, "Log message (Value: 123, LoggerTag, TraceContextTag)")));
+        std::tuple(false, false, false, "Log message"),
+        std::tuple(false, false,  true, "Log message (TraceContextTag)"),
+        std::tuple(false,  true, false, "Log message (LoggerTag)"),
+        std::tuple(false,  true,  true, "Log message (LoggerTag, TraceContextTag)"),
+        std::tuple( true, false, false, "Log message (Value: 123)"),
+        std::tuple( true, false,  true, "Log message (Value: 123, TraceContextTag)"),
+        std::tuple( true,  true, false, "Log message (Value: 123, LoggerTag)"),
+        std::tuple( true,  true,  true, "Log message (Value: 123, LoggerTag, TraceContextTag)")));
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -1172,7 +1204,7 @@ protected:
     void LogLongMessages()
     {
         for (int i = 0; i < N; ++i) {
-            YT_LOG_INFO("%v", MakeRange(Chunks_.data(), Chunks_.data() + i));
+            YT_LOG_INFO("%v", TRange(Chunks_.data(), Chunks_.data() + i));
         }
     }
 
@@ -1183,7 +1215,7 @@ protected:
         auto lines = ReadPlainTextEvents(fileName);
         EXPECT_EQ(N, std::ssize(lines));
         for (int i = 0; i < N; ++i) {
-            auto expected = Format("%v", MakeRange(Chunks_.data(), Chunks_.data() + i));
+            auto expected = Format("%v", TRange(Chunks_.data(), Chunks_.data() + i));
             auto actual = lines[i];
             EXPECT_NE(TString::npos, actual.find(expected));
         }
@@ -1252,7 +1284,7 @@ public:
 
     void Write(const TLogEvent& event) override
     {
-        if (event.Category == Logger.GetCategory()) {
+        if (event.Category == Logger().GetCategory()) {
             Messages_.push_back(TString(Config_->Padding, ' ') + event.MessageRef.ToStringBuf());
         }
     }

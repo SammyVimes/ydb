@@ -2,10 +2,12 @@
 #include "kqp_executer_impl.h"
 
 #include <ydb/core/kqp/gateway/actors/scheme.h>
+#include <ydb/core/kqp/gateway/actors/analyze_actor.h>
 #include <ydb/core/kqp/gateway/local_rpc/helper.h>
 #include <ydb/core/tx/tx_proxy/proxy.h>
 #include <ydb/core/kqp/session_actor/kqp_worker_common.h>
 #include <ydb/core/tx/schemeshard/schemeshard_build_index.h>
+#include <ydb/services/metadata/abstract/kqp_common.h>
 
 namespace NKikimr::NKqp {
 
@@ -38,9 +40,14 @@ class TKqpSchemeExecuter : public TActorBootstrapped<TKqpSchemeExecuter> {
     struct TEvPrivate {
         enum EEv {
             EvResult = EventSpaceBegin(TEvents::ES_PRIVATE),
+            EvMakeTempDirResult,
         };
 
         struct TEvResult : public TEventLocal<TEvResult, EEv::EvResult> {
+            IKqpGateway::TGenericResult Result;
+        };
+
+        struct TEvMakeTempDirResult : public TEventLocal<TEvMakeTempDirResult, EEv::EvMakeTempDirResult> {
             IKqpGateway::TGenericResult Result;
         };
     };
@@ -49,9 +56,11 @@ public:
         return NKikimrServices::TActivity::KQP_EXECUTER_ACTOR;
     }
 
-    TKqpSchemeExecuter(TKqpPhyTxHolder::TConstPtr phyTx, NKikimrKqp::EQueryType queryType, const TActorId& target, const TMaybe<TString>& requestType, 
+    TKqpSchemeExecuter(
+        TKqpPhyTxHolder::TConstPtr phyTx, NKikimrKqp::EQueryType queryType, const TActorId& target, const TMaybe<TString>& requestType,
         const TString& database, TIntrusiveConstPtr<NACLib::TUserToken> userToken,
-        bool temporary, TString sessionId, TIntrusivePtr<TUserRequestContext> ctx)
+        bool temporary, TString sessionId, TIntrusivePtr<TUserRequestContext> ctx,
+        const TActorId& kqpTempTablesAgentActor)
         : PhyTx(phyTx)
         , QueryType(queryType)
         , Target(target)
@@ -61,21 +70,53 @@ public:
         , SessionId(sessionId)
         , RequestContext(std::move(ctx))
         , RequestType(requestType)
+        , KqpTempTablesAgentActor(kqpTempTablesAgentActor)
     {
         YQL_ENSURE(PhyTx);
         YQL_ENSURE(PhyTx->GetType() == NKqpProto::TKqpPhyTx::TYPE_SCHEME);
 
-        ResponseEv = std::make_unique<TEvKqpExecuter::TEvTxResponse>(nullptr);
+        ResponseEv = std::make_unique<TEvKqpExecuter::TEvTxResponse>(
+            nullptr,
+            TEvKqpExecuter::TEvTxResponse::EExecutionType::Scheme);
     }
 
     void StartBuildOperation() {
-        const auto& schemeOp = PhyTx->GetSchemeOperation();
-        auto buildOp = schemeOp.GetBuildOperation();
         Send(MakeTxProxyID(), new TEvTxUserProxy::TEvAllocateTxId);
-        Become(&TKqpSchemeExecuter::ExecuteState);    
+        Become(&TKqpSchemeExecuter::ExecuteState);
     }
 
-    void Bootstrap() {
+    void CreateTmpDirectory() {
+        auto ev = MakeHolder<TEvTxUserProxy::TEvProposeTransaction>();
+        auto& record = ev->Record;
+
+        record.SetDatabaseName(Database);
+        if (UserToken) {
+            record.SetUserToken(UserToken->GetSerializedToken());
+        }
+
+        auto* modifyScheme = record.MutableTransaction()->MutableModifyScheme();
+        modifyScheme->SetWorkingDir(GetSessionDirsBasePath(Database));
+        modifyScheme->SetOperationType(NKikimrSchemeOp::EOperationType::ESchemeOpMkDir);
+        modifyScheme->SetAllowCreateInTempDir(false);
+        auto* makeDir = modifyScheme->MutableMkDir();
+        makeDir->SetName(SessionId);
+        ActorIdToProto(KqpTempTablesAgentActor, modifyScheme->MutableTempDirOwnerActorId());
+
+        auto promise = NewPromise<IKqpGateway::TGenericResult>();
+        IActor* requestHandler = new TSchemeOpRequestHandler(ev.Release(), promise, false);
+        RegisterWithSameMailbox(requestHandler);
+
+        auto actorSystem = TlsActivationContext->AsActorContext().ExecutorThread.ActorSystem;
+        auto selfId = SelfId();
+        promise.GetFuture().Subscribe([actorSystem, selfId](const TFuture<IKqpGateway::TGenericResult>& future) {
+            auto ev = MakeHolder<TEvPrivate::TEvMakeTempDirResult>();
+            ev->Result = future.GetValue();
+            actorSystem->Send(selfId, ev.Release());
+        });
+        Become(&TKqpSchemeExecuter::ExecuteState);
+    }
+
+    void MakeSchemeOperationRequest() {
         using TRequest = TEvTxUserProxy::TEvProposeTransaction;
 
         auto ev = MakeHolder<TRequest>();
@@ -106,48 +147,207 @@ public:
                         default:
                             YQL_ENSURE(false, "Unexpected operation type");
                     }
-                    tableDesc->SetName(tableDesc->GetName() + SessionId);
-                    tableDesc->SetPath(tableDesc->GetPath() + SessionId);
+                    const auto fullPath = JoinPath({tableDesc->GetPath(), tableDesc->GetName()});
+                    YQL_ENSURE(fullPath.size() > 1);
+                    tableDesc->SetName(GetCreateTempTablePath(Database, SessionId, fullPath));
+                    tableDesc->SetPath(Database);
+                    modifyScheme.SetAllowCreateInTempDir(true);
                 }
                 ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
                 break;
             }
 
             case NKqpProto::TKqpSchemeOperation::kDropTable: {
-                auto modifyScheme = schemeOp.GetDropTable();
-                if (Temporary) {
-                    auto* dropTable = modifyScheme.MutableDrop();
-                    dropTable->SetName(dropTable->GetName() + SessionId);
-                }
+                const auto& modifyScheme = schemeOp.GetDropTable();
                 ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
                 break;
             }
 
             case NKqpProto::TKqpSchemeOperation::kAlterTable: {
-                auto modifyScheme = schemeOp.GetAlterTable();
+                const auto& modifyScheme = schemeOp.GetAlterTable();
                 ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
                 break;
             }
 
             case NKqpProto::TKqpSchemeOperation::kBuildOperation: {
-                auto buildOp = schemeOp.GetBuildOperation();
                 return StartBuildOperation();
             }
 
             case NKqpProto::TKqpSchemeOperation::kCreateUser: {
-                auto modifyScheme = schemeOp.GetCreateUser();
+                const auto& modifyScheme = schemeOp.GetCreateUser();
                 ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
                 break;
             }
+
             case NKqpProto::TKqpSchemeOperation::kAlterUser: {
-                auto modifyScheme = schemeOp.GetAlterUser();
+                const auto& modifyScheme = schemeOp.GetAlterUser();
                 ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
                 break;
             }
+
             case NKqpProto::TKqpSchemeOperation::kDropUser: {
-                auto modifyScheme = schemeOp.GetDropUser();
+                const auto& modifyScheme = schemeOp.GetDropUser();
                 ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
                 break;
+            }
+            case NKqpProto::TKqpSchemeOperation::kCreateExternalTable: {
+                const auto& modifyScheme = schemeOp.GetCreateExternalTable();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+            case NKqpProto::TKqpSchemeOperation::kAlterExternalTable: {
+                const auto& modifyScheme = schemeOp.GetAlterExternalTable();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+            case NKqpProto::TKqpSchemeOperation::kDropExternalTable: {
+                const auto& modifyScheme = schemeOp.GetDropExternalTable();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kCreateGroup: {
+                const auto& modifyScheme = schemeOp.GetCreateGroup();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kAddGroupMembership: {
+                const auto& modifyScheme = schemeOp.GetAddGroupMembership();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kRemoveGroupMembership: {
+                const auto& modifyScheme = schemeOp.GetRemoveGroupMembership();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kRenameGroup: {
+                const auto& modifyScheme = schemeOp.GetRenameGroup();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kDropGroup: {
+                const auto& modifyScheme = schemeOp.GetDropGroup();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kModifyPermissions: {
+                const auto& modifyScheme = schemeOp.GetModifyPermissions();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kCreateColumnTable: {
+                const auto& modifyScheme = schemeOp.GetCreateColumnTable();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kAlterColumnTable: {
+                const auto& modifyScheme = schemeOp.GetAlterColumnTable();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kCreateTableStore: {
+                const auto& modifyScheme = schemeOp.GetCreateTableStore();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kAlterTableStore: {
+                const auto& modifyScheme = schemeOp.GetAlterTableStore();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kDropTableStore: {
+                const auto& modifyScheme = schemeOp.GetDropTableStore();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kCreateSequence: {
+                const auto& modifyScheme = schemeOp.GetCreateSequence();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kDropSequence: {
+                const auto& modifyScheme = schemeOp.GetDropSequence();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kCreateReplication: {
+                const auto& modifyScheme = schemeOp.GetCreateReplication();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kAlterReplication: {
+                const auto& modifyScheme = schemeOp.GetAlterReplication();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kDropReplication: {
+                const auto& modifyScheme = schemeOp.GetDropReplication();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kAlterSequence: {
+                const auto& modifyScheme = schemeOp.GetAlterSequence();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kCreateTopic: {
+                const auto& modifyScheme = schemeOp.GetCreateTopic();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kAlterTopic: {
+                const auto& modifyScheme = schemeOp.GetAlterTopic();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+
+            case NKqpProto::TKqpSchemeOperation::kDropTopic: {
+                const auto& modifyScheme = schemeOp.GetDropTopic();
+                ev->Record.MutableTransaction()->MutableModifyScheme()->CopyFrom(modifyScheme);
+                break;
+            }
+            
+            case NKqpProto::TKqpSchemeOperation::kAnalyzeTable: {
+                const auto& analyzeOperation = schemeOp.GetAnalyzeTable();
+
+                auto analyzePromise = NewPromise<IKqpGateway::TGenericResult>();
+
+                TVector<TString> columns{analyzeOperation.columns().begin(), analyzeOperation.columns().end()};
+                IActor* analyzeActor = new TAnalyzeActor(analyzeOperation.GetTablePath(), columns, analyzePromise);
+
+                auto actorSystem = TlsActivationContext->AsActorContext().ExecutorThread.ActorSystem;
+                RegisterWithSameMailbox(analyzeActor);
+
+                auto selfId = SelfId();
+                analyzePromise.GetFuture().Subscribe([actorSystem, selfId](const TFuture<IKqpGateway::TGenericResult>& future) {
+                    auto ev = MakeHolder<TEvPrivate::TEvResult>();
+                    ev->Result = future.GetValue();
+
+                    actorSystem->Send(selfId, ev.Release());
+                });
+
+                Become(&TKqpSchemeExecuter::ExecuteState);
+                return;
+
             }
 
             default:
@@ -159,7 +359,7 @@ public:
         auto promise = NewPromise<IKqpGateway::TGenericResult>();
 
         bool successOnNotExist = false;
-        bool failedOnAlreadyExists = false;        
+        bool failedOnAlreadyExists = false;
         // exists/not exists semantics supported only in the query service.
         if (IsQueryService()) {
             successOnNotExist = ev->Record.GetTransaction().GetModifyScheme().GetSuccessOnNotExist();
@@ -186,11 +386,67 @@ public:
         Become(&TKqpSchemeExecuter::ExecuteState);
     }
 
+    void MakeObjectRequest() {
+        const auto& schemeOp = PhyTx->GetSchemeOperation();
+        NMetadata::IClassBehaviour::TPtr cBehaviour(NMetadata::IClassBehaviour::TFactory::Construct(schemeOp.GetObjectType()));
+        if (!cBehaviour) {
+            InternalError(TStringBuilder() << "Unsupported object type: \"" << schemeOp.GetObjectType() << "\"");
+            return;
+        }
+
+        if (!cBehaviour->GetOperationsManager()) {
+            InternalError(TStringBuilder() << "Object type \"" << schemeOp.GetObjectType() << "\" does not have manager for operations");
+        }
+
+        auto* actorSystem = TActivationContext::ActorSystem();
+        auto selfId = SelfId();
+
+        NMetadata::NModifications::IOperationsManager::TExternalModificationContext context;
+        context.SetDatabase(Database);
+        context.SetActorSystem(actorSystem);
+        if (UserToken) {
+            context.SetUserToken(*UserToken);
+        }
+
+        auto resultFuture = cBehaviour->GetOperationsManager()->ExecutePrepared(schemeOp, SelfId().NodeId(), cBehaviour, context);
+
+        using TResultFuture = NThreading::TFuture<NMetadata::NModifications::IOperationsManager::TYqlConclusionStatus>;
+        resultFuture.Subscribe([actorSystem, selfId](const TResultFuture& f) {
+            const auto& status = f.GetValue();
+            auto ev = MakeHolder<TEvPrivate::TEvResult>();
+            if (status.Ok()) {
+                ev->Result.SetSuccess();
+            } else {
+                ev->Result.SetStatus(status.GetStatus());
+                if (TString message = status.GetErrorMessage()) {
+                    ev->Result.AddIssue(NYql::TIssue{message});
+                }
+            }
+            actorSystem->Send(selfId, ev.Release());
+        });
+
+        Become(&TKqpSchemeExecuter::ObjectExecuteState);
+    }
+
+    void Bootstrap() {
+        const auto& schemeOp = PhyTx->GetSchemeOperation();
+        if (schemeOp.GetObjectType()) {
+            MakeObjectRequest();
+        } else {
+            if (Temporary) {
+                CreateTmpDirectory();
+            } else {
+                MakeSchemeOperationRequest();
+            }
+        }
+    }
+
 public:
     STATEFN(ExecuteState) {
         try {
             switch (ev->GetTypeRewrite()) {
                 hFunc(TEvPrivate::TEvResult, HandleExecute);
+                hFunc(TEvPrivate::TEvMakeTempDirResult, Handle);
                 hFunc(TEvKqp::TEvAbortExecution, HandleAbortExecution);
                 hFunc(TEvTxUserProxy::TEvAllocateTxIdResult, Handle);
                 hFunc(TEvTxProxySchemeCache::TEvNavigateKeySetResult, Handle);
@@ -208,6 +464,27 @@ public:
         }
     }
 
+    STATEFN(ObjectExecuteState) {
+        try {
+            switch (ev->GetTypeRewrite()) {
+                hFunc(TEvPrivate::TEvResult, HandleExecute);
+                hFunc(TEvKqp::TEvAbortExecution, HandleAbortExecution);
+                default:
+                    UnexpectedEvent("ObjectExecuteState", ev->GetTypeRewrite());
+            }
+        } catch (const yexception& e) {
+            InternalError(e.what());
+        }
+    }
+
+    void Handle(TEvPrivate::TEvMakeTempDirResult::TPtr& result) {
+        if (!result->Get()->Result.Success()) {
+            InternalError(TStringBuilder()
+                << "Error creating temporary directory for session " << SessionId
+                << ": " << result->Get()->Result.Issues().ToString(true));
+        }
+        MakeSchemeOperationRequest();
+    }
 
     void Handle(TEvTxUserProxy::TEvAllocateTxIdResult::TPtr& ev) {
         const auto* msg = ev->Get();
@@ -218,7 +495,7 @@ public:
 
     void Navigate(const TActorId& schemeCache) {
         const auto& schemeOp = PhyTx->GetSchemeOperation();
-        auto buildOp = schemeOp.GetBuildOperation();
+        const auto& buildOp = schemeOp.GetBuildOperation();
         const auto& path = buildOp.source_path();
 
         const auto paths = NKikimr::SplitPath(path);
@@ -226,10 +503,10 @@ public:
             TString error = TStringBuilder() << "Failed to split table path " << path;
             return ReplyErrorAndDie(Ydb::StatusIds::BAD_REQUEST, NYql::TIssue(error));
         }
-    
+
         auto request = std::make_unique<NSchemeCache::TSchemeCacheNavigate>();
 
-        request->DatabaseName = Database;    
+        request->DatabaseName = Database;
         auto& entry = request->ResultSet.emplace_back();
         entry.Operation = NSchemeCache::TSchemeCacheNavigate::OpPath;
         entry.Path = ::NKikimr::SplitPath(path);
@@ -280,7 +557,7 @@ public:
         }
 
         const auto& schemeOp = PhyTx->GetSchemeOperation();
-        auto buildOp = schemeOp.GetBuildOperation();
+        const auto& buildOp = schemeOp.GetBuildOperation();
         SetSchemeShardId(domainInfo->ExtractSchemeShard());
         auto req = std::make_unique<NSchemeShard::TEvIndexBuilder::TEvCreateRequest>(TxId, Database, buildOp);
         ForwardToSchemeShard(std::move(req));
@@ -465,16 +742,20 @@ private:
     ui64 SchemeShardTabletId = 0;
     TIntrusivePtr<TUserRequestContext> RequestContext;
     const TMaybe<TString> RequestType;
+    const TActorId KqpTempTablesAgentActor;
 };
 
 } // namespace
 
-IActor* CreateKqpSchemeExecuter(TKqpPhyTxHolder::TConstPtr phyTx, NKikimrKqp::EQueryType queryType, const TActorId& target,
+IActor* CreateKqpSchemeExecuter(
+    TKqpPhyTxHolder::TConstPtr phyTx, NKikimrKqp::EQueryType queryType, const TActorId& target,
     const TMaybe<TString>& requestType, const TString& database,
     TIntrusiveConstPtr<NACLib::TUserToken> userToken, bool temporary, TString sessionId,
-    TIntrusivePtr<TUserRequestContext> ctx)
+    TIntrusivePtr<TUserRequestContext> ctx, const TActorId& kqpTempTablesAgentActor)
 {
-    return new TKqpSchemeExecuter(phyTx, queryType, target, requestType, database, userToken, temporary, sessionId, std::move(ctx));
+    return new TKqpSchemeExecuter(
+        phyTx, queryType, target, requestType, database, userToken,
+        temporary, sessionId, std::move(ctx), kqpTempTablesAgentActor);
 }
 
 } // namespace NKikimr::NKqp

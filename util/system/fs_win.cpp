@@ -208,6 +208,9 @@ namespace NFsPrivate {
     TString WinReadLink(const TString& name) {
         TFileHandle h = CreateFileWithUtf8Name(name, GENERIC_READ, FILE_SHARE_READ, OPEN_EXISTING,
                                                FILE_FLAG_OPEN_REPARSE_POINT | FILE_FLAG_BACKUP_SEMANTICS, true);
+        if (h == INVALID_HANDLE_VALUE) {
+            ythrow TIoSystemError() << "can't open file " << name;
+        }
         TTempBuf buf;
         REPARSE_DATA_BUFFER* rdb = ReadReparsePoint(h, buf);
         if (rdb == nullptr) {
@@ -222,7 +225,7 @@ namespace NFsPrivate {
             size_t len = rdb->MountPointReparseBuffer.SubstituteNameLength / sizeof(wchar16);
             return WideToUTF8(str, len);
         }
-        //this reparse point is unsupported in arcadia
+        // this reparse point is unsupported in arcadia
         return TString();
     }
 
@@ -233,7 +236,7 @@ namespace NFsPrivate {
     }
 
     // we can't use this function to get an analog of unix inode due to a lot of NTFS folders do not have this GUID
-    //(it will be 'create' case really)
+    // (it will be 'create' case really)
     /*
 bool GetObjectId(const char* path, GUID* id) {
     TFileHandle h = CreateFileWithUtf8Name(path, 0, FILE_SHARE_READ|FILE_SHARE_WRITE|FILE_SHARE_DELETE,

@@ -5,6 +5,10 @@ PY3TEST()
         test_sql_format.py
     )
 
+IF (SANITIZER_TYPE OR NOT OPENSOURCE)
+    REQUIREMENTS(ram:12)
+ENDIF()
+
 IF (SANITIZER_TYPE)
     TIMEOUT(1800)
     SIZE(LARGE)
@@ -23,7 +27,6 @@ ENDIF()
         ydb/library/yql/tools/yqlrun
         ydb/library/yql/tools/sql_formatter
         contrib/libs/protobuf/python
-        ydb/library/yql/providers/common/proto/python
     )
     DATA(
         arcadia/ydb/library/yql/tests/sql # python files
@@ -37,8 +40,6 @@ ENDIF()
 
 
 NO_CHECK_IMPORTS()
-
-REQUIREMENTS(ram:12)
 
 END()
 

@@ -17,18 +17,14 @@ using EComponentId = NKikimrConfig::TCompatibilityRule;
 using TComponentId = NKikimrConfig::TCompatibilityRule::EComponentId;
 
 TCompatibilityInfo::TCompatibilityInfo() {
-    using TCurrentConstructor = TCompatibilityInfo::TProtoConstructor::TCurrentCompatibilityInfo;
     using TStoredConstructor = TCompatibilityInfo::TProtoConstructor::TStoredCompatibilityInfo;
-    // using TCompatibilityRuleConstructor = TCompatibilityInfo::TProtoConstructor::TCompatibilityRule;
     using TVersionConstructor = TCompatibilityInfo::TProtoConstructor::TVersion;
 
     /////////////////////////////////////////////////////////
     // Current CompatibilityInfo
     /////////////////////////////////////////////////////////
 
-    auto current = TCurrentConstructor{
-        .Application = "ydb"
-    }.ToPB();
+    auto current = MakeCurrent();
 
     // bool success = CompleteFromTag(current);
     // Y_ABORT_UNLESS(success);
@@ -648,10 +644,6 @@ bool TCompatibilityInfo::CheckCompatibility(const TCurrent* current, const TOldF
                 + PrintStoredAndCurrent(peer, current);
         return false;
     }
-
-    errorReason = "Peer version tag doesn't match any current compatibility rule, current version is not in accepted tags list, "
-            + PrintStoredAndCurrent(peer, current);
-    return false;
 }
 
 bool TCompatibilityInfo::CheckCompatibility(const TOldFormat& peer, TComponentId componentId, TString& errorReason) const {

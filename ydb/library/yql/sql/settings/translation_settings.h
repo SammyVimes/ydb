@@ -1,8 +1,11 @@
 #pragma once
 
+#include <ydb/library/yql/core/pg_settings/guc_settings.h>
+
 #include <util/generic/hash.h>
 #include <util/generic/hash_set.h>
 #include <util/generic/map.h>
+#include <util/generic/maybe.h>
 #include <util/generic/vector.h>
 
 namespace google::protobuf {
@@ -25,7 +28,7 @@ namespace NSQLTranslation {
     };
 
     enum class EBindingsMode {
-        // raise error 
+        // raise error
         DISABLED,
         // classic support for bindings
         ENABLED,
@@ -41,7 +44,8 @@ namespace NSQLTranslation {
 
     using TIncrementMonCounterFunction = std::function<void(const TString&, const TString&)>;
 
-    enum class EV0Behavior {
+    // persisted
+    enum class EV0Behavior : ui32 {
         Silent = 0,
         Report,
         Disable
@@ -57,6 +61,8 @@ namespace NSQLTranslation {
         static TPtr MakeAlwaysDisallow();
 
         static TPtr MakeAlwaysAllow();
+
+        static TPtr Make(bool allow);
     };
 
     struct TTableBindingSettings {
@@ -79,6 +85,7 @@ namespace NSQLTranslation {
 
         EBindingsMode BindingsMode;
         THashMap<TString, TTableBindingSettings> Bindings;
+        bool SaveWorldDependencies = false;
 
         // each (name, type) entry in this map is equivalent to
         // DECLARE $name AS type;
@@ -101,13 +108,20 @@ namespace NSQLTranslation {
         bool WarnOnV0;
         ISqlFeaturePolicy::TPtr V0WarnAsError;
         ISqlFeaturePolicy::TPtr DqDefaultAuto;
+        ISqlFeaturePolicy::TPtr BlockDefaultAuto;
         bool AssumeYdbOnClusterWithSlash;
         TString DynamicClusterProvider;
         TString FileAliasPrefix;
 
         TVector<ui32> PgParameterTypeOids;
         bool AutoParametrizeEnabled = false;
-        THashSet<TString> AutoParametrizeEnabledScopes = {};
+        bool AutoParametrizeValuesStmt = false;
+
+        TGUCSettings::TPtr GUCSettings = std::make_shared<TGUCSettings>();
+        bool UnicodeLiterals = false;
+
+        TMaybe<TString> ApplicationName;
+        bool PgSortNulls = false;
     };
 
     bool ParseTranslationSettings(const TString& query, NSQLTranslation::TTranslationSettings& settings, NYql::TIssues& issues);

@@ -140,7 +140,7 @@ struct TSerializerMethodSelector;
 template <class T>
 struct TSerializerMethodSelector<T, std::enable_if_t<NHasSaveLoad::THasSaveLoad<T>::value>> {
     static inline void Save(IOutputStream* out, const T& t) {
-        //assume Save clause do not change t
+        // assume Save clause do not change t
         (const_cast<T&>(t)).SaveLoad(out);
     }
 
@@ -698,7 +698,7 @@ struct TSerializer<std::variant<Args...>> {
 private:
     template <size_t... Is>
     static void LoadImpl(IInputStream* is, TVar& v, ui8 index, std::index_sequence<Is...>) {
-        using TLoader = void (*)(IInputStream*, TVar & v);
+        using TLoader = void (*)(IInputStream*, TVar& v);
         constexpr TLoader loaders[] = {::NPrivate::LoadVariantAlternative<TVar, Args, Is>...};
         loaders[index](is, v);
     }

@@ -3,6 +3,7 @@
 #include "log.h"
 #include "formatter.h"
 
+#include <library/cpp/yt/system/exit.h>
 #include <library/cpp/yt/system/handle_eintr.h>
 
 namespace NYT::NLogging {
@@ -153,8 +154,7 @@ void TStreamLogWriterBase::OnException(const std::exception& ex)
         /*lpNumberOfBytesWritten*/ nullptr,
         /*lpOverlapped*/ nullptr);
 #endif
-    _exit(100);
-    YT_ABORT();
+    AbortProcess(ToUnderlying(EProcessExitCode::IOError));
 }
 
 void TStreamLogWriterBase::ResetCurrentSegment(i64 size)
@@ -189,8 +189,7 @@ TRateLimitCounter* TStreamLogWriterBase::GetCategoryRateLimitCounter(TStringBuf 
         it = CategoryToRateLimit_.insert({category, TRateLimitCounter(
             std::nullopt,
             r.Counter("/bytes_written"),
-            r.Counter("/events_skipped_by_category_limit")
-        )}).first;
+            r.Counter("/events_skipped_by_category_limit"))}).first;
     }
     return &it->second;
 }

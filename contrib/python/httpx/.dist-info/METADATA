@@ -1,6 +1,6 @@
 Metadata-Version: 2.1
 Name: httpx
-Version: 0.25.1
+Version: 0.27.0
 Summary: The next generation HTTP client.
 Project-URL: Changelog, https://github.com/encode/httpx/blob/master/CHANGELOG.md
 Project-URL: Documentation, https://www.python-httpx.org
@@ -27,12 +27,12 @@ Classifier: Topic :: Internet :: WWW/HTTP
 Requires-Python: >=3.8
 Requires-Dist: anyio
 Requires-Dist: certifi
-Requires-Dist: httpcore
+Requires-Dist: httpcore==1.*
 Requires-Dist: idna
 Requires-Dist: sniffio
 Provides-Extra: brotli
-Requires-Dist: brotli; platform_python_implementation == 'CPython' and extra == 'brotli'
-Requires-Dist: brotlicffi; platform_python_implementation != 'CPython' and extra == 'brotli'
+Requires-Dist: brotli; (platform_python_implementation == 'CPython') and extra == 'brotli'
+Requires-Dist: brotlicffi; (platform_python_implementation != 'CPython') and extra == 'brotli'
 Provides-Extra: cli
 Requires-Dist: click==8.*; extra == 'cli'
 Requires-Dist: pygments==2.*; extra == 'cli'
@@ -194,14 +194,14 @@ inspiration around the lower-level networking details.
 
 ## Release Information
 
-### 0.25.1 (3rd November, 2023)
+### Deprecated
 
-* Add support for Python 3.12. (#2854)
-* Add support for httpcore 1.0 (#2885)
+* The `app=...` shortcut has been deprecated. Use the explicit style of `transport=httpx.WSGITransport()` or `transport=httpx.ASGITransport()` instead.
 
 ### Fixed
 
-* Raise `ValueError` on `Response.encoding` being set after `Response.text` has been accessed. (#2852)
+* Respect the `http1` argument while configuring proxy transports. (#3023)
+* Fix RFC 2069 mode digest authentication. (#3045)
 
 
 ---

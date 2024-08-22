@@ -6,6 +6,7 @@
 #include <ydb/core/base/services/blobstorage_service_id.h>
 #include <ydb/core/blobstorage/vdisk/ingress/blobstorage_ingress.h>
 #include <ydb/core/protos/blobstorage.pb.h>
+#include <ydb/core/protos/blobstorage_disk.pb.h>
 
 #include <ydb/library/actors/core/interconnect.h>
 
@@ -419,6 +420,10 @@ ui32 TBlobStorageGroupInfo::TTopology::GetIdxInSubgroup(const TVDiskIdShort& vdi
     return BlobMapper->GetIdxInSubgroup(vdisk, hash);
 }
 
+bool TBlobStorageGroupInfo::TTopology::IsHandoff(const TVDiskIdShort& vdisk, ui32 hash) const {
+    return BlobMapper->GetIdxInSubgroup(vdisk, hash) >= GType.TotalPartCount();
+}
+
 TVDiskIdShort TBlobStorageGroupInfo::TTopology::GetVDiskInSubgroup(ui32 idxInSubgroup, ui32 hash) const {
     return BlobMapper->GetVDiskInSubgroup(idxInSubgroup, hash);
 }
@@ -548,7 +553,7 @@ TString TBlobStorageGroupInfo::TTopology::ToString() const {
 ////////////////////////////////////////////////////////////////////////////
 // TBlobStorageGroupInfo::TDynamicInfo
 ////////////////////////////////////////////////////////////////////////////
-TBlobStorageGroupInfo::TDynamicInfo::TDynamicInfo(ui32 groupId, ui32 groupGen)
+TBlobStorageGroupInfo::TDynamicInfo::TDynamicInfo(TGroupId groupId, ui32 groupGen)
     : GroupId(groupId)
     , GroupGeneration(groupGen)
 {}
@@ -558,8 +563,8 @@ TBlobStorageGroupInfo::TDynamicInfo::TDynamicInfo(ui32 groupId, ui32 groupGen)
 ////////////////////////////////////////////////////////////////////////////
 TBlobStorageGroupInfo::TBlobStorageGroupInfo(TBlobStorageGroupType gtype, ui32 numVDisksPerFailDomain,
         ui32 numFailDomains, ui32 numFailRealms, const TVector<TActorId> *vdiskIds, EEncryptionMode encryptionMode,
-        ELifeCyclePhase lifeCyclePhase, TCypherKey key)
-    : GroupID(0)
+        ELifeCyclePhase lifeCyclePhase, TCypherKey key, TGroupId groupId)
+    : GroupID(groupId)
     , GroupGeneration(1)
     , Type(gtype)
     , Dynamic(GroupID, GroupGeneration)
@@ -633,7 +638,7 @@ TIntrusivePtr<TBlobStorageGroupInfo> TBlobStorageGroupInfo::Parse(const NKikimrB
     auto erasure = (TBlobStorageGroupType::EErasureSpecies)group.GetErasureSpecies();
     TBlobStorageGroupType type(erasure);
     TBlobStorageGroupInfo::TTopology topology(type);
-    TBlobStorageGroupInfo::TDynamicInfo dyn(group.GetGroupID(), group.GetGroupGeneration());
+    TBlobStorageGroupInfo::TDynamicInfo dyn(TGroupId::FromProto(&group, &NKikimrBlobStorage::TGroupInfo::GetGroupID), group.GetGroupGeneration());
     topology.FailRealms.resize(group.RingsSize());
     for (ui32 ringIdx = 0; ringIdx < group.RingsSize(); ++ringIdx) {
         const auto& realm = group.GetRings(ringIdx);
@@ -912,11 +917,11 @@ TString TBlobStorageGroupInfo::ToString() const {
 
 
 TVDiskID VDiskIDFromVDiskID(const NKikimrBlobStorage::TVDiskID &x) {
-    return TVDiskID(x.GetGroupID(), x.GetGroupGeneration(), x.GetRing(), x.GetDomain(), x.GetVDisk());
+    return TVDiskID(TGroupId::FromProto(&x, &NKikimrBlobStorage::TVDiskID::GetGroupID), x.GetGroupGeneration(), x.GetRing(), x.GetDomain(), x.GetVDisk());
 }
 
 void VDiskIDFromVDiskID(const TVDiskID &id, NKikimrBlobStorage::TVDiskID *proto) {
-    proto->SetGroupID(id.GroupID);
+    proto->SetGroupID(id.GroupID.GetRawId());
     proto->SetGroupGeneration(id.GroupGeneration);
     proto->SetRing(id.FailRealm);
     proto->SetDomain(id.FailDomain);
@@ -932,15 +937,15 @@ TVDiskID VDiskIDFromString(TString str, bool* isGenerationSet) {
     TVector<TString> parts = SplitString(str, ":");
     if (parts.size() != 5) {
         return TVDiskID::InvalidId;
-    } 
+    }
 
     ui32 groupGeneration = 0;
 
-    if (!IsHexNumber(parts[0]) || !IsNumber(parts[2]) || !IsNumber(parts[3]) || !IsNumber(parts[4]) 
+    if (!IsHexNumber(parts[0]) || !IsNumber(parts[2]) || !IsNumber(parts[3]) || !IsNumber(parts[4])
         || !(IsNumber(parts[1]) || parts[1] == "_")) {
         return TVDiskID::InvalidId;
     }
-    
+
     if (parts[1] == "_") {
         if (isGenerationSet) {
             *isGenerationSet = false;
@@ -951,11 +956,10 @@ TVDiskID VDiskIDFromString(TString str, bool* isGenerationSet) {
         }
         groupGeneration = IntFromString<ui32, 10>(parts[1]);
     }
-
-    return TVDiskID(IntFromString<ui32, 16>(parts[0]), 
-        groupGeneration, 
-        IntFromString<ui8, 10>(parts[2]), 
-        IntFromString<ui8, 10>(parts[3]), 
+    return TVDiskID(TGroupId::FromValue(IntFromString<ui32, 16>(parts[0])),
+        groupGeneration,
+        IntFromString<ui8, 10>(parts[2]),
+        IntFromString<ui8, 10>(parts[3]),
         IntFromString<ui8, 10>(parts[4]));
 }
 

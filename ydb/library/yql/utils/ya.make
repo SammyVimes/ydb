@@ -60,6 +60,8 @@ RECURSE(
     failure_injector
     fetch
     log
+    plan
+    signals
     simd
     sys
     test_http_server

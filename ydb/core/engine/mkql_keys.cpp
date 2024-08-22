@@ -51,14 +51,6 @@ NScheme::TTypeInfo UnpackTypeInfo(NKikimr::NMiniKQL::TType *type, bool &isOption
     }
 }
 
-
-template<typename T>
-TCell MakeCell(const NUdf::TUnboxedValuePod& value) {
-    static_assert(TCell::CanInline(sizeof(T)), "Can't inline data in cell.");
-    const auto v = value.Get<T>();
-    return TCell(reinterpret_cast<const char*>(&v), sizeof(v));
-}
-
 THolder<TKeyDesc> ExtractKeyTuple(const TTableId& tableId, TTupleLiteral* tuple,
     const TVector<TKeyDesc::TColumnOp>& columns,
     TKeyDesc::ERowOperation rowOperation, bool requireStaticKey, const TTypeEnvironment& env) {
@@ -300,7 +292,7 @@ TCell MakeCell(NScheme::TTypeInfo type, const NUdf::TUnboxedValuePod& value,
     } else {
         ref = value.AsStringRef();
     }
-    if (!isPg && (!copy && !value.IsEmbedded() || value.IsString() || TCell::CanInline(ref.Size()))) {
+    if (!isPg && !copy && !value.IsEmbedded() && (value.IsString() || TCell::CanInline(ref.Size()))) {
         return TCell(ref.Data(), ref.Size());
     }
 

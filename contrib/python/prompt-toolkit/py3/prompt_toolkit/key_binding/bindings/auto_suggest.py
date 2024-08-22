@@ -1,6 +1,7 @@
 """
 Key bindings for auto suggestion (for fish-style auto suggestion).
 """
+
 from __future__ import annotations
 
 import re
@@ -59,7 +60,7 @@ def load_auto_suggest_bindings() -> KeyBindings:
         suggestion = b.suggestion
 
         if suggestion:
-            t = re.split(r"(\S+\s+)", suggestion.text)
+            t = re.split(r"([^\s/]+(?:\s+|/))", suggestion.text)
             b.insert_text(next(x for x in t if x))
 
     return key_bindings

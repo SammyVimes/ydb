@@ -11,6 +11,8 @@ SRCS(
     configs_dispatcher.h
     console.cpp
     console.h
+    console_audit.cpp
+    console_audit.h
     console_configs_manager.cpp
     console_configs_manager.h
     console_configs_provider.cpp
@@ -56,6 +58,8 @@ SRCS(
     http.h
     immediate_controls_configurator.cpp
     immediate_controls_configurator.h
+    jaeger_tracing_configurator.cpp
+    jaeger_tracing_configurator.h
     log_settings_configurator.cpp
     log_settings_configurator.h
     logger.cpp
@@ -80,6 +84,7 @@ PEERDIR(
     ydb/core/blobstorage/base
     ydb/core/blobstorage/groupinfo
     ydb/core/cms/console/validators
+    ydb/core/config/init
     ydb/core/control
     ydb/core/engine/minikql
     ydb/core/mind
@@ -93,6 +98,8 @@ PEERDIR(
     ydb/public/api/protos
     ydb/public/lib/operation_id
 )
+
+YQL_LAST_ABI_VERSION()
 
 END()
 

@@ -18,7 +18,8 @@
 
 namespace NYdb::NQuery {
 
-using TRetryContextAsync = NRetry::Async::TRetryContext<TQueryClient, TAsyncExecuteQueryResult>;
+using TRetryContextResultAsync = NRetry::Async::TRetryContext<TQueryClient, TAsyncExecuteQueryResult>;
+using TRetryContextAsync = NRetry::Async::TRetryContext<TQueryClient, TAsyncStatus>;
 
 NYdb::NRetry::TRetryOperationSettings GetRetrySettings(TDuration timeout, bool isIndempotent) {
     return NYdb::NRetry::TRetryOperationSettings()
@@ -33,7 +34,7 @@ TCreateSessionSettings::TCreateSessionSettings() {
 
 static void SetTxSettings(const TTxSettings& txSettings, Ydb::Query::TransactionSettings* proto)
 {
-    switch (txSettings.Mode_) {
+    switch (txSettings.GetMode()) {
         case TTxSettings::TS_SERIALIZABLE_RW:
             proto->mutable_serializable_read_write();
             break;
@@ -81,14 +82,20 @@ public:
             Connections_, DbDriverState_, query, txControl, params, settings, session);
     }
 
-    NThreading::TFuture<TScriptExecutionOperation> ExecuteScript(const TString& script, const TExecuteScriptSettings& settings) {
+    NThreading::TFuture<TScriptExecutionOperation> ExecuteScript(const TString& script, const TMaybe<TParams>& params, const TExecuteScriptSettings& settings) {
         using namespace Ydb::Query;
         auto request = MakeOperationRequest<ExecuteScriptRequest>(settings);
-        request.set_exec_mode(settings.ExecMode_);
-        request.set_stats_mode(settings.StatsMode_);
-        request.mutable_script_content()->set_syntax(settings.Syntax_);
+        request.set_exec_mode(::Ydb::Query::ExecMode(settings.ExecMode_));
+        request.set_stats_mode(::Ydb::Query::StatsMode(settings.StatsMode_));
+        request.set_pool_id(settings.PoolId_);
+        request.mutable_script_content()->set_syntax(::Ydb::Query::Syntax(settings.Syntax_));
         request.mutable_script_content()->set_text(script);
         SetDuration(settings.ResultsTtl_, *request.mutable_results_ttl());
+
+        if (params) {
+            *request.mutable_parameters() = params->GetProtoMap();
+        }
+
         auto promise = NThreading::NewPromise<TScriptExecutionOperation>();
 
         auto responseCb = [promise]
@@ -536,7 +543,13 @@ TAsyncExecuteQueryIterator TQueryClient::StreamExecuteQuery(const TString& query
 NThreading::TFuture<TScriptExecutionOperation> TQueryClient::ExecuteScript(const TString& script,
     const TExecuteScriptSettings& settings)
 {
-    return Impl_->ExecuteScript(script, settings);
+    return Impl_->ExecuteScript(script, {}, settings);
+}
+
+NThreading::TFuture<TScriptExecutionOperation> TQueryClient::ExecuteScript(const TString& script,
+    const TParams& params, const TExecuteScriptSettings& settings)
+{
+    return Impl_->ExecuteScript(script, params, settings);
 }
 
 TAsyncFetchScriptResultsResult TQueryClient::FetchScriptResults(const NKikimr::NOperationId::TOperationId& operationId, int64_t resultSetIndex,
@@ -562,10 +575,30 @@ i64 TQueryClient::GetCurrentPoolSize() const {
     return Impl_->GetCurrentPoolSize();
 }
 
-TAsyncExecuteQueryResult TQueryClient::RetryQuery(TQueryFunc&& queryFunc, TRetryOperationSettings settings)
+TAsyncExecuteQueryResult TQueryClient::RetryQuery(TQueryResultFunc&& queryFunc, TRetryOperationSettings settings)
 {
+    TRetryContextResultAsync::TPtr ctx(new NRetry::Async::TRetryWithSession(*this, std::move(queryFunc), settings));
+    return ctx->Execute();
+}
+
+TAsyncStatus TQueryClient::RetryQuery(TQueryFunc&& queryFunc, TRetryOperationSettings settings) {
     TRetryContextAsync::TPtr ctx(new NRetry::Async::TRetryWithSession(*this, std::move(queryFunc), settings));
     return ctx->Execute();
+}
+
+TAsyncStatus TQueryClient::RetryQuery(TQueryWithoutSessionFunc&& queryFunc, TRetryOperationSettings settings) {
+    TRetryContextAsync::TPtr ctx(new NRetry::Async::TRetryWithoutSession(*this, std::move(queryFunc), settings));
+    return ctx->Execute();
+}
+
+TStatus TQueryClient::RetryQuery(const TQuerySyncFunc& queryFunc, TRetryOperationSettings settings) {
+    NRetry::Sync::TRetryWithSession ctx(*this, queryFunc, settings);
+    return ctx.Execute();
+}
+
+TStatus TQueryClient::RetryQuery(const TQueryWithoutSessionSyncFunc& queryFunc, TRetryOperationSettings settings) {
+    NRetry::Sync::TRetryWithoutSession ctx(*this, queryFunc, settings);
+    return ctx.Execute();
 }
 
 TAsyncExecuteQueryResult TQueryClient::RetryQuery(const TString& query, const TTxControl& txControl,
@@ -575,7 +608,7 @@ TAsyncExecuteQueryResult TQueryClient::RetryQuery(const TString& query, const TT
     auto queryFunc = [&query, &txControl](TSession session, TDuration duration) -> TAsyncExecuteQueryResult {
         return session.ExecuteQuery(query, txControl, TExecuteQuerySettings().ClientTimeout(duration));
     };
-    TRetryContextAsync::TPtr ctx(new NRetry::Async::TRetryWithSession(*this, std::move(queryFunc), settings));
+    TRetryContextResultAsync::TPtr ctx(new NRetry::Async::TRetryWithSession(*this, std::move(queryFunc), settings));
     return ctx->Execute();
 }
 

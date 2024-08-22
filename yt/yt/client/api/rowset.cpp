@@ -14,6 +14,7 @@ namespace NYT::NApi {
 
 using namespace NTabletClient;
 using namespace NTableClient;
+using namespace NCrypto;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -171,6 +172,11 @@ public:
         return VoidFuture;
     }
 
+    std::optional<TMD5Hash> GetDigest() const override
+    {
+        return std::nullopt;
+    }
+
 private:
     const TTableSchemaPtr Schema_;
     const TNameTablePtr NameTable_;
@@ -188,7 +194,7 @@ private:
 std::tuple<IUnversionedRowsetWriterPtr, TFuture<IUnversionedRowsetPtr>> CreateSchemafulRowsetWriter(TTableSchemaPtr schema)
 {
     auto writer = New<TSchemafulRowsetWriter>(std::move(schema));
-    return std::make_tuple(writer, writer->GetResult());
+    return std::tuple(writer, writer->GetResult());
 }
 
 ////////////////////////////////////////////////////////////////////////////////

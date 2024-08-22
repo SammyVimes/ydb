@@ -1,8 +1,12 @@
 RECURSE(
+    access
+    accessservice
     compute
     iam
+    kms
     operation
+    quota
     resourcemanager
     servicecontrol
+    ydb
 )
-

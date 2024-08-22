@@ -70,16 +70,30 @@ struct TCheckPermissionByAclResult
 
 struct TSetUserPasswordOptions
     : public TTimeoutOptions
-{ };
+{
+    bool PasswordIsTemporary = false;
+};
 
 struct TIssueTokenOptions
     : public TTimeoutOptions
-{ };
+{
+    TString Description;
+};
+
+struct TIssueTemporaryTokenOptions
+    : public TIssueTokenOptions
+{
+    TDuration ExpirationTimeout;
+};
 
 struct TIssueTokenResult
 {
     TString Token;
 };
+
+struct TRefreshTemporaryTokenOptions
+    : public TTimeoutOptions
+{ };
 
 struct TRevokeTokenOptions
     : public TTimeoutOptions
@@ -87,18 +101,23 @@ struct TRevokeTokenOptions
 
 struct TListUserTokensOptions
     : public TTimeoutOptions
-{ };
+{
+    bool WithMetadata;
+};
 
 struct TListUserTokensResult
 {
     // Tokens are SHA256-encoded.
     std::vector<TString> Tokens;
+    THashMap<TString, NYson::TYsonString> Metadata;
 };
 
 ////////////////////////////////////////////////////////////////////////////////
 
 struct ISecurityClient
 {
+    virtual ~ISecurityClient() = default;
+
     virtual TFuture<void> AddMember(
         const TString& group,
         const TString& member,

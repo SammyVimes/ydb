@@ -235,7 +235,6 @@ int CompareRowValues(const TUnversionedValue& lhs, const TUnversionedValue& rhs)
 //! Derived comparison operators.
 //! Note that these ignore flags.
 bool operator == (const TUnversionedValue& lhs, const TUnversionedValue& rhs);
-bool operator != (const TUnversionedValue& lhs, const TUnversionedValue& rhs);
 bool operator <= (const TUnversionedValue& lhs, const TUnversionedValue& rhs);
 bool operator <  (const TUnversionedValue& lhs, const TUnversionedValue& rhs);
 bool operator >= (const TUnversionedValue& lhs, const TUnversionedValue& rhs);
@@ -260,7 +259,6 @@ int CompareRows(
 //! Derived comparison operators.
 //! Note that these ignore aggregate flags.
 bool operator == (TUnversionedRow lhs, TUnversionedRow rhs);
-bool operator != (TUnversionedRow lhs, TUnversionedRow rhs);
 bool operator <= (TUnversionedRow lhs, TUnversionedRow rhs);
 bool operator <  (TUnversionedRow lhs, TUnversionedRow rhs);
 bool operator >= (TUnversionedRow lhs, TUnversionedRow rhs);
@@ -441,8 +439,7 @@ void ValidateClientDataRow(
 void ValidateDuplicateAndRequiredValueColumns(
     TUnversionedRow row,
     const TTableSchema& schema,
-    const TNameTableToSchemaIdMapping& idMapping,
-    std::vector<bool>* columnPresenceBuffer);
+    const TNameTableToSchemaIdMapping& idMapping);
 
 //! Checks that #row contains write lock for non-key columns and returns true if any non-key columns encountered.
 bool ValidateNonKeyColumnsAgainstLock(
@@ -450,9 +447,8 @@ bool ValidateNonKeyColumnsAgainstLock(
     const TLockMask& locks,
     const TTableSchema& schema,
     const TNameTableToSchemaIdMapping& idMapping,
-    const TNameTablePtr nameTable,
-    const std::vector<int>& columnIndexToLockIndex,
-    bool allowSharedWriteLocks);
+    const TNameTablePtr& nameTable,
+    const std::vector<int>& columnIndexToLockIndex);
 
 //! Checks that #key is a valid client-side key. Throws on failure.
 /*! The components must pass #ValidateKeyValue check. */
@@ -541,14 +537,14 @@ const TLegacyOwningKey& ChooseMaxKey(const TLegacyOwningKey& a, const TLegacyOwn
 TString SerializeToString(TUnversionedRow row);
 TString SerializeToString(TUnversionedValueRange range);
 
-void ToProto(TProtoStringType* protoRow, TUnversionedRow row);
-void ToProto(TProtoStringType* protoRow, const TUnversionedOwningRow& row);
-void ToProto(TProtoStringType* protoRow, TUnversionedValueRange range);
-void ToProto(TProtoStringType* protoRow, const TRange<TUnversionedOwningValue>& values);
+void ToProto(TProtobufString* protoRow, TUnversionedRow row);
+void ToProto(TProtobufString* protoRow, const TUnversionedOwningRow& row);
+void ToProto(TProtobufString* protoRow, TUnversionedValueRange range);
+void ToProto(TProtobufString* protoRow, const TRange<TUnversionedOwningValue>& values);
 
-void FromProto(TUnversionedOwningRow* row, const TProtoStringType& protoRow, std::optional<int> nullPaddingWidth = {});
-void FromProto(TUnversionedRow* row, const TProtoStringType& protoRow, const TRowBufferPtr& rowBuffer);
-void FromProto(std::vector<TUnversionedOwningValue>* values, const TProtoStringType& protoRow);
+void FromProto(TUnversionedOwningRow* row, const TProtobufString& protoRow, std::optional<int> nullPaddingWidth = {});
+void FromProto(TUnversionedRow* row, const TProtobufString& protoRow, const TRowBufferPtr& rowBuffer);
+void FromProto(std::vector<TUnversionedOwningValue>* values, const TProtobufString& protoRow);
 
 void ToBytes(TString* bytes, const TUnversionedOwningRow& row);
 
@@ -658,6 +654,13 @@ public:
     {
         YT_ASSERT(count <= GetHeader()->Capacity);
         GetHeader()->Count = count;
+    }
+
+    void PushBack(TUnversionedValue value)
+    {
+        ui32 count = GetCount();
+        SetCount(count + 1);
+        Begin()[count] = value;
     }
 
     TUnversionedValue& operator[] (ui32 index)
@@ -774,10 +777,15 @@ public:
 
     size_t GetSpaceUsed() const
     {
-        return StringData_.GetHolder()->GetTotalByteSize().value_or(StringData_.Size()) +
-            RowData_.GetHolder()->GetTotalByteSize().value_or(RowData_.Size());
+        size_t size = 0;
+        if (StringData_) {
+            size += StringData_.GetHolder()->GetTotalByteSize().value_or(StringData_.Size());
+        }
+        if (RowData_) {
+            size += RowData_.GetHolder()->GetTotalByteSize().value_or(RowData_.Size());
+        }
+        return size;
     }
-
 
     friend void swap(TUnversionedOwningRow& lhs, TUnversionedOwningRow& rhs)
     {
@@ -811,7 +819,6 @@ public:
     {
         return End();
     }
-
 
     void Save(TStreamSaveContext& context) const;
     void Load(TStreamLoadContext& context);
@@ -903,13 +910,17 @@ private:
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TSharedRange<TRowRange> MakeSingletonRowRange(TLegacyKey lowerBound, TLegacyKey upperBound);
+TSharedRange<TRowRange> MakeSingletonRowRange(
+    TLegacyKey lowerBound,
+    TLegacyKey upperBound,
+    TRowBufferPtr rowBuffer = nullptr);
 
 TKeyRef ToKeyRef(TUnversionedRow row);
 TKeyRef ToKeyRef(TUnversionedRow row, int prefixLength);
 
 ////////////////////////////////////////////////////////////////////////////////
 
+void FormatValue(TStringBuilderBase* builder, TUnversionedValueRange values, TStringBuf format);
 void FormatValue(TStringBuilderBase* builder, TUnversionedRow row, TStringBuf format);
 void FormatValue(TStringBuilderBase* builder, TMutableUnversionedRow row, TStringBuf format);
 void FormatValue(TStringBuilderBase* builder, const TUnversionedOwningRow& row, TStringBuf format);
@@ -980,4 +991,22 @@ struct THash<NYT::NTableClient::TUnversionedRow>
     {
         return NYT::NTableClient::TDefaultUnversionedRowHash()(row);
     }
+};
+
+template <class T>
+    requires std::derived_from<std::remove_cvref_t<T>, NYT::NTableClient::TUnversionedRow>
+struct NYT::TFormatArg<T>
+    : public NYT::TFormatArgBase
+{
+    static constexpr auto FlagSpecifiers
+        = TFormatArgBase::ExtendFlags</*Hot*/ true, 1, std::array{'k'}>();
+};
+
+template <class T>
+    requires std::derived_from<std::remove_cvref_t<T>, NYT::NTableClient::TUnversionedValueRange>
+struct NYT::TFormatArg<T>
+    : public NYT::TFormatArgBase
+{
+    static constexpr auto FlagSpecifiers
+        = TFormatArgBase::ExtendFlags</*Hot*/ true, 1, std::array{'k'}>();
 };

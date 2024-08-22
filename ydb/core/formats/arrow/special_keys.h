@@ -10,7 +10,7 @@ protected:
 
     bool DeserializeFromString(const TString& data);
 
-    std::optional<TReplaceKey> GetKeyByIndex(const ui32 position, const std::shared_ptr<arrow::Schema>& schema) const;
+    TReplaceKey GetKeyByIndex(const ui32 position, const std::shared_ptr<arrow::Schema>& schema) const;
 
     TSpecialKeys() = default;
     TSpecialKeys(std::shared_ptr<arrow::RecordBatch> data)
@@ -20,6 +20,8 @@ protected:
     }
 
 public:
+    ui64 GetMemoryBytes() const;
+
     TString SerializeToStringDataOnlyNoCompression() const;
 
     TSpecialKeys(const TString& data, const std::shared_ptr<arrow::Schema>& schema) {
@@ -33,6 +35,7 @@ public:
     }
 
     TString SerializeToString() const;
+    ui64 GetMemorySize() const;
 };
 
 class TFirstLastSpecialKeys: public TSpecialKeys {
@@ -45,10 +48,10 @@ public:
 
     std::shared_ptr<TFirstLastSpecialKeys> BuildAccordingToSchemaVerified(const std::shared_ptr<arrow::Schema>& schema) const;
 
-    std::optional<TReplaceKey> GetFirst(const std::shared_ptr<arrow::Schema>& schema = nullptr) const {
+    TReplaceKey GetFirst(const std::shared_ptr<arrow::Schema>& schema = nullptr) const {
         return GetKeyByIndex(0, schema);
     }
-    std::optional<TReplaceKey> GetLast(const std::shared_ptr<arrow::Schema>& schema = nullptr) const {
+    TReplaceKey GetLast(const std::shared_ptr<arrow::Schema>& schema = nullptr) const {
         return GetKeyByIndex(Data->num_rows() - 1, schema);
     }
 
@@ -75,10 +78,10 @@ public:
         return Data;
     }
 
-    std::optional<TReplaceKey> GetMin(const std::shared_ptr<arrow::Schema>& schema = nullptr) const {
+    TReplaceKey GetMin(const std::shared_ptr<arrow::Schema>& schema = nullptr) const {
         return GetKeyByIndex(0, schema);
     }
-    std::optional<TReplaceKey> GetMax(const std::shared_ptr<arrow::Schema>& schema = nullptr) const {
+    TReplaceKey GetMax(const std::shared_ptr<arrow::Schema>& schema = nullptr) const {
         return GetKeyByIndex(Data->num_rows() - 1, schema);
     }
 

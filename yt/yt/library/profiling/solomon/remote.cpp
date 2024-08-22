@@ -22,8 +22,7 @@ void FromProto(TSummarySnapshot<double>* summary, const NProto::TSummaryDouble& 
         proto.min(),
         proto.max(),
         proto.last(),
-        proto.count()
-    );
+        proto.count());
 }
 
 void ToProto(NProto::TSummaryDuration* proto, const TSummarySnapshot<TDuration>& summary)
@@ -42,8 +41,7 @@ void FromProto(TSummarySnapshot<TDuration>* summary, const NProto::TSummaryDurat
         TDuration::FromValue(proto.min()),
         TDuration::FromValue(proto.max()),
         TDuration::FromValue(proto.last()),
-        proto.count()
-    );
+        proto.count());
 }
 
 void ToProto(NProto::THistogramSnapshot* proto, const THistogramSnapshot& histogram)
@@ -145,7 +143,7 @@ void TRemoteRegistry::Transfer(const NProto::TSensorDump& dump)
                 transferValue(&sensorSet->TimeHistogramsCube_, ESensorType::TimeHistogram, NYT::FromProto<TTimeHistogramSnapshot>(projection.time_histogram()));
             } else if (projection.has_gauge_histogram()) {
                 transferValue(&sensorSet->GaugeHistogramsCube_, ESensorType::GaugeHistogram, NYT::FromProto<TGaugeHistogramSnapshot>(projection.gauge_histogram()));
-             } else if (projection.has_rate_histogram()) {
+            } else if (projection.has_rate_histogram()) {
                 transferValue(&sensorSet->RateHistogramsCube_, ESensorType::RateHistogram, NYT::FromProto<TRateHistogramSnapshot>(projection.rate_histogram()));
             } else {
                 // Ignore unknown types.

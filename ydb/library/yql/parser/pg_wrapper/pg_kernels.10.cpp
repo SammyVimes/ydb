@@ -20,6 +20,7 @@ extern "C" {
 #undef fopen
 #undef bind
 #undef locale_t
+#undef strtou64
 }
 
 #include "arrow.h"
@@ -28,12 +29,15 @@ namespace NYql {
 
 extern "C" {
 
+Y_PRAGMA_DIAGNOSTIC_PUSH
+Y_PRAGMA("GCC diagnostic ignored \"-Wreturn-type-c-linkage\"")
 #ifdef USE_SLOW_PG_KERNELS
 #include "pg_kernels.slow.10.inc"
 #else
 #include "pg_proc_policies.10.inc"
 #include "pg_kernels.10.inc"
 #endif
+Y_PRAGMA_DIAGNOSTIC_POP
 
 }
 

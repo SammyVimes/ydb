@@ -111,35 +111,41 @@ class DefaultConfigExtension(ExtensionPoint):
         kikimr.control_plane.config_generator.yaml_config['metering_config'] = {
             'metering_file_path': 'metering.bill'}
 
-        solomon_endpoint = os.environ.get('SOLOMON_ENDPOINT')
+        solomon_endpoint = os.environ.get('SOLOMON_URL')
         if solomon_endpoint is not None:
             kikimr.compute_plane.fq_config['common']['monitoring_endpoint'] = solomon_endpoint
 
 
 class YQv2Extension(ExtensionPoint):
 
-    def __init__(self, yq_version):
+    def __init__(self, yq_version, is_replace_if_exists=False):
         YQv2Extension.__init__.__annotations__ = {
             'yq_version': str,
             'return': None
         }
         super().__init__()
         self.yq_version = yq_version
+        self.is_replace_if_exists = is_replace_if_exists
 
     def apply_to_kikimr_conf(self, request, configuration):
+        extra_feature_flags = [
+            'enable_external_data_sources',
+            'enable_script_execution_operations',
+            'enable_external_source_schema_inference',
+        ]
+        if self.is_replace_if_exists:
+            extra_feature_flags.append('enable_replace_if_exists_for_external_entities')
+
         if isinstance(configuration.node_count, dict):
             configuration.node_count["/compute"].tenant_type = TenantType.YDB
-            configuration.node_count["/compute"].extra_feature_flags = ['enable_external_data_sources', 'enable_script_execution_operations']
+            configuration.node_count["/compute"].extra_feature_flags = extra_feature_flags
             configuration.node_count["/compute"].extra_grpc_services = ['query_service']
         else:
             configuration.node_count = {
                 "/cp": TenantConfig(node_count=1),
                 "/compute": TenantConfig(node_count=1,
                                          tenant_type=TenantType.YDB,
-                                         extra_feature_flags=[
-                                             'enable_external_data_sources',
-                                             'enable_script_execution_operations'
-                                         ],
+                                         extra_feature_flags=extra_feature_flags,
                                          extra_grpc_services=['query_service']),
             }
 
@@ -170,6 +176,9 @@ class YQv2Extension(ExtensionPoint):
                         }
                     }
                 }
+            },
+            "supported_compute_ydb_features": {
+                "replace_if_exists": self.is_replace_if_exists
             }
         }
 
@@ -224,6 +233,139 @@ class StatsModeExtension(ExtensionPoint):
         kikimr.control_plane.fq_config['control_plane_storage']['dump_raw_statistics'] = True
 
 
+class BindingsModeExtension(ExtensionPoint):
+
+    def __init__(self, bindings_mode, yq_version):
+        YQv2Extension.__init__.__annotations__ = {
+            'bindings_mode': str,
+            'yq_version': str,
+            'return': None
+        }
+        super().__init__()
+        self.bindings_mode = bindings_mode
+        self.yq_version = yq_version
+
+    def is_applicable(self, request):
+        return self.yq_version == 'v2' and self.bindings_mode != ''
+
+    def apply_to_kikimr(self, request, kikimr):
+        kikimr.compute_plane.config_generator.yaml_config["table_service_config"]["bindings_mode"] = self.bindings_mode
+
+
+class ConnectorExtension(ExtensionPoint):
+
+    def __init__(self, host, port, use_ssl):
+        ConnectorExtension.__init__.__annotations__ = {
+            'host': str,
+            'port': int,
+            'use_ssl': bool,
+            'return': None
+        }
+        super().__init__()
+        self.host = host
+        self.port = port
+        self.use_ssl = use_ssl
+
+    def is_applicable(self, request):
+        return True
+
+    def apply_to_kikimr(self, request, kikimr):
+        kikimr.control_plane.fq_config['common']['disable_ssl_for_generic_data_sources'] = True
+        kikimr.control_plane.fq_config['control_plane_storage']['available_connection'].append('POSTGRESQL_CLUSTER')
+        kikimr.control_plane.fq_config['control_plane_storage']['available_connection'].append('CLICKHOUSE_CLUSTER')
+        kikimr.control_plane.fq_config['control_plane_storage']['available_connection'].append('YDB_DATABASE')
+
+        generic = {
+            'connector': {
+                'endpoint': {
+                    'host': self.host,
+                    'port': self.port,
+                },
+                'use_ssl': self.use_ssl,
+            },
+        }
+
+        kikimr.compute_plane.fq_config['gateways']['generic'] = generic  # v1
+        kikimr.control_plane.fq_config['gateways']['generic'] = generic  # v1
+        kikimr.compute_plane.qs_config['generic'] = generic  # v2
+
+
+class MDBExtension(ExtensionPoint):
+
+    def __init__(self, endpoint: str, use_ssl=False):
+        MDBExtension.__init__.__annotations__ = {
+            'endpoint': str,
+            'use_ssl': bool
+        }
+        super().__init__()
+        self.endpoint = endpoint
+        self.use_ssl = use_ssl
+
+    def is_applicable(self, request):
+        return True
+
+    def apply_to_kikimr(self, request, kikimr):
+        kikimr.compute_plane.qs_config['mdb_transform_host'] = False
+        kikimr.compute_plane.qs_config['generic']['mdb_gateway'] = self.endpoint
+
+        kikimr.compute_plane.fq_config['common']['mdb_transform_host'] = False
+        kikimr.compute_plane.fq_config['common']['mdb_gateway'] = self.endpoint
+        kikimr.compute_plane.fq_config['gateways']['generic']['mdb_gateway'] = self.endpoint
+
+        kikimr.control_plane.fq_config['common']['mdb_transform_host'] = False
+        kikimr.control_plane.fq_config['common']['mdb_gateway'] = self.endpoint
+        kikimr.control_plane.fq_config['gateways']['generic']['mdb_gateway'] = self.endpoint
+
+
+class YdbMvpExtension(ExtensionPoint):
+
+    def __init__(self, mvp_external_ydb_endpoint):
+        self.mvp_external_ydb_endpoint = mvp_external_ydb_endpoint
+        super().__init__()
+
+    def is_applicable(self, request):
+        return True
+
+    def apply_to_kikimr_conf(self, request, configuration):
+        configuration.mvp_external_ydb_endpoint = self.mvp_external_ydb_endpoint
+
+    def apply_to_kikimr(self, request, kikimr):
+        if 'generic' in kikimr.compute_plane.qs_config:
+            kikimr.compute_plane.qs_config['generic']['ydb_mvp_endpoint'] = kikimr.control_plane.fq_config['common']['ydb_mvp_cloud_endpoint']
+
+
+class TokenAccessorExtension(ExtensionPoint):
+
+    def __init__(self, endpoint: str, hmac_secret_file: str, use_ssl=False):
+        TokenAccessorExtension.__init__.__annotations__ = {
+            'endpoint': str,
+            'hmac_secret_file': str,
+            'use_ssl': bool,
+        }
+        super().__init__()
+        self.endpoint = endpoint
+        self.hmac_secret_file = hmac_secret_file
+        self.use_ssl = use_ssl
+
+    def is_applicable(self, request):
+        return True
+
+    def apply_to_kikimr(self, request, kikimr):
+        kikimr.compute_plane.auth_config['token_accessor_config'] = {
+            'enabled': True,
+            'endpoint': self.endpoint,
+        }
+
+        kikimr.control_plane.fq_config['token_accessor']['enabled'] = True
+        kikimr.control_plane.fq_config['token_accessor']['endpoint'] = self.endpoint
+        kikimr.control_plane.fq_config['token_accessor']['use_ssl'] = self.use_ssl
+        kikimr.control_plane.fq_config['token_accessor']['hmac_secret_file'] = self.hmac_secret_file
+
+        kikimr.compute_plane.fq_config['token_accessor']['enabled'] = True
+        kikimr.compute_plane.fq_config['token_accessor']['endpoint'] = self.endpoint
+        kikimr.compute_plane.fq_config['token_accessor']['use_ssl'] = self.use_ssl
+
+
 @contextmanager
 def start_kikimr(request, kikimr_extensions):
     start_kikimr.__annotations__ = {
@@ -254,7 +396,10 @@ def start_kikimr(request, kikimr_extensions):
         kikimr.stop_mvp_mock_server()
 
 
-yq_v1 = pytest.mark.yq_version('v1')
-yq_v2 = pytest.mark.yq_version('v2')
-yq_all = pytest.mark.yq_version('v1', 'v2')
-yq_stats_full = pytest.mark.stats_mode('STATS_MODE_FULL')
+YQV1_VERSION_NAME = 'v1'
+YQV2_VERSION_NAME = 'v2'
+YQ_STATS_FULL = 'STATS_MODE_FULL'
+
+yq_v1 = pytest.mark.yq_version(YQV1_VERSION_NAME)
+yq_v2 = pytest.mark.yq_version(YQV2_VERSION_NAME)
+yq_all = pytest.mark.yq_version(YQV1_VERSION_NAME, YQV2_VERSION_NAME)

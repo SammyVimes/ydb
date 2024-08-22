@@ -4,7 +4,7 @@ namespace NKikimr::NBsQueue {
 
 TBlobStorageQueue::TBlobStorageQueue(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, TString& logPrefix,
         const TBSProxyContextPtr& bspctx, const NBackpressure::TQueueClientId& clientId, ui32 interconnectChannel,
-        const TBlobStorageGroupType& gType, NMonitoring::TCountableBase::EVisibility visibility)
+        const TBlobStorageGroupType& gType, NMonitoring::TCountableBase::EVisibility visibility, bool useActorSystemTime)
     : Queues(bspctx)
     , WindowSize(0)
     , InFlightCost(0)
@@ -16,6 +16,7 @@ TBlobStorageQueue::TBlobStorageQueue(const TIntrusivePtr<::NMonitoring::TDynamic
     , ClientId(clientId)
     , BytesWaiting(0)
     , InterconnectChannel(interconnectChannel)
+    , UseActorSystemTime(useActorSystemTime)
     // use parent group visibility
     , QueueWaitingItems(counters->GetCounter("QueueWaitingItems", false, visibility))
     , QueueWaitingBytes(counters->GetCounter("QueueWaitingBytes", false, visibility))
@@ -203,9 +204,9 @@ void TBlobStorageQueue::SendToVDisk(const TActorContext& ctx, const TActorId& re
         ++*QueueItemsSent;
 
         // send item
-        item.Span.Event("SendToVDisk", {{
+        item.Span && item.Span.Event("SendToVDisk", {
             {"VDiskOrderNumber", vdiskOrderNumber}
-        }});
+        });
         item.Event.SendToVDisk(ctx, remoteVDisk, item.QueueCookie, item.MsgId, item.SequenceId, sendMeCostSettings,
             item.Span.GetTraceId(), ClientId, item.ProcessingTimer);
 

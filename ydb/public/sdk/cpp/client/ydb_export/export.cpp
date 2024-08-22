@@ -24,12 +24,6 @@ using namespace Ydb::Export;
 /// Common
 namespace {
 
-TInstant ProtoTimestampToInstant(const NProtoBuf::Timestamp& timestamp) {
-    ui64 us = timestamp.seconds() * 1000000;
-    us += timestamp.nanos() / 1000;
-    return TInstant::MicroSeconds(us);
-}
-
 TVector<TExportItemProgress> ItemsProgressFromProto(const google::protobuf::RepeatedPtrField<ExportItemProgress>& proto) {
     TVector<TExportItemProgress> result(Reserve(proto.size()));
 
@@ -199,6 +193,8 @@ TFuture<TExportToS3Response> TExportClient::ExportToS3(const TExportToS3Settings
     if (settings.Compression_) {
         request.mutable_settings()->set_compression(*settings.Compression_);
     }
+
+    request.mutable_settings()->set_disable_virtual_addressing(!settings.UseVirtualAddressing_);
 
     return Impl_->ExportToS3(std::move(request), settings);
 }

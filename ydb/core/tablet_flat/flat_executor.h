@@ -29,6 +29,7 @@
 #include <ydb/core/tablet/tablet_counters_protobuf.h>
 #include <ydb/core/tablet/tablet_metrics.h>
 #include <ydb/core/util/queue_oneone_inplace.h>
+#include <ydb/library/actors/wilson/wilson_span.h>
 
 #include <library/cpp/monlib/dynamic_counters/counters.h>
 
@@ -293,9 +294,12 @@ struct TExecutorStatsImpl : public TExecutorStats {
 
 struct TTransactionWaitPad : public TPrivatePageCacheWaitPad {
     THolder<TSeat> Seat;
+    NWilson::TSpan WaitingSpan;
 
     TTransactionWaitPad(THolder<TSeat> seat);
     ~TTransactionWaitPad();
+
+    NWilson::TTraceId GetWaitingTraceId() const noexcept;
 };
 
 struct TCompactionReadWaitPad : public TPrivatePageCacheWaitPad {
@@ -358,6 +362,7 @@ class TExecutor
     TAutoPtr<NUtil::ILogger> Logger;
 
     ui32 FollowerId = 0;
+    THashSet<ui32> PreloadTablesData;
 
     // This becomes true when executor enables the use of leases, e.g. starts persisting them
     // This may become false again when leases are not actively used for some time
@@ -409,6 +414,8 @@ class TExecutor
     THashMap<ui64, THolder<TScanSnapshot>> ScanSnapshots;
     ui64 ScanSnapshotId = 1;
 
+    class TActiveTransactionZone;
+
     bool ActiveTransaction = false;
     bool BrokenTransaction = false;
     ui32 ActivateTransactionWaiting = 0;
@@ -434,6 +441,7 @@ class TExecutor
     TAutoPtr<TCommitManager> CommitManager;
     TAutoPtr<TScans> Scans;
     TAutoPtr<TMemory> Memory;
+    TAutoPtr<NTable::IMemTableMemoryConsumersCollection> MemTableMemoryConsumersCollection;
     TAutoPtr<TLogicSnap> LogicSnap;
     TAutoPtr<TLogicRedo> LogicRedo;
     TAutoPtr<TLogicAlter> LogicAlter;
@@ -477,6 +485,7 @@ class TExecutor
     TActorContext OwnerCtx() const;
 
     TControlWrapper LogFlushDelayOverrideUsec;
+    TControlWrapper MaxCommitRedoMB;
 
     ui64 Stamp() const noexcept;
     void Registered(TActorSystem*, const TActorId&) override;
@@ -648,8 +657,8 @@ public:
     ui64 CompactTable(ui32 tableId) override;
     bool CompactTables() override;
 
-    void Handle(NSharedCache::TEvMemTableRegistered::TPtr &ev);
-    void Handle(NSharedCache::TEvMemTableCompact::TPtr &ev);
+    void Handle(NMemory::TEvMemTableRegistered::TPtr &ev);
+    void Handle(NMemory::TEvMemTableCompact::TPtr &ev);
 
     void AllowBorrowedGarbageCompaction(ui32 tableId) override;
 
@@ -679,6 +688,8 @@ public:
     NMetrics::TResourceMetrics* GetResourceMetrics() const override;
 
     void RegisterExternalTabletCounters(TAutoPtr<TTabletCountersBase> appCounters) override;
+
+    virtual void SetPreloadTablesData(THashSet<ui32> tables) override;
 
     static constexpr NKikimrServices::TActivity::EType ActorActivityType() {
         return NKikimrServices::TActivity::FLAT_EXECUTOR;

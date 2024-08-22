@@ -4,6 +4,8 @@ SRCS(
     federated_read_session.h
     federated_read_session.cpp
     federated_read_session_event.cpp
+    federated_write_session.h
+    federated_write_session.cpp
     federated_topic_impl.h
     federated_topic_impl.cpp
     federated_topic.cpp
@@ -22,7 +24,7 @@ PEERDIR(
     ydb/public/sdk/cpp/client/impl/ydb_internal/make_request
     ydb/public/sdk/cpp/client/ydb_common_client/impl
     ydb/public/sdk/cpp/client/ydb_driver
-    ydb/public/sdk/cpp/client/ydb_persqueue_core/impl
+    ydb/public/sdk/cpp/client/ydb_topic/impl
     ydb/public/sdk/cpp/client/ydb_proto
 )
 

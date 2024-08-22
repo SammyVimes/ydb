@@ -1,4 +1,5 @@
 LLVM_BC(
+    postgresql/src/backend/partitioning/partbounds.c
     postgresql/src/backend/replication/walreceiver.c
     postgresql/src/backend/statistics/mcv.c
     postgresql/src/backend/tsearch/to_tsany.c
@@ -135,6 +136,7 @@ LLVM_BC(
     arrow_phraseto_tsquery_byid
     arrow_plainto_tsquery
     arrow_plainto_tsquery_byid
+    arrow_satisfies_hash_partition
     arrow_spg_range_quad_choose
     arrow_spg_range_quad_config
     arrow_spg_range_quad_inner_consistent

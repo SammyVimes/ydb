@@ -1,12 +1,13 @@
 """
 Utility for running a prompt_toolkit application in an asyncssh server.
 """
+
 from __future__ import annotations
 
 import asyncio
 import traceback
 from asyncio import get_running_loop
-from typing import Any, Awaitable, Callable, TextIO, cast
+from typing import Any, Callable, Coroutine, TextIO, cast
 
 import asyncssh
 
@@ -21,7 +22,7 @@ __all__ = ["PromptToolkitSSHSession", "PromptToolkitSSHServer"]
 class PromptToolkitSSHSession(asyncssh.SSHServerSession):  # type: ignore
     def __init__(
         self,
-        interact: Callable[[PromptToolkitSSHSession], Awaitable[None]],
+        interact: Callable[[PromptToolkitSSHSession], Coroutine[Any, Any, None]],
         *,
         enable_cpr: bool,
     ) -> None:
@@ -162,7 +163,7 @@ class PromptToolkitSSHServer(asyncssh.SSHServer):
 
     def __init__(
         self,
-        interact: Callable[[PromptToolkitSSHSession], Awaitable[None]],
+        interact: Callable[[PromptToolkitSSHSession], Coroutine[Any, Any, None]],
         *,
         enable_cpr: bool = True,
     ) -> None:

@@ -6,12 +6,13 @@
 #include <ydb/core/protos/msgbus.pb.h>
 #include <ydb/core/protos/msgbus_pq.pb.h>
 #include <ydb/core/persqueue/pq_rl_helpers.h>
+#include <ydb/core/persqueue/write_id.h>
 
 #include <variant>
 
-namespace NKikimr::NPQ {
+#include "partition_chooser.h"
 
-constexpr ui64 INVALID_WRITE_ID = Max<ui64>();
+namespace NKikimr::NPQ {
 
 struct TEvPartitionWriter {
     enum EEv {
@@ -34,7 +35,7 @@ struct TEvPartitionWriter {
         struct TSuccess {
             TString OwnerCookie;
             TSourceIdInfo SourceIdInfo;
-            ui64 WriteId = INVALID_WRITE_ID;
+            TMaybe<TWriteId> WriteId;
 
             TString ToString() const;
         };
@@ -51,7 +52,7 @@ struct TEvPartitionWriter {
         std::variant<TSuccess, TError> Result;
 
         TEvInitResult(const TString& sessionId, const TString& txId,
-                      const TString& ownerCookie, const TSourceIdInfo& sourceIdInfo, ui64 writeId)
+                      const TString& ownerCookie, const TSourceIdInfo& sourceIdInfo, const TMaybe<TWriteId>& writeId)
             : SessionId(sessionId)
             , TxId(txId)
             , Result(TSuccess{ownerCookie, sourceIdInfo, writeId})
@@ -149,6 +150,11 @@ struct TEvPartitionWriter {
     };
 
     struct TEvDisconnected: public TEventLocal<TEvDisconnected, EvDisconnected> {
+        TEvDisconnected(TEvWriteResponse::EErrorCode errorCode)
+            : ErrorCode(errorCode) {
+        }
+
+        const TEvWriteResponse::EErrorCode ErrorCode;
     };
 
     struct TEvTxWriteRequest : public TEventLocal<TEvTxWriteRequest, EvTxWriteRequest> {
@@ -166,10 +172,16 @@ struct TEvPartitionWriter {
 
 }; // TEvPartitionWriter
 
+
 struct TPartitionWriterOpts {
     bool CheckState = false;
     bool AutoRegister = false;
     bool UseDeduplication = true;
+
+    TString SourceId;
+    std::optional<ui32> ExpectedGeneration;
+    std::optional<ui64> InitialSeqNo;
+
     TString Database;
     TString TopicPath;
     TString Token;
@@ -186,6 +198,9 @@ struct TPartitionWriterOpts {
     TPartitionWriterOpts& WithCheckState(bool value) { CheckState = value; return *this; }
     TPartitionWriterOpts& WithAutoRegister(bool value) { AutoRegister = value; return *this; }
     TPartitionWriterOpts& WithDeduplication(bool value) { UseDeduplication = value; return *this; }
+    TPartitionWriterOpts& WithSourceId(const TString& value) { SourceId = value; return *this; }
+    TPartitionWriterOpts& WithExpectedGeneration(ui32 value) { ExpectedGeneration = value; return *this; }
+    TPartitionWriterOpts& WithExpectedGeneration(std::optional<ui32> value) { ExpectedGeneration = value; return *this; }
     TPartitionWriterOpts& WithCheckRequestUnits(const NKikimrPQ::TPQTabletConfig::EMeteringMode meteringMode , const TRlContext& rlCtx) { MeteringMode = meteringMode; RlCtx = rlCtx; return *this; }
     TPartitionWriterOpts& WithDatabase(const TString& value) { Database = value; return *this; }
     TPartitionWriterOpts& WithTopicPath(const TString& value) { TopicPath = value; return *this; }
@@ -194,8 +209,12 @@ struct TPartitionWriterOpts {
     TPartitionWriterOpts& WithTxId(const TString& value) { TxId = value; return *this; }
     TPartitionWriterOpts& WithTraceId(const TString& value) { TraceId = value; return *this; }
     TPartitionWriterOpts& WithRequestType(const TString& value) { RequestType = value; return *this; }
+    TPartitionWriterOpts& WithInitialSeqNo(const std::optional<ui64> value) { InitialSeqNo = value; return *this; }
 };
 
-IActor* CreatePartitionWriter(const TActorId& client, const std::optional<TString>& topicPath, ui64 tabletId, ui32 partitionId, const std::optional<ui32> expectedGeneration, const TString& sourceId,
+IActor* CreatePartitionWriter(const TActorId& client,
+                             // const NKikimrSchemeOp::TPersQueueGroupDescription& config,
+                              ui64 tabletId,
+                              ui32 partitionId,
                               const TPartitionWriterOpts& opts = {});
 }

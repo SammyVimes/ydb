@@ -8,6 +8,18 @@ namespace NYT::NTableClient {
 
 ////////////////////////////////////////////////////////////////////////////////
 
+TRowBuffer::TRowBuffer(
+    TRefCountedTypeCookie tagCookie,
+    IMemoryChunkProviderPtr chunkProvider,
+    size_t startChunkSize,
+    IMemoryUsageTrackerPtr tracker)
+    : MemoryTracker_(std::move(tracker))
+    , Pool_(
+        tagCookie,
+        std::move(chunkProvider),
+        startChunkSize)
+{ }
+
 TChunkedMemoryPool* TRowBuffer::GetPool()
 {
     return &Pool_;
@@ -15,7 +27,9 @@ TChunkedMemoryPool* TRowBuffer::GetPool()
 
 TMutableUnversionedRow TRowBuffer::AllocateUnversioned(int valueCount)
 {
-    return TMutableUnversionedRow::Allocate(&Pool_, valueCount);
+    auto result = TMutableUnversionedRow::Allocate(&Pool_, valueCount);
+    ValidateNoOverflow();
+    return result;
 }
 
 TMutableVersionedRow TRowBuffer::AllocateVersioned(
@@ -24,12 +38,14 @@ TMutableVersionedRow TRowBuffer::AllocateVersioned(
     int writeTimestampCount,
     int deleteTimestampCount)
 {
-    return TMutableVersionedRow::Allocate(
+    auto result = TMutableVersionedRow::Allocate(
         &Pool_,
         keyCount,
         valueCount,
         writeTimestampCount,
         deleteTimestampCount);
+    ValidateNoOverflow();
+    return result;
 }
 
 void TRowBuffer::CaptureValue(TUnversionedValue* value)
@@ -39,6 +55,8 @@ void TRowBuffer::CaptureValue(TUnversionedValue* value)
         memcpy(dst, value->Data.String, value->Length);
         value->Data.String = dst;
     }
+
+    ValidateNoOverflow();
 }
 
 TVersionedValue TRowBuffer::CaptureValue(const TVersionedValue& value)
@@ -89,6 +107,8 @@ TMutableUnversionedRow TRowBuffer::CaptureRow(TUnversionedValueRange values, boo
         }
     }
 
+    ValidateNoOverflow();
+
     return capturedRow;
 }
 
@@ -107,13 +127,14 @@ TMutableUnversionedRow TRowBuffer::CaptureAndPermuteRow(
     const TTableSchema& tableSchema,
     int schemafulColumnCount,
     const TNameTableToSchemaIdMapping& idMapping,
-    std::vector<bool>* columnPresenceBuffer,
+    bool validateDuplicateAndRequiredValueColumns,
+    bool preserveIds,
     std::optional<TUnversionedValue> addend)
 {
     int valueCount = schemafulColumnCount;
 
-    if (columnPresenceBuffer) {
-        ValidateDuplicateAndRequiredValueColumns(row, tableSchema, idMapping, columnPresenceBuffer);
+    if (validateDuplicateAndRequiredValueColumns) {
+        ValidateDuplicateAndRequiredValueColumns(row, tableSchema, idMapping);
     }
 
     for (const auto& value : row) {
@@ -146,11 +167,15 @@ TMutableUnversionedRow TRowBuffer::CaptureAndPermuteRow(
         }
         int pos = mappedId < schemafulColumnCount ? mappedId : valueCount++;
         capturedRow[pos] = value;
-        capturedRow[pos].Id = mappedId;
+        if (!preserveIds) {
+            capturedRow[pos].Id = mappedId;
+        }
     }
     if (addend) {
         capturedRow[valueCount++] = *addend;
     }
+
+    ValidateNoOverflow();
 
     return capturedRow;
 }
@@ -176,6 +201,8 @@ TMutableVersionedRow TRowBuffer::CaptureRow(TVersionedRow row, bool captureValue
         CaptureValues(capturedRow);
     }
 
+    ValidateNoOverflow();
+
     return capturedRow;
 }
 
@@ -197,7 +224,7 @@ TMutableVersionedRow TRowBuffer::CaptureAndPermuteRow(
     TVersionedRow row,
     const TTableSchema& tableSchema,
     const TNameTableToSchemaIdMapping& idMapping,
-    std::vector<bool>* columnPresenceBuffer,
+    bool validateDuplicateAndRequiredValueColumns,
     bool allowMissingKeyColumns)
 {
     int keyColumnCount = tableSchema.GetKeyColumnCount();
@@ -227,12 +254,11 @@ TMutableVersionedRow TRowBuffer::CaptureAndPermuteRow(
     writeTimestamps.erase(std::unique(writeTimestamps.begin(), writeTimestamps.end()), writeTimestamps.end());
     int writeTimestampCount = static_cast<int>(writeTimestamps.size());
 
-    if (columnPresenceBuffer) {
+    if (validateDuplicateAndRequiredValueColumns) {
         ValidateDuplicateAndRequiredValueColumns(
             row,
             tableSchema,
             idMapping,
-            columnPresenceBuffer,
             writeTimestamps.data(),
             writeTimestampCount);
     }
@@ -284,12 +310,15 @@ TMutableVersionedRow TRowBuffer::CaptureAndPermuteRow(
         }
     }
 
+    ValidateNoOverflow();
+
     return capturedRow;
 }
 
 void TRowBuffer::Absorb(TRowBuffer&& other)
 {
     Pool_.Absorb(std::move(other.Pool_));
+    ValidateNoOverflow();
 }
 
 i64 TRowBuffer::GetSize() const
@@ -304,12 +333,31 @@ i64 TRowBuffer::GetCapacity() const
 
 void TRowBuffer::Clear()
 {
+    MemoryGuard_.reset();
     Pool_.Clear();
 }
 
 void TRowBuffer::Purge()
 {
+    MemoryGuard_.reset();
     Pool_.Purge();
+}
+
+void TRowBuffer::ValidateNoOverflow()
+{
+    if (!MemoryTracker_) {
+        return;
+    }
+
+    auto capacity = Pool_.GetCapacity();
+
+    if (!MemoryGuard_) {
+        MemoryGuard_ = TMemoryUsageTrackerGuard::TryAcquire(MemoryTracker_, capacity)
+            .ValueOrThrow();
+    } else {
+        MemoryGuard_->TrySetSize(capacity)
+            .ThrowOnError();
+    }
 }
 
 ////////////////////////////////////////////////////////////////////////////////

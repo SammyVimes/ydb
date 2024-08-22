@@ -1,7 +1,7 @@
 #pragma once
 
 #include <ydb/core/kqp/ut/common/kqp_ut_common.h>
-#include <ydb/core/formats/arrow/serializer/full.h>
+#include <ydb/core/formats/arrow/serializer/abstract.h>
 #include <ydb/library/yql/providers/generic/connector/api/common/data_source.pb.h>
 #include <ydb/library/yql/providers/generic/connector/libcpp/client.h>
 #include <ydb/library/yql/providers/generic/connector/libcpp/error.h>
@@ -52,6 +52,11 @@ namespace NYql::NConnector::NTest {
     }                                                                               \
     TClickHouseDataSourceInstanceBuilder<TBuilder> ClickHouseDataSourceInstance() { \
         return TClickHouseDataSourceInstanceBuilder<TBuilder>(                      \
+            this->Result_->mutable_data_source_instance(),                          \
+            static_cast<TBuilder*>(this));                                          \
+    }                                                                               \
+    TYdbDataSourceInstanceBuilder<TBuilder> YdbDataSourceInstance() {               \
+        return TYdbDataSourceInstanceBuilder<TBuilder>(                             \
             this->Result_->mutable_data_source_instance(),                          \
             static_cast<TBuilder*>(this));                                          \
     }
@@ -114,7 +119,7 @@ namespace NYql::NConnector::NTest {
     std::shared_ptr<arrow::RecordBatch> MakeEmptyRecordBatch(size_t rowsCount);
 
     template <class T>
-    void SetSimpleValue(const T& value, Ydb::TypedValue* proto);
+    void SetSimpleValue(const T& value, Ydb::TypedValue* proto, bool optional = false);
 
     template <class TParent>
     struct TWithParentBuilder {
@@ -200,6 +205,15 @@ namespace NYql::NConnector::NTest {
         const TString& serviceAccountIdSignature = DEFAULT_CH_SERVICE_ACCOUNT_ID_SIGNATURE,
         const TString& databaseName = DEFAULT_DATABASE);
 
+    void CreateYdbExternalDataSource(
+        const std::shared_ptr<NKikimr::NKqp::TKikimrRunner>& kikimr,
+        const TString& dataSourceName = DEFAULT_DATA_SOURCE_NAME,
+        const TString& login = DEFAULT_LOGIN,
+        const TString& password = DEFAULT_PASSWORD,
+        const TString& endpoint = DEFAULT_YDB_ENDPOINT,
+        bool useTls = DEFAULT_USE_TLS,
+        const TString& databaseName = DEFAULT_DATABASE);
+
     class TConnectorClientMock: public NYql::NConnector::IClient {
     public:
         MOCK_METHOD(TResult<NApi::TDescribeTableResponse>, DescribeTableImpl, (const NApi::TDescribeTableRequest& request));
@@ -274,6 +288,25 @@ namespace NYql::NConnector::NTest {
                 this->Port(DEFAULT_CH_PORT);
                 this->Kind(NApi::EDataSourceKind::CLICKHOUSE);
                 this->Protocol(DEFAULT_CH_PROTOCOL);
+            }
+        };
+
+        template <class TParent = void /* no parent by default */>
+        struct TYdbDataSourceInstanceBuilder: public TBaseDataSourceInstanceBuilder<TYdbDataSourceInstanceBuilder<TParent>, TParent> {
+            using TBase = TBaseDataSourceInstanceBuilder<TYdbDataSourceInstanceBuilder<TParent>, TParent>;
+
+            explicit TYdbDataSourceInstanceBuilder(NApi::TDataSourceInstance* result = nullptr, TParent* parent = nullptr)
+                : TBase(result, parent)
+            {
+                FillWithDefaults();
+            }
+
+            void FillWithDefaults() {
+                TBase::FillWithDefaults();
+                this->Host(DEFAULT_YDB_HOST);
+                this->Port(DEFAULT_YDB_PORT);
+                this->Kind(NApi::EDataSourceKind::YDB);
+                this->Protocol(DEFAULT_YDB_PROTOCOL);
             }
         };
 
@@ -382,8 +415,34 @@ namespace NYql::NConnector::NTest {
                 return *this;
             }
 
+            template <class T>
+            TBuilder& OptionalValue(const T& value) {
+                SetSimpleValue(value, this->Result_->mutable_typed_value(), true);
+                return *this;
+            }
+
             void FillWithDefaults() {
             }
+        };
+        template <class TParent = void /* no parent by default */>
+        struct TPredicateBuilder;
+
+        template <class TParent = void /* no parent by default */>
+        struct TConjunctionBuilder: public TProtoBuilder<TParent, NApi::TPredicate::TConjunction> {
+            using TBuilder = TConjunctionBuilder<TParent>;
+            TConjunctionBuilder(NApi::TPredicate::TConjunction* result = nullptr, TParent* parent = nullptr)
+                : TProtoBuilder<TParent, NApi::TPredicate::TConjunction>(result, parent) {
+            }
+            SUBPROTO_BUILDER(Operand, add_operands, NApi::TPredicate, TPredicateBuilder<TBuilder>);
+        };
+
+        template <class TParent = void /* no parent by default */>
+        struct TDisjunctionBuilder: public TProtoBuilder<TParent, NApi::TPredicate::TDisjunction> {
+            using TBuilder = TDisjunctionBuilder<TParent>;
+            TDisjunctionBuilder(NApi::TPredicate::TDisjunction* result = nullptr, TParent* parent = nullptr)
+                : TProtoBuilder<TParent, NApi::TPredicate::TDisjunction>(result, parent) {
+            }
+            SUBPROTO_BUILDER(Operand, add_operands, NApi::TPredicate, TPredicateBuilder<TBuilder>);
         };
 
         template <class TParent = void /* no parent by default */>
@@ -410,6 +469,10 @@ namespace NYql::NConnector::NTest {
 
             TBuilder& Value(const auto& value) {
                 return Arg().Value(value).Done();
+            }
+
+            TBuilder& OptionalValue(const auto& value) {
+                return Arg().OptionalValue(value).Done();
             }
 
             void FillWithDefaults() {
@@ -461,7 +524,7 @@ namespace NYql::NConnector::NTest {
         template <class TParent>
         using TGreaterOrEqualBuilder = TComparisonBuilder<NApi::TPredicate::TComparison::GE, TParent>;
 
-        template <class TParent = void /* no parent by default */>
+        template <class TParent>
         struct TPredicateBuilder: public TProtoBuilder<TParent, NApi::TPredicate> {
             using TBuilder = TPredicateBuilder<TParent>;
 
@@ -470,6 +533,9 @@ namespace NYql::NConnector::NTest {
             {
                 FillWithDefaults();
             }
+
+            SUBPROTO_BUILDER(Conjunction, mutable_conjunction, NApi::TPredicate::TConjunction, TConjunctionBuilder<TBuilder>);
+            SUBPROTO_BUILDER(Disjunction, mutable_disjunction, NApi::TPredicate::TDisjunction, TDisjunctionBuilder<TBuilder>);
 
             SUBPROTO_BUILDER(Equal, mutable_comparison, NApi::TPredicate::TComparison, TEqualBuilder<TBuilder>);
             SUBPROTO_BUILDER(NotEqual, mutable_comparison, NApi::TPredicate::TComparison, TNotEqualBuilder<TBuilder>);
@@ -609,6 +675,7 @@ namespace NYql::NConnector::NTest {
             }
 
             SUBPROTO_BUILDER(Select, add_selects, NApi::TSelect, TSelectBuilder<TBuilder>);
+            SETTER(MaxSplitCount, max_split_count);
 
             TListSplitsResultBuilder<TBuilder> Result() {
                 return TListSplitsResultBuilder<TBuilder>(ResponseResult_, this);
@@ -644,10 +711,10 @@ namespace NYql::NConnector::NTest {
             TBuilder& AddResponse(
                 const std::shared_ptr<arrow::RecordBatch>& recordBatch,
                 const NApi::TError& error) {
-                NKikimr::NArrow::NSerialization::TFullDataSerializer ser(arrow::ipc::IpcWriteOptions::Defaults());
+                NKikimr::NArrow::NSerialization::TSerializerContainer ser = NKikimr::NArrow::NSerialization::TSerializerContainer::GetDefaultSerializer();
                 auto& response = this->Result_->Responses().emplace_back();
                 response.mutable_error()->CopyFrom(error);
-                response.set_arrow_ipc_streaming(ser.Serialize(recordBatch));
+                response.set_arrow_ipc_streaming(ser->SerializeFull(recordBatch));
                 return static_cast<TBuilder&>(*this);
             }
 

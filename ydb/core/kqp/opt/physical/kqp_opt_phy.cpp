@@ -12,6 +12,8 @@
 #include <ydb/library/yql/dq/opt/dq_opt_join.h>
 #include <ydb/library/yql/providers/common/transform/yql_optimize.h>
 #include <ydb/library/yql/providers/dq/expr_nodes/dqs_expr_nodes.h>
+#include <ydb/library/yql/providers/dq/common/yql_dq_settings.h>
+
 
 namespace NKikimr::NKqp::NOpt {
 
@@ -30,11 +32,12 @@ public:
     {
 #define HNDL(name) "KqpPhysical-"#name, Hndl(&TKqpPhysicalOptTransformer::name)
         AddHandler(0, &TDqSourceWrap::Match, HNDL(BuildStageWithSourceWrap));
+        AddHandler(0, &TDqReadWrap::Match, HNDL(BuildStageWithReadWrap));
         AddHandler(0, &TKqlReadTable::Match, HNDL(BuildReadTableStage));
         AddHandler(0, &TKqlReadTableRanges::Match, HNDL(BuildReadTableRangesStage));
         AddHandler(0, &TKqlLookupTable::Match, HNDL(BuildLookupTableStage));
         AddHandler(0, &TKqlStreamLookupTable::Match, HNDL(BuildStreamLookupTableStages));
-        AddHandler(0, &TKqlStreamIdxLookupJoin::Match, HNDL(BuildStreamIdxLookupJoinStages));
+        AddHandler(0, &TKqlIndexLookupJoin::Match, HNDL(BuildStreamIdxLookupJoinStages));
         AddHandler(0, &TKqlSequencer::Match, HNDL(BuildSequencerStages));
         AddHandler(0, [](auto) { return true; }, HNDL(RemoveRedundantSortByPk));
         AddHandler(0, &TCoTake::Match, HNDL(ApplyLimitToReadTable));
@@ -68,6 +71,7 @@ public:
         AddHandler(0, &TCoOrderedLMap::Match, HNDL(PushOrderedLMapToStage<false>));
         AddHandler(0, &TKqlInsertRows::Match, HNDL(BuildInsertStages));
         AddHandler(0, &TKqlUpdateRows::Match, HNDL(BuildUpdateStages));
+        AddHandler(0, &TKqlInsertOnConflictUpdateRows::Match, HNDL(RewriteGenerateIfInsert));
         AddHandler(0, &TKqlUpdateRowsIndex::Match, HNDL(BuildUpdateIndexStages));
         AddHandler(0, &TKqlUpsertRowsIndex::Match, HNDL(BuildUpsertIndexStages));
         AddHandler(0, &TKqlInsertRowsIndex::Match, HNDL(BuildInsertIndexStages));
@@ -83,8 +87,6 @@ public:
         AddHandler(0, &TCoAsList::Match, HNDL(PropagatePrecomuteScalarRowset<false>));
         AddHandler(0, &TCoTake::Match, HNDL(PropagatePrecomuteTake<false>));
         AddHandler(0, &TCoFlatMap::Match, HNDL(PropagatePrecomuteFlatmap<false>));
-
-        AddHandler(0, &TDqCnHashShuffle::Match, HNDL(BuildHashShuffleByKeyStage));
 
         AddHandler(0, &TCoAggregateCombine::Match, HNDL(ExpandAggregatePhase));
         AddHandler(0, &TCoAggregateCombineState::Match, HNDL(ExpandAggregatePhase));
@@ -122,12 +124,40 @@ public:
 
         AddHandler(2, &TDqStage::Match, HNDL(RewriteKqpReadTable));
         AddHandler(2, &TDqStage::Match, HNDL(RewriteKqpLookupTable));
+        AddHandler(2, &TKqlUpsertRows::Match, HNDL(RewriteReturningUpsert));
+        AddHandler(2, &TKqlDeleteRows::Match, HNDL(RewriteReturningDelete));
+
+        AddHandler(3, &TKqlReturningList::Match, HNDL(BuildReturning));
 #undef HNDL
 
         SetGlobal(1u);
     }
 
 protected:
+    TMaybeNode<TExprBase> BuildReturning(TExprBase node, TExprContext& ctx) {
+        TExprBase output = KqpBuildReturning(node, ctx, KqpCtx);
+        DumpAppliedRule("BuildReturning", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
+    TMaybeNode<TExprBase> RewriteReturningUpsert(TExprBase node, TExprContext& ctx) {
+        TExprBase output = KqpRewriteReturningUpsert(node, ctx, KqpCtx);
+        DumpAppliedRule("RewriteReturningUpsert", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
+    TMaybeNode<TExprBase> RewriteReturningDelete(TExprBase node, TExprContext& ctx) {
+        TExprBase output = KqpRewriteReturningDelete(node, ctx, KqpCtx);
+        DumpAppliedRule("RewriteReturningDelete", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
+    TMaybeNode<TExprBase> RewriteGenerateIfInsert(TExprBase node, TExprContext& ctx) {
+        TExprBase output = KqpRewriteGenerateIfInsert(node, ctx, KqpCtx);
+        DumpAppliedRule("RewriteGenerateIfInsert", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
     TMaybeNode<TExprBase> BuildReadTableStage(TExprBase node, TExprContext& ctx) {
         TExprBase output = KqpBuildReadTableStage(node, ctx, KqpCtx);
         DumpAppliedRule("BuildReadTableStage", node.Ptr(), output.Ptr(), ctx);
@@ -221,15 +251,9 @@ protected:
         return output;
     }
 
-    TMaybeNode<TExprBase> BuildHashShuffleByKeyStage(TExprBase node, TExprContext& ctx) {
-        auto output = DqBuildHashShuffleByKeyStage(node, ctx, {});
-        DumpAppliedRule("BuildHashShuffleByKeyStage", node.Ptr(), output.Ptr(), ctx);
-        return TExprBase(output);
-    }
-
-
     TMaybeNode<TExprBase> ExpandAggregatePhase(TExprBase node, TExprContext& ctx) {
-        auto output = ExpandAggregatePeepholeImpl(node.Ptr(), ctx, TypesCtx, KqpCtx.Config->HasOptUseFinalizeByKey(), false);
+        NDq::TSpillingSettings spillingSettings(KqpCtx.Config->GetEnabledSpillingNodes());
+        auto output = ExpandAggregatePeepholeImpl(node.Ptr(), ctx, TypesCtx, KqpCtx.Config->HasOptUseFinalizeByKey(), false, spillingSettings.IsAggregationSpillingEnabled());
         DumpAppliedRule("ExpandAggregatePhase", node.Ptr(), output, ctx);
         return TExprBase(output);
     }
@@ -394,9 +418,11 @@ protected:
     TMaybeNode<TExprBase> BuildJoin(TExprBase node, TExprContext& ctx,
         IOptimizationContext& optCtx, const TGetParents& getParents)
     {
-        bool pushLeftStage = !KqpCtx.IsDataQuery() && AllowFuseJoinInputs(node);
+        // TODO: Allow push to left stage for data queries.
+        // It is now possible as we don't use datashard transactions for reads in data queries.
+        bool pushLeftStage = (KqpCtx.IsScanQuery() || KqpCtx.Config->EnableKqpDataQueryStreamLookup) && AllowFuseJoinInputs(node);
         TExprBase output = DqBuildJoin(node, ctx, optCtx, *getParents(), IsGlobal,
-            pushLeftStage, KqpCtx.Config->GetHashJoinMode()
+            pushLeftStage, KqpCtx.Config->GetHashJoinMode(), false, KqpCtx.Config->UseGraceJoinCoreForMap.Get().GetOrElse(false)
         );
         DumpAppliedRule("BuildJoin", node.Ptr(), output.Ptr(), ctx);
         return output;
@@ -550,13 +576,19 @@ protected:
         return output;
     }
 
+    TMaybeNode<TExprBase> BuildStageWithReadWrap(TExprBase node, TExprContext& ctx) {
+        TExprBase output = DqBuildStageWithReadWrap(node, ctx);
+        DumpAppliedRule("BuildStageWithReadWrap", node.Ptr(), output.Ptr(), ctx);
+        return output;
+    }
+
 private:
     TTypeAnnotationContext& TypesCtx;
     const TKqpOptimizeContext& KqpCtx;
 };
 
 TAutoPtr<IGraphTransformer> CreateKqpPhyOptTransformer(const TIntrusivePtr<TKqpOptimizeContext>& kqpCtx,
-    NYql::TTypeAnnotationContext& typesCtx)
+    NYql::TTypeAnnotationContext& typesCtx, const TKikimrConfiguration::TPtr&)
 {
     return THolder<IGraphTransformer>(new TKqpPhysicalOptTransformer(typesCtx, kqpCtx));
 }

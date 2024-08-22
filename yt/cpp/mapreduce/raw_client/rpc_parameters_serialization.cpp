@@ -550,6 +550,9 @@ TNode SerializeParamsForListJobs(
     if (options.WithFailContext_) {
         result["with_fail_context"] = *options.WithFailContext_;
     }
+    if (options.WithMonitoringDescriptor_) {
+        result["with_monitoring_descriptor"] = *options.WithMonitoringDescriptor_;
+    }
 
     if (options.SortField_) {
         result["sort_field"] = ToString(*options.SortField_);
@@ -597,7 +600,7 @@ TNode SerializeParametersForInsertRows(
         result["durability"] = ToString(*options.Durability_);
     }
     if (options.RequireSyncReplica_) {
-      result["require_sync_replica"] = *options.RequireSyncReplica_;
+        result["require_sync_replica"] = *options.RequireSyncReplica_;
     }
     return result;
 }

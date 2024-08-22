@@ -10,6 +10,7 @@
 #include <util/system/unaligned_mem.h>
 #include <util/memory/pool.h>
 
+#include <deque>
 #include <type_traits>
 
 namespace NKikimr {
@@ -168,6 +169,20 @@ public:
 static_assert(sizeof(TCell) == 12, "TCell must be 12 bytes");
 using TCellsRef = TConstArrayRef<const TCell>;
 
+inline size_t EstimateSize(TCellsRef cells) {
+    size_t cellsSize = cells.size();
+
+    size_t size = sizeof(TCell) * cellsSize;
+    for (auto& cell : cells) {
+        if (!cell.IsNull() && !cell.IsInline()) {
+            const size_t cellSize = cell.Size();
+            size += AlignUp(cellSize);
+        }
+    }
+    
+    return size;
+}
+
 inline int CompareCellsAsByteString(const TCell& a, const TCell& b, bool isDescending) {
     const char* pa = (const char*)a.Data();
     const char* pb = (const char*)b.Data();
@@ -216,6 +231,10 @@ inline int CompareTypedCells(const TCell& a, const TCell& b, NScheme::TTypeInfoO
     SIMPLE_TYPE_SWITCH(Datetime,  ui32);
     SIMPLE_TYPE_SWITCH(Timestamp, ui64);
     SIMPLE_TYPE_SWITCH(Interval,  i64);
+    SIMPLE_TYPE_SWITCH(Date32, i32);
+    SIMPLE_TYPE_SWITCH(Datetime64, i64);
+    SIMPLE_TYPE_SWITCH(Timestamp64, i64);
+    SIMPLE_TYPE_SWITCH(Interval64, i64);
 
 #undef SIMPLE_TYPE_SWITCH
 
@@ -259,7 +278,7 @@ inline int CompareTypedCells(const TCell& a, const TCell& b, NScheme::TTypeInfoO
     }
 
     default:
-        Y_DEBUG_ABORT_UNLESS(false, "Unknown type");
+        Y_DEBUG_ABORT("Unknown type");
     };
 
     return 0;
@@ -313,10 +332,14 @@ inline ui64 GetValueHash(NScheme::TTypeInfo info, const TCell& cell) {
     case NYql::NProto::TypeIds::Uint16:
         return THash<ui16>()(*(const ui16*)cell.Data());
     case NYql::NProto::TypeIds::Int32:
+    case NYql::NProto::TypeIds::Date32:
         return THash<i32>()(ReadUnaligned<i32>((const i32*)cell.Data()));
     case NYql::NProto::TypeIds::Uint32:
         return THash<ui32>()(ReadUnaligned<ui32>((const ui32*)cell.Data()));
     case NYql::NProto::TypeIds::Int64:
+    case NYql::NProto::TypeIds::Datetime64:
+    case NYql::NProto::TypeIds::Timestamp64:
+    case NYql::NProto::TypeIds::Interval64:
         return THash<i64>()(ReadUnaligned<i64>((const i64*)cell.Data()));
     case NYql::NProto::TypeIds::Uint64:
         return THash<ui64>()(ReadUnaligned<ui64>((const ui64*)cell.Data()));
@@ -354,7 +377,7 @@ inline ui64 GetValueHash(NScheme::TTypeInfo info, const TCell& cell) {
         return NPg::PgNativeBinaryHash(cell.Data(), cell.Size(), typeDesc);
     }
 
-    Y_DEBUG_ABORT_UNLESS(false, "Type not supported for user columns: %d", typeId);
+    Y_DEBUG_ABORT("Type not supported for user columns: %d", typeId);
     return 0;
 }
 
@@ -532,6 +555,14 @@ public:
         return Cells;
     }
 
+    explicit operator bool() const
+    {
+        return !Cells.empty();
+    }    
+
+    // read headers, assuming the buf is correct and append additional cells at the end
+    static bool UnsafeAppendCells(TConstArrayRef<TCell> cells, TString& serializedCellVec);
+
     static void Serialize(TString& res, TConstArrayRef<TCell> cells);
 
     static TString Serialize(TConstArrayRef<TCell> cells);
@@ -567,6 +598,8 @@ public:
     TSerializedCellMatrix(const TSerializedCellMatrix& other)
         : Buf(other.Buf)
         , Cells(other.Cells)
+        , RowCount(other.RowCount)
+        , ColCount(other.ColCount)
     {
         Y_ABORT_UNLESS(Buf.data() == other.Buf.data(), "Buffer must be shared");
     }
@@ -595,6 +628,8 @@ public:
         Buf = std::move(other.Buf);
         Y_ABORT_UNLESS(Buf.data() == otherPtr, "Buffer address must not change");
         Cells = std::move(other.Cells);
+        RowCount = std::move(other.RowCount);
+        ColCount = std::move(other.ColCount);
         return *this;
     }
 
@@ -607,9 +642,15 @@ public:
     }
 
     TConstArrayRef<TCell> GetCells() const { return Cells; }
+    const TCell& GetCell(ui32 row, ui16 column) const;
 
     ui32 GetRowCount() const { return RowCount; }
     ui16 GetColCount() const { return ColCount; }
+
+    static size_t CalcIndex(ui32 row, ui16 column, ui16 columnCount) { return row * columnCount + column; }
+    size_t CalcIndex(ui32 row, ui16 column) const { return CalcIndex(row, column, ColCount); }
+
+    void GetSubmatrix(ui32 firstRow, ui32 lastRow, ui16 firstColumn, ui16 lastColumn, TVector<TCell>& resultCells) const;
 
     static void Serialize(TString& res, TConstArrayRef<TCell> cells, ui32 rowCount, ui16 colCount);
 
@@ -717,5 +758,8 @@ private:
 void DbgPrintValue(TString&, const TCell&, NScheme::TTypeInfo typeInfo);
 TString DbgPrintCell(const TCell& r, NScheme::TTypeInfo typeInfo, const NScheme::TTypeRegistry& typeRegistry);
 TString DbgPrintTuple(const TDbTupleRef& row, const NScheme::TTypeRegistry& typeRegistry);
+
+size_t GetCellMatrixHeaderSize();
+size_t GetCellHeaderSize();
 
 }

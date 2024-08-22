@@ -5,6 +5,7 @@
 #include <ydb/library/binary_json/write.h>
 
 #include <ydb/library/actors/core/event.h>
+#include <ydb/public/api/protos/ydb_table.pb.h>
 #include <library/cpp/testing/unittest/registar.h>
 
 #include <contrib/libs/apache/arrow/cpp/src/arrow/buffer.h>
@@ -109,7 +110,7 @@ std::shared_ptr<arrow::Schema> THelper::GetArrowSchema() const {
     std::vector<std::shared_ptr<arrow::Field>> fields;
     fields.emplace_back(arrow::field("timestamp", arrow::timestamp(arrow::TimeUnit::TimeUnit::MICRO), false));
     fields.emplace_back(arrow::field("resource_id", arrow::utf8()));
-    fields.emplace_back(arrow::field("uid", arrow::utf8()));
+    fields.emplace_back(arrow::field("uid", arrow::utf8(), false));
     fields.emplace_back(arrow::field("level", arrow::int32()));
     fields.emplace_back(arrow::field("message", arrow::utf8()));
     if (GetWithJsonDocument()) {
@@ -133,14 +134,25 @@ std::shared_ptr<arrow::RecordBatch> THelper::TestArrowBatch(ui64 pathIdBegin, ui
     jsonInfo["a"]["c"] = "asds";
     jsonInfo["b"] = "asd";
 
+    size_t index = 1ULL;
+    const auto magic = WithSomeNulls_ ? 3ULL : 0ULL;
     for (size_t i = 0; i < rowCount; ++i) {
         std::string uid("uid_" + std::to_string(tsBegin + i));
         std::string message("some prefix " + std::string(1024 + i % 200, 'x'));
         Y_ABORT_UNLESS(b1.Append(tsBegin + i * tsStepUs).ok());
         Y_ABORT_UNLESS(b2.Append(std::to_string(pathIdBegin + i)).ok());
         Y_ABORT_UNLESS(b3.Append(uid).ok());
-        Y_ABORT_UNLESS(b4.Append(i % 5).ok());
-        Y_ABORT_UNLESS(b5.Append(message).ok());
+
+        if (magic && !(++index % magic))
+            Y_ABORT_UNLESS(b4.AppendNull().ok());
+        else
+            Y_ABORT_UNLESS(b4.Append(i % 5).ok());
+
+        if (magic && !(++index % magic))
+            Y_ABORT_UNLESS(b5.AppendNull().ok());
+        else
+            Y_ABORT_UNLESS(b5.Append(message).ok());
+
         jsonInfo["a"]["b"] = i;
         auto jsonStringBase = jsonInfo.GetStringRobust();
         Y_ABORT_UNLESS(b6.Append(jsonStringBase.data(), jsonStringBase.size()).ok());
@@ -171,10 +183,10 @@ std::shared_ptr<arrow::RecordBatch> THelper::TestArrowBatch(ui64 pathIdBegin, ui
 TString THelper::GetTestTableSchema() const {
     TStringBuilder sb;
     sb << R"(Columns{ Name: "timestamp" Type : "Timestamp" NotNull : true })";
-    sb << R"(Columns{ Name: "resource_id" Type : "Utf8" })";
-    sb << R"(Columns{ Name: "uid" Type : "Utf8" })";
+    sb << R"(Columns{ Name: "resource_id" Type : "Utf8" DataAccessorConstructor{ ClassName: "SPARSED" } })";
+    sb << "Columns{ Name: \"uid\" Type : \"Utf8\" NotNull : true StorageId : \"" + OptionalStorageId + "\" }";
     sb << R"(Columns{ Name: "level" Type : "Int32" })";
-    sb << R"(Columns{ Name: "message" Type : "Utf8" })";
+    sb << "Columns{ Name: \"message\" Type : \"Utf8\" StorageId : \"" + OptionalStorageId + "\" }";
     if (GetWithJsonDocument()) {
         sb << R"(Columns{ Name: "json_payload" Type : "JsonDocument" })";
     }
@@ -414,19 +426,18 @@ std::shared_ptr<arrow::RecordBatch> TTableWithNullsHelper::TestArrowBatch(ui64, 
         Y_ABORT_UNLESS(bResourceId.AppendNull().ok());
         Y_ABORT_UNLESS(bLevel.Append(i).ok());
         Y_ABORT_UNLESS(bBinaryStr.AppendNull().ok());
-        Y_ABORT_UNLESS(bJsonVal.Append(std::string(R"({"col1": "val1", "obj": {"obj_col2_int": 16}})")).ok());
+        Y_ABORT_UNLESS(bJsonVal.Append(std::string(R"({"col1": "val1", "col-abc": "val-abc", "obj": {"obj_col2_int": 16}})")).ok());
         Y_ABORT_UNLESS(bJsonDoc.AppendNull().ok());
     }
 
-    auto maybeJsonDoc = NBinaryJson::SerializeToBinaryJson(R"({"col1": "val1", "obj": {"obj_col2_int": 16}})");
-    Y_ABORT_UNLESS(maybeJsonDoc.Defined());
+    const auto maybeJsonDoc = std::string(R"({"col1": "val1", "col-abc": "val-abc", "obj": {"obj_col2_int": 16}})");
     for (size_t i = rowCount / 2 + 1; i <= rowCount; ++i) {
         Y_ABORT_UNLESS(bId.Append(i).ok());
         Y_ABORT_UNLESS(bResourceId.Append(std::to_string(i)).ok());
         Y_ABORT_UNLESS(bLevel.AppendNull().ok());
         Y_ABORT_UNLESS(bBinaryStr.Append(std::to_string(i)).ok());
         Y_ABORT_UNLESS(bJsonVal.AppendNull().ok());
-        Y_ABORT_UNLESS(bJsonDoc.Append(maybeJsonDoc->Data(), maybeJsonDoc->Size()).ok());
+        Y_ABORT_UNLESS(bJsonDoc.Append(maybeJsonDoc.data(), maybeJsonDoc.length()).ok());
     }
 
     std::shared_ptr<arrow::Int32Array> aId;

@@ -5,6 +5,9 @@
 #include <yt/yt/client/tablet_client/config.h>
 #include <yt/yt/client/tablet_client/helpers.h>
 
+#include <yt/yt/core/compression/codec.h>
+#include <yt/yt/core/compression/dictionary_codec.h>
+
 #include <yt/yt/core/ytree/convert.h>
 
 #include <yt/yt/core/misc/singleton.h>
@@ -17,12 +20,14 @@ using namespace NChunkClient;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TString ToString(const TRetentionConfigPtr& obj)
+void FormatValue(TStringBuilderBase* builder, const TRetentionConfigPtr& obj, TStringBuf spec)
 {
-    static const TString NullPtrName("<nullptr>");
-    return obj
-        ? NYson::ConvertToYsonString(obj, NYson::EYsonFormat::Text).ToString()
-        : NullPtrName;
+    static const TStringBuf NullPtrName("<nullptr>");
+    if (!obj) {
+        FormatValue(builder, NullPtrName, spec);
+        return;
+    }
+    FormatValue(builder, NYson::ConvertToYsonString(obj, NYson::EYsonFormat::Text), spec);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -164,6 +169,9 @@ void TChunkWriterConfig::Register(TRegistrar registrar)
         .DefaultNew();
     registrar.Parameter("key_prefix_filter", &TThis::KeyPrefixFilter)
         .DefaultNew();
+
+    registrar.Parameter("enable_large_columnar_statistics", &TThis::EnableLargeColumnarStatistics)
+        .Default(false);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -186,7 +194,7 @@ void TKeyFilterWriterConfig::Register(TRegistrar registrar)
         .Optional();
 
     registrar.Parameter("false_positive_rate", &TThis::FalsePositiveRate)
-        .InRange(0, 1.0 / (1ll << 62))
+        .InRange(1.0 / (1ll << 62), 1)
         .Default()
         .Optional();
 
@@ -231,6 +239,90 @@ void TKeyPrefixFilterWriterConfig::Register(TRegistrar registrar)
             }
         }
     });
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void TDictionaryCompressionConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("enable", &TThis::Enable)
+        .Default(false);
+    registrar.Parameter("rebuild_period", &TThis::RebuildPeriod)
+        .Default(TDuration::Hours(3));
+    registrar.Parameter("backoff_period", &TThis::BackoffPeriod)
+        .Default(TDuration::Minutes(10));
+    registrar.Parameter("desired_processed_chunk_count", &TThis::DesiredProcessedChunkCount)
+        .GreaterThan(0)
+        .Default(10);
+    registrar.Parameter("max_processed_chunk_count", &TThis::MaxProcessedChunkCount)
+        .GreaterThan(0)
+        .Default(50);
+    registrar.Parameter("desired_sample_count", &TThis::DesiredSampleCount)
+        .GreaterThan(0)
+        .Default(10'000);
+    registrar.Parameter("desired_sampled_data_weight", &TThis::DesiredSampledDataWeight)
+        .GreaterThan(0)
+        .Default(3_MB);
+    registrar.Parameter("max_processed_sample_count", &TThis::MaxProcessedSampleCount)
+        .GreaterThan(0)
+        .Default(50'000);
+    registrar.Parameter("max_processed_data_weight", &TThis::MaxProcessedDataWeight)
+        .GreaterThan(0)
+        .Default(50_MB);
+    registrar.Parameter("max_fetched_blocks_size", &TThis::MaxFetchedBlocksSize)
+        .GreaterThan(0)
+        .Default(1_GB);
+    registrar.Parameter("column_dictionary_size", &TThis::ColumnDictionarySize)
+        .GreaterThanOrEqual(NCompression::GetDictionaryCompressionCodec()->GetMinDictionarySize())
+        .Default(32_KB);
+    registrar.Parameter("applied_policies", &TThis::AppliedPolicies)
+        .Default({
+            EDictionaryCompressionPolicy::LargeChunkFirst,
+            EDictionaryCompressionPolicy::FreshChunkFirst,
+        })
+        .ResetOnLoad();
+
+    registrar.Parameter("policy_probation_samples_size", &TThis::PolicyProbationSamplesSize)
+        .GreaterThan(0)
+        .Default(12_MB);
+    registrar.Parameter("max_acceptable_compression_ratio", &TThis::MaxAcceptableCompressionRatio)
+        .Default(0.7)
+        .InRange(0, 1);
+
+    registrar.Postprocessor([] (TThis* config) {
+        if (config->DesiredSampleCount > config->MaxProcessedSampleCount) {
+            THROW_ERROR_EXCEPTION("\"desired_sample_count\" cannot be greater than \"max_processed_sample_count\"");
+        }
+
+        if (config->DesiredSampledDataWeight > config->MaxProcessedDataWeight) {
+            THROW_ERROR_EXCEPTION("\"desired_sampled_data_weight\" cannot be greater than \"max_processed_data_weight\"");
+        }
+
+        if (config->MaxProcessedDataWeight > config->MaxFetchedBlocksSize) {
+            THROW_ERROR_EXCEPTION("\"max_processed_data_weight\" cannot be greater than \"max_fetched_blocks_size\"");
+        }
+
+        if (config->ColumnDictionarySize > config->DesiredSampledDataWeight) {
+            THROW_ERROR_EXCEPTION("\"column_dictionary_size\" cannot be greater than \"desired_sampled_data_weight\"");
+        }
+
+        if (config->AppliedPolicies.contains(EDictionaryCompressionPolicy::None)) {
+            THROW_ERROR_EXCEPTION("\"applied_policies\" cannot contain policy %Qlv",
+                EDictionaryCompressionPolicy::None);
+        }
+    });
+}
+
+///////////////////////////////////////////////////////////////////////////////
+
+void TDictionaryCompressionSessionConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("compression_level", &TThis::CompressionLevel)
+        .InRange(1, NCompression::GetDictionaryCompressionCodec()->GetMaxCompressionLevel())
+        .Default(NCompression::GetDictionaryCompressionCodec()->GetDefaultCompressionLevel());
+    registrar.Parameter("max_decompression_blob_size", &TThis::MaxDecompressionBlobSize)
+        .GreaterThan(0)
+        .Default(64_MB);
 }
 
 ///////////////////////////////////////////////////////////////////////////////
@@ -370,6 +462,8 @@ void TChunkWriterOptions::Register(TRegistrar registrar)
         .Default(true);
     registrar.Parameter("enable_segment_meta_in_blocks", &TThis::EnableSegmentMetaInBlocks)
         .Default(false);
+    registrar.Parameter("enable_column_meta_in_chunk_meta", &TThis::EnableColumnMetaInChunkMeta)
+        .Default(true);
 
     registrar.Parameter("schema_modification", &TThis::SchemaModification)
         .Default(ETableSchemaModification::None);
@@ -413,6 +507,9 @@ void TChunkWriterOptions::Register(TRegistrar registrar)
         if (config->ChunkFormat) {
             ValidateTableChunkFormatAndOptimizeFor(*config->ChunkFormat, config->OptimizeFor);
         }
+
+        THROW_ERROR_EXCEPTION_IF(!config->EnableColumnMetaInChunkMeta && !config->EnableSegmentMetaInBlocks,
+            "At least one of \"enable_column_meta_in_chunk_meta\" or \"enable_segment_meta_in_blocks\" must be true");
     });
 }
 
@@ -438,6 +535,18 @@ void TVersionedRowDigestConfig::Register(TRegistrar registrar)
         .Default(false);
     registrar.Parameter("t_digest", &TThis::TDigest)
         .DefaultNew();
+}
+
+////////////////////////////////////////////////////////////////////////////////
+
+void TSchemalessBufferedDynamicTableWriterConfig::Register(TRegistrar registrar)
+{
+    registrar.Parameter("max_batch_size", &TThis::MaxBatchSize)
+        .Default(1000);
+    registrar.Parameter("flush_period", &TThis::FlushPeriod)
+        .Default(TDuration::Seconds(5));
+    registrar.Parameter("retry_backoff", &TThis::RetryBackoff)
+        .Default();
 }
 
 ////////////////////////////////////////////////////////////////////////////////

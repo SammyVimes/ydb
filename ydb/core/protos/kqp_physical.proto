@@ -69,6 +69,9 @@ message TKqpPhyColumn {
         Ydb.TypedValue DefaultFromLiteral = 5;
     }
     bool NotNull = 6;
+    // flag that indicates that column is currently under the build
+    // operation.
+    optional bool IsBuildInProgress = 7;
 }
 
 enum EKqpPhyTableKind {
@@ -260,6 +263,7 @@ enum EStreamLookupStrategy {
     UNSPECIFIED = 0;
     LOOKUP = 1;
     JOIN = 2;
+    SEMI_JOIN = 3;
 };
 
 message TKqpPhyCnStreamLookup {
@@ -344,11 +348,17 @@ message TKqpExternalSink {
     string AuthInfo = 4;
 }
 
+message TKqpInternalSink {
+    string Type = 1;
+    google.protobuf.Any Settings = 2;
+}
+
 message TKqpSink {
     uint32 OutputIndex = 1;
 
     oneof Type {
         TKqpExternalSink ExternalSink = 2;
+        TKqpInternalSink InternalSink = 3;
     }
 }
 
@@ -364,6 +374,9 @@ message TKqpPhyStage {
     repeated TKqpSource Sources = 9;
     bool IsSinglePartition = 10;
     repeated TKqpSink Sinks = 11;
+    map<string, string> SecureParams = 12;
+    bool AllowWithSpilling = 13;
+    uint32 TaskCount = 14;
 }
 
 message TKqpPhyResult {
@@ -374,12 +387,33 @@ message TKqpPhyResult {
     optional uint32 QueryResultIndex = 5;
 }
 
+message TKqpAnalyzeOperation {
+    string TablePath = 1;
+    repeated string Columns = 2;
+}
+
+message TKqpPhyMetadataOperation {
+    message TColumnValue {
+        string Column = 1;
+        Ydb.Value Value = 2;
+    }
+    repeated TColumnValue ColumnValues = 1;
+
+    optional bool SuccessOnNotExist = 2;
+    optional bool SuccessOnAlreadyExists = 3;
+}
+
 message TKqpSchemeOperation {
     enum EFlags {
         FLAG_UNSPECIFIED = 0;
         FLAG_PG_MODE = 1; // set if pg compatible mode
         FLAG_IF_NOT_EXISTS = 2; // set if IF_NOT_EXISTS modificator present
     };
+
+    // If the object is modified, this field is not empty
+    // and in that case modification will be through
+    // NMetadata::IClassBehaviour way
+    string ObjectType = 100;
 
     oneof Operation {
         NKikimrSchemeOp.TModifyScheme CreateTable = 1;
@@ -389,9 +423,43 @@ message TKqpSchemeOperation {
         NKikimrSchemeOp.TModifyScheme CreateUser = 5;
         NKikimrSchemeOp.TModifyScheme AlterUser = 6;
         NKikimrSchemeOp.TModifyScheme DropUser = 7;
-
-        string Type = 9;
-        uint64 Flags = 10;
+        NKikimrSchemeOp.TModifyScheme CreateGroup = 8;
+        NKikimrSchemeOp.TModifyScheme AddGroupMembership = 9;
+        NKikimrSchemeOp.TModifyScheme RemoveGroupMembership = 10;
+        NKikimrSchemeOp.TModifyScheme DropGroup = 11;
+        NKikimrSchemeOp.TModifyScheme RenameGroup = 12;
+        NKikimrSchemeOp.TModifyScheme CreateExternalDataSource = 13;
+        NKikimrSchemeOp.TModifyScheme AlterExternalDataSource = 14;
+        NKikimrSchemeOp.TModifyScheme DropExternalDataSource = 15;
+        NKikimrSchemeOp.TModifyScheme CreateExternalTable = 16;
+        NKikimrSchemeOp.TModifyScheme AlterExternalTable = 17;
+        NKikimrSchemeOp.TModifyScheme DropExternalTable = 18;
+        NKikimrSchemeOp.TModifyScheme ModifyPermissions = 19;
+        NKikimrSchemeOp.TModifyScheme CreateView = 20;
+        NKikimrSchemeOp.TModifyScheme AlterView = 21;
+        NKikimrSchemeOp.TModifyScheme DropView = 22;
+        TKqpPhyMetadataOperation CreateObject = 23;
+        TKqpPhyMetadataOperation UpsertObject = 24;
+        TKqpPhyMetadataOperation AlterObject = 25;
+        TKqpPhyMetadataOperation DropObject = 26;
+        NKikimrSchemeOp.TModifyScheme CreateColumnTable = 27;
+        NKikimrSchemeOp.TModifyScheme AlterColumnTable = 28;
+        NKikimrSchemeOp.TModifyScheme CreateTableStore = 29;
+        NKikimrSchemeOp.TModifyScheme DropTableStore = 30;
+        NKikimrSchemeOp.TModifyScheme AlterTableStore = 31;
+        NKikimrSchemeOp.TModifyScheme CreateSequence = 32;
+        NKikimrSchemeOp.TModifyScheme DropSequence = 33;
+        NKikimrSchemeOp.TModifyScheme CreateReplication = 34;
+        NKikimrSchemeOp.TModifyScheme AlterReplication = 35;
+        NKikimrSchemeOp.TModifyScheme DropReplication = 36;
+        NKikimrSchemeOp.TModifyScheme AlterSequence = 37;
+        NKikimrSchemeOp.TModifyScheme CreateResourcePool = 38;
+        NKikimrSchemeOp.TModifyScheme AlterResourcePool = 39;
+        NKikimrSchemeOp.TModifyScheme DropResourcePool = 40;
+        TKqpAnalyzeOperation AnalyzeTable = 41;
+        NKikimrSchemeOp.TModifyScheme CreateTopic = 42;
+        NKikimrSchemeOp.TModifyScheme AlterTopic = 43;
+        NKikimrSchemeOp.TModifyScheme DropTopic = 44;
     }
 }
 
@@ -461,4 +529,6 @@ message TKqpPhyQuery {
     bool HasUncommittedChangesRead = 9;
 
     string QueryDiagnostics = 10;
+
+    repeated TKqpTableInfo ViewInfos = 11;
 }

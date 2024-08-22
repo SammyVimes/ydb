@@ -4,10 +4,11 @@
 
 #include <yt/yt/core/concurrency/async_stream.h>
 
-#include <yt/yt/core/misc/ref_counted.h>
 #include <yt/yt/core/misc/proc.h>
 
 #include <yt/yt/core/net/address.h>
+
+#include <library/cpp/yt/memory/ref_counted.h>
 
 namespace NYT::NNet {
 
@@ -87,30 +88,32 @@ DEFINE_REFCOUNTED_TYPE(IConnection)
 
 ////////////////////////////////////////////////////////////////////////////////
 
-std::pair<IConnectionPtr, IConnectionPtr> CreateConnectionPair(const NConcurrency::IPollerPtr& poller);
+std::pair<IConnectionPtr, IConnectionPtr> CreateConnectionPair(NConcurrency::IPollerPtr poller);
 
 //! File descriptor must be in nonblocking mode.
 IConnectionPtr CreateConnectionFromFD(
     TFileDescriptor fd,
     const TNetworkAddress& localAddress,
     const TNetworkAddress& remoteAddress,
-    const NConcurrency::IPollerPtr& poller);
+    NConcurrency::IPollerPtr poller);
 
 IConnectionReaderPtr CreateInputConnectionFromFD(
     TFileDescriptor fd,
-    const TString& pipePath,
-    const NConcurrency::IPollerPtr& poller,
+    TString pipePath,
+    NConcurrency::IPollerPtr poller,
     const TRefCountedPtr& pipeHolder);
 
 IConnectionReaderPtr CreateInputConnectionFromPath(
-    const TString& pipePath,
-    const NConcurrency::IPollerPtr& poller,
+    TString pipePath,
+    NConcurrency::IPollerPtr poller,
     const TRefCountedPtr& pipeHolder);
 
 IConnectionWriterPtr CreateOutputConnectionFromPath(
-    const TString& pipePath,
-    const NConcurrency::IPollerPtr& poller,
-    const TRefCountedPtr& pipeHolder);
+    TString pipePath,
+    NConcurrency::IPollerPtr poller,
+    const TRefCountedPtr& pipeHolder,
+    std::optional<int> capacity = {},
+    bool useDeliveryFence = false);
 
 ////////////////////////////////////////////////////////////////////////////////
 

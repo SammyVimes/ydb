@@ -9,10 +9,11 @@
 
 #include <yt/yt/core/profiling/public.h>
 
-#include <yt/yt/core/misc/intrusive_ptr.h>
 #include <yt/yt/core/misc/error.h>
 
 #include <yt/yt/core/ytree/fluent.h>
+
+#include <library/cpp/yt/memory/intrusive_ptr.h>
 
 namespace NYT::NProfiling {
 
@@ -218,7 +219,7 @@ public:
         const TTagRegistry& tagRegistry,
         NYTree::TFluentAny fluent) const;
 
-    void DumpCube(NProto::TCube* cube) const;
+    void DumpCube(NProto::TCube* cube, const std::vector<TTagId>& extraTags) const;
 
     int GetGridFactor() const;
     int GetObjectCount() const;

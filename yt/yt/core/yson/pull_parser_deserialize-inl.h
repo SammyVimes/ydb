@@ -4,11 +4,6 @@
 #include "pull_parser_deserialize.h"
 #endif
 
-#include "public.h"
-
-#include "pull_parser.h"
-#include "pull_parser_deserialize.h"
-
 #include <yt/yt/core/misc/error.h>
 
 #include <yt/yt/core/yson/token_writer.h>
@@ -281,7 +276,7 @@ void Deserialize(
 
 template <class E, class T, E Min, E Max>
 void Deserialize(
-    TEnumIndexedVector<E, T, Min, Max>& vector,
+    TEnumIndexedArray<E, T, Min, Max>& vector,
     TYsonPullParserCursor* cursor,
     std::enable_if_t<ArePullParserDeserializable<T>(), void*>)
 {
@@ -289,7 +284,7 @@ void Deserialize(
 
     auto itemVisitor = [&] (TYsonPullParserCursor* cursor) {
         auto key = ExtractTo<E>(cursor);
-        if (!vector.IsDomainValue(key)) {
+        if (!vector.IsValidIndex(key)) {
             THROW_ERROR_EXCEPTION("Enum value %Qlv is out of supported range",
                 key);
         }
@@ -358,6 +353,19 @@ template <class T, class TTag>
 void Deserialize(TStrongTypedef<T, TTag>& value, TYsonPullParserCursor* cursor)
 {
     Deserialize(value.Underlying(), cursor);
+}
+
+template <class T>
+    requires std::derived_from<T, google::protobuf::Message>
+void Deserialize(
+    T& message,
+    NYson::TYsonPullParserCursor* cursor)
+{
+    NYson::TProtobufWriterOptions options;
+    options.UnknownYsonFieldModeResolver = NYson::TProtobufWriterOptions::CreateConstantUnknownYsonFieldModeResolver(
+        NYson::EUnknownYsonFieldsMode::Keep);
+
+    DeserializeProtobufMessage(message, NYson::ReflectProtobufMessageType<T>(), cursor, options);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

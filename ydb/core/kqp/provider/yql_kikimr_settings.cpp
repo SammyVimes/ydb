@@ -1,6 +1,10 @@
 #include "yql_kikimr_settings.h"
 
 #include <ydb/core/protos/config.pb.h>
+#include <ydb/core/protos/table_service_config.pb.h>
+#include <util/generic/size_literals.h>
+#include <util/string/split.h>
+#include <ydb/library/yql/providers/dq/common/yql_dq_settings.h>
 
 namespace NYql {
 
@@ -19,6 +23,21 @@ EOptionalFlag GetOptionalFlagValue(const TMaybe<TType>& flag) {
     }
 
     return EOptionalFlag::Disabled;
+}
+
+
+ui64 ParseEnableSpillingNodes(const TString &v) {
+    ui64 res = 0;
+    TVector<TString> vec;
+    StringSplitter(v).SplitBySet(",;| ").AddTo(&vec);
+    for (auto& s: vec) {
+        if (s.empty()) {
+            throw yexception() << "Empty value item";
+        }
+        auto value = FromString<NDq::EEnabledSpillingNodes>(s);
+        res |= ui64(value);
+    }
+    return res;
 }
 
 static inline bool GetFlagValue(const TMaybe<bool>& flag) {
@@ -43,6 +62,7 @@ TKikimrConfiguration::TKikimrConfiguration() {
     REGISTER_SETTING(*this, _KqpMaxComputeActors);
     REGISTER_SETTING(*this, _KqpEnableSpilling);
     REGISTER_SETTING(*this, _KqpDisableLlvmForUdfStages);
+    REGISTER_SETTING(*this, _KqpYqlCombinerMemoryLimit).Lower(0ULL).Upper(1_GB);
 
     REGISTER_SETTING(*this, KqpPushOlapProcess);
 
@@ -55,19 +75,23 @@ TKikimrConfiguration::TKikimrConfiguration() {
     REGISTER_SETTING(*this, EnableLlvm);
     REGISTER_SETTING(*this, HashJoinMode).Parser([](const TString& v) { return FromString<NDq::EHashJoinMode>(v); });
 
-    REGISTER_SETTING(*this, OptDisableJoinRewrite);
-    REGISTER_SETTING(*this, OptDisableJoinTableLookup);
-    REGISTER_SETTING(*this, OptDisableJoinReverseTableLookup);
-    REGISTER_SETTING(*this, OptDisableJoinReverseTableLookupLeftSemi);
     REGISTER_SETTING(*this, OptDisableTopSort);
     REGISTER_SETTING(*this, OptDisableSqlInToJoin);
     REGISTER_SETTING(*this, OptEnableInplaceUpdate);
     REGISTER_SETTING(*this, OptEnablePredicateExtract);
     REGISTER_SETTING(*this, OptEnableOlapPushdown);
     REGISTER_SETTING(*this, OptEnableOlapProvideComputeSharding);
-    
+    REGISTER_SETTING(*this, OptOverrideStatistics);
+    REGISTER_SETTING(*this, OptCardinalityHints);
+    REGISTER_SETTING(*this, OptJoinAlgoHints);
+    REGISTER_SETTING(*this, OverridePlanner);
+    REGISTER_SETTING(*this, UseGraceJoinCoreForMap);
+
     REGISTER_SETTING(*this, OptUseFinalizeByKey);
-    REGISTER_SETTING(*this, OptEnableCostBasedOptimization);
+    REGISTER_SETTING(*this, CostBasedOptimizationLevel);
+    REGISTER_SETTING(*this, EnableSpillingNodes)
+        .Parser([](const TString& v) { return ParseEnableSpillingNodes(v); });
+
     REGISTER_SETTING(*this, MaxDPccpDPTableSize);
 
     REGISTER_SETTING(*this, MaxTasksPerStage);
@@ -76,6 +100,7 @@ TKikimrConfiguration::TKikimrConfiguration() {
     REGISTER_SETTING(*this, ScanQuery);
 
     IndexAutoChooserMode = NKikimrConfig::TTableServiceConfig_EIndexAutoChooseMode_DISABLED;
+    BlockChannelsMode = NKikimrConfig::TTableServiceConfig_EBlockChannelsMode_BLOCK_CHANNELS_SCALAR;
 }
 
 bool TKikimrSettings::HasAllowKqpUnsafeCommit() const {
@@ -96,22 +121,6 @@ bool TKikimrSettings::SpillingEnabled() const {
 
 bool TKikimrSettings::DisableLlvmForUdfStages() const {
     return GetFlagValue(_KqpDisableLlvmForUdfStages.Get());
-}
-
-bool TKikimrSettings::HasOptDisableJoinRewrite() const {
-    return GetFlagValue(OptDisableJoinRewrite.Get());
-}
-
-bool TKikimrSettings::HasOptDisableJoinTableLookup() const {
-    return GetFlagValue(OptDisableJoinTableLookup.Get());
-}
-
-bool TKikimrSettings::HasOptDisableJoinReverseTableLookup() const {
-    return GetFlagValue(OptDisableJoinReverseTableLookup.Get());
-}
-
-bool TKikimrSettings::HasOptDisableJoinReverseTableLookupLeftSemi() const {
-    return GetFlagValue(OptDisableJoinReverseTableLookupLeftSemi.Get());
 }
 
 bool TKikimrSettings::HasOptDisableTopSort() const {
@@ -135,13 +144,8 @@ bool TKikimrSettings::HasOptEnableOlapProvideComputeSharding() const {
 }
 
 bool TKikimrSettings::HasOptUseFinalizeByKey() const {
-    return GetOptionalFlagValue(OptUseFinalizeByKey.Get()) != EOptionalFlag::Disabled;
+    return GetFlagValue(OptUseFinalizeByKey.Get().GetOrElse(true)) != EOptionalFlag::Disabled;
 }
-
-bool TKikimrSettings::HasOptEnableCostBasedOptimization() const {
-    return GetOptionalFlagValue(OptEnableCostBasedOptimization.Get()) == EOptionalFlag::Enabled;
-}
-
 
 EOptionalFlag TKikimrSettings::GetOptPredicateExtract() const {
     return GetOptionalFlagValue(OptEnablePredicateExtract.Get());
@@ -162,6 +166,14 @@ NDq::EHashJoinMode TKikimrSettings::GetHashJoinMode() const {
 
 TKikimrSettings::TConstPtr TKikimrConfiguration::Snapshot() const {
     return std::make_shared<const TKikimrSettings>(*this);
+}
+
+void TKikimrConfiguration::SetDefaultEnabledSpillingNodes(const TString& node) {
+    DefaultEnableSpillingNodes = ParseEnableSpillingNodes(node);
+}
+
+ui64 TKikimrConfiguration::GetEnabledSpillingNodes() const {
+    return EnableSpillingNodes.Get().GetOrElse(DefaultEnableSpillingNodes);
 }
 
 }

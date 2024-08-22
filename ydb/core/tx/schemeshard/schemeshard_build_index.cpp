@@ -47,6 +47,8 @@ void TSchemeShard::PersistCreateBuildIndex(NIceDb::TNiceDb& db, const TIndexBuil
         NIceDb::TUpdate<Schema::IndexBuild::MaxShards>(info->Limits.MaxShards),
         NIceDb::TUpdate<Schema::IndexBuild::MaxRetries>(info->Limits.MaxRetries),
         NIceDb::TUpdate<Schema::IndexBuild::BuildKind>(ui32(info->BuildKind))
+
+        // TODO save info->ImplTableDescriptions
     );
 
     ui32 columnNo = 0;
@@ -68,7 +70,9 @@ void TSchemeShard::PersistCreateBuildIndex(NIceDb::TNiceDb& db, const TIndexBuil
         db.Table<Schema::BuildColumnOperationSettings>().Key(info->Id, i).Update(
             NIceDb::TUpdate<Schema::BuildColumnOperationSettings::ColumnName>(info->BuildColumns[i].ColumnName),
             NIceDb::TUpdate<Schema::BuildColumnOperationSettings::DefaultFromLiteral>(
-                TString(info->BuildColumns[i].DefaultFromLiteral.SerializeAsString()))
+                TString(info->BuildColumns[i].DefaultFromLiteral.SerializeAsString())),
+            NIceDb::TUpdate<Schema::BuildColumnOperationSettings::NotNull>(info->BuildColumns[i].NotNull),
+            NIceDb::TUpdate<Schema::BuildColumnOperationSettings::FamilyName>(info->BuildColumns[i].FamilyName)
         );
     }
 }

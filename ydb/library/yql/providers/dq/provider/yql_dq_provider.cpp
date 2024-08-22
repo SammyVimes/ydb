@@ -33,9 +33,11 @@ TDataProviderInitializer GetDqDataProviderInitializer(
         TIntrusivePtr<TTypeAnnotationContext> typeCtx,
         const TOperationProgressWriter& progressWriter,
         const TYqlOperationOptions& operationOptions,
-        THiddenQueryAborter hiddenAborter
+        THiddenQueryAborter hiddenAborter,
+        const TQContext& qContext
     ) {
         Y_UNUSED(userName);
+        Y_UNUSED(qContext);
 
         auto dqTaskTransformFactory = NYql::CreateCompositeTaskTransformFactory({
             NYql::CreateCommonDqTaskTransformFactory()
@@ -115,7 +117,7 @@ TDataProviderInitializer GetDqDataProviderInitializer(
             }
         };
 
-        info.CloseSession = [dqGateway, metrics](const TString& sessionId) {
+        info.CloseSessionAsync = [dqGateway, metrics](const TString& sessionId) {
             if (metrics) {
                 metrics->IncCounter("dq", "CloseSession");
             }
@@ -123,7 +125,11 @@ TDataProviderInitializer GetDqDataProviderInitializer(
             if (dqGateway) { // nullptr in yqlrun
                 YQL_CLOG(DEBUG, ProviderDq) << "CloseSession " << sessionId;
                 dqGateway->CloseSession(sessionId);
+
+                return dqGateway->CloseSessionAsync(sessionId);
             }
+
+            return NThreading::MakeFuture();
         };
 
         return info;

@@ -27,12 +27,13 @@ enum class ETableKind {
 
 struct TTableConstInfo : public TAtomicRefCount<TTableConstInfo> {
     TString Path;
-    TMap<TString, NSharding::TShardingBase::TColumn> Columns;
+    TMap<TString, NSharding::IShardingBase::TColumn> Columns;
     TVector<TString> KeyColumns;
     TVector<NScheme::TTypeInfo> KeyColumnTypes;
     ETableKind TableKind = ETableKind::Unknown;
     THashMap<TString, TString> Sequences;
     THashMap<TString, Ydb::TypedValue> DefaultFromLiteral;
+    bool IsBuildInProgress = false;
 
     TTableConstInfo() {}
     TTableConstInfo(const TString& path) : Path(path) {}
@@ -42,7 +43,7 @@ struct TTableConstInfo : public TAtomicRefCount<TTableConstInfo> {
             return;
         }
 
-        NSharding::TShardingBase::TColumn column;
+        NSharding::IShardingBase::TColumn column;
         column.Id = phyColumn.GetId().GetId();
 
         if (phyColumn.GetTypeId() != NScheme::NTypeIds::Pg) {
@@ -52,11 +53,12 @@ struct TTableConstInfo : public TAtomicRefCount<TTableConstInfo> {
                 NPg::TypeDescFromPgTypeName(phyColumn.GetPgTypeName()));
         }
         column.NotNull = phyColumn.GetNotNull();
+        column.IsBuildInProgress = phyColumn.GetIsBuildInProgress();
 
         Columns.emplace(phyColumn.GetId().GetName(), std::move(column));
         if (!phyColumn.GetDefaultFromSequence().empty()) {
             TString seq = phyColumn.GetDefaultFromSequence();
-            if (!seq.StartsWith(Path)) {
+            if (!seq.StartsWith("/")) {
                 seq = Path + "/" + seq;
             }
 
@@ -81,7 +83,7 @@ struct TTableConstInfo : public TAtomicRefCount<TTableConstInfo> {
             << ", table: " << Path
             << ", column: " << columnName);
 
-        NSharding::TShardingBase::TColumn column;
+        NSharding::IShardingBase::TColumn column;
         column.Id = systemColumn->ColumnId;
         column.Type = NScheme::TTypeInfo(systemColumn->TypeId);
         column.NotNull = false;
@@ -141,22 +143,22 @@ public:
             return TableConstInfo->Path;
         }
 
-        const TMap<TString, NSharding::TShardingBase::TColumn>& GetColumns() const {
+        const TMap<TString, NSharding::IShardingBase::TColumn>& GetColumns() const {
             return TableConstInfo->Columns;
         }
-        
+
         const TVector<TString>& GetKeyColumns() const {
             return TableConstInfo->KeyColumns;
         }
-        
+
         const TVector<NScheme::TTypeInfo>& GetKeyColumnTypes() const {
             return TableConstInfo->KeyColumnTypes;
         }
-        
+
         const ETableKind& GetTableKind() const {
             return TableConstInfo->TableKind;
         }
-        
+
         const THashMap<TString, TString>& GetSequences() const {
             return TableConstInfo->Sequences;
         }
@@ -167,16 +169,6 @@ public:
 
         void SetColumnTableInfo(TIntrusiveConstPtr<NSchemeCache::TSchemeCacheNavigate::TColumnTableInfo> columnTableInfo) {
             ColumnTableInfo = columnTableInfo;
-        }
-
-        static std::unique_ptr<NSharding::TShardingBase> BuildSharding(const TIntrusiveConstPtr<NSchemeCache::TSchemeCacheNavigate::TColumnTableInfo>& columnTableInfo) {
-            if (columnTableInfo) {
-                auto result = NSharding::TShardingBase::BuildShardingOperator(columnTableInfo->Description.GetSharding());
-                YQL_ENSURE(result);
-                return result;
-            } else {
-                return nullptr;
-            }
         }
 
         void SetPath(const TStringBuf& path) {

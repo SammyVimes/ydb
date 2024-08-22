@@ -1,18 +1,25 @@
 #pragma once
 
 #include <ydb/core/formats/arrow/arrow_helpers.h>
+#include <ydb/core/formats/arrow/common/validation.h>
 #include <ydb/core/kqp/common/kqp.h>
 #include <ydb/core/protos/tx_datashard.pb.h>
+#include <ydb/core/protos/data_events.pb.h>
 #include <ydb/core/scheme/scheme_tabledefs.h>
 
 #include <contrib/libs/apache/arrow/cpp/src/arrow/api.h>
-#include <ydb/core/formats/arrow/serializer/full.h>
 
 namespace NKikimr::NKqp {
 
 struct TEvKqpCompute {
     struct TEvRemoteScanData : public TEventPB<TEvRemoteScanData, NKikimrKqp::TEvRemoteScanData,
         TKqpComputeEvents::EvRemoteScanData> {};
+
+    class IShardScanStats {
+    public:
+        virtual ~IShardScanStats() = default;
+        virtual THashMap<TString, ui64> GetMetrics() const = 0;
+    };
 
     /*
      * Scan communications.
@@ -35,7 +42,7 @@ struct TEvKqpCompute {
         ui32 ScanId;
         ui32 Generation;
         TVector<TOwnedCellVec> Rows;
-        std::shared_ptr<arrow::RecordBatch> ArrowBatch;
+        std::shared_ptr<arrow::Table> ArrowBatch;
         std::vector<std::vector<ui32>> SplittedBatches;
         
         TOwnedCellVec LastKey;
@@ -46,6 +53,19 @@ struct TEvKqpCompute {
         bool Finished = false;
         bool PageFault = false; // page fault was the reason for sending this message
         mutable THolder<TEvRemoteScanData> Remote;
+        std::shared_ptr<IShardScanStats> StatsOnFinished;
+
+        template <class T>
+        const T& GetStatsAs() const {
+            Y_ABORT_UNLESS(!!StatsOnFinished);
+            return VerifyDynamicCast<const T&>(*StatsOnFinished);
+        }
+
+        template <class T>
+        bool CheckStatsIs() const {
+            auto p = dynamic_cast<const T*>(StatsOnFinished.get());
+            return p;
+        }
 
         ui32 GetRowsCount() const {
             if (ArrowBatch) {
@@ -105,7 +125,7 @@ struct TEvKqpCompute {
             if (pbEv->Record.HasArrowBatch()) {
                 auto batch = pbEv->Record.GetArrowBatch();
                 auto schema = NArrow::DeserializeSchema(batch.GetSchema());
-                ev->ArrowBatch = NArrow::DeserializeBatch(batch.GetBatch(), schema);
+                ev->ArrowBatch = NArrow::TStatusValidator::GetValid(arrow::Table::FromRecordBatches({NArrow::DeserializeBatch(batch.GetBatch(), schema)}));
             }
             return ev.Release();
         }
@@ -142,7 +162,7 @@ struct TEvKqpCompute {
                         Y_DEBUG_ABORT_UNLESS(ArrowBatch != nullptr);
                         auto* protoArrowBatch = Remote->Record.MutableArrowBatch();
                         protoArrowBatch->SetSchema(NArrow::SerializeSchema(*ArrowBatch->schema()));
-                        protoArrowBatch->SetBatch(NArrow::SerializeBatchNoCompression(ArrowBatch));
+                        protoArrowBatch->SetBatch(NArrow::SerializeBatchNoCompression(NArrow::ToBatch(ArrowBatch, true)));
                         break;
                     }
                 }
@@ -225,6 +245,7 @@ struct TEvKqpCompute {
 
     struct TEvKillScanTablet : public NActors::TEventPB<TEvKillScanTablet, NKikimrKqp::TEvKillScanTablet,
         TKqpComputeEvents::EvKillScanTablet> {};
+
 };
 
 } // namespace NKikimr::NKqp

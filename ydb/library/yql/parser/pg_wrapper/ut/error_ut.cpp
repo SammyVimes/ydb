@@ -1,3 +1,5 @@
+#include "../pg_compat.h"
+
 #include <library/cpp/testing/unittest/registar.h>
 
 extern "C" {
@@ -17,7 +19,7 @@ Y_UNIT_TEST_SUITE(TErrorTests) {
     Y_UNIT_TEST(TestPgTry) {
         Cout << "begin...\n";
         TSimpleTimer timer;
-        volatile ui32 x;
+        volatile ui32 x = 0;
         for (ui32 i = 0; i < IterationsCount; ++i) {
             PG_TRY();
             {
@@ -35,7 +37,7 @@ Y_UNIT_TEST_SUITE(TErrorTests) {
     Y_UNIT_TEST(TestCppTry) {
         Cout << "begin...\n";
         TSimpleTimer timer;
-        volatile ui32 x;
+        volatile ui32 x = 0;
         for (ui32 i = 0; i < IterationsCount; ++i) {
             try {
                 x += 1;

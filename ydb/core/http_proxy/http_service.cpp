@@ -7,10 +7,11 @@
 #include <ydb/library/actors/core/hfunc.h>
 #include <ydb/library/actors/core/log.h>
 #include <ydb/library/actors/http/http_proxy.h>
+#include <ydb/library/http_proxy/error/error.h>
+
+#include <ydb/core/protos/config.pb.h>
 
 #include <util/stream/file.h>
-
-#include <ydb/library/http_proxy/error/error.h>
 
 namespace NKikimr::NHttpProxy {
 
@@ -47,6 +48,8 @@ namespace NKikimr::NHttpProxy {
         Processors->Initialize();
         if (cfg.UseSDK) {
             auto config = NYdb::TDriverConfig().SetNetworkThreadsNum(1)
+                .SetClientThreadsNum(1)
+                .SetMaxQueuedRequests(10000)
                 .SetGRpcKeepAlivePermitWithoutCalls(true)
                 .SetGRpcKeepAliveTimeout(TDuration::Seconds(90))
                 .SetDiscoveryMode(NYdb::EDiscoveryMode::Async);
@@ -66,6 +69,7 @@ namespace NKikimr::NHttpProxy {
         const auto& config = Config.GetHttpConfig();
         THolder<NHttp::TEvHttpProxy::TEvAddListeningPort> ev =
             MakeHolder<NHttp::TEvHttpProxy::TEvAddListeningPort>(config.GetPort());
+        ev->MaxRecycledRequestsCount = 0;
         ev->Secure = config.GetSecure();
         ev->CertificateFile = config.GetCert();
         ev->PrivateKeyFile = config.GetKey();
@@ -99,7 +103,8 @@ namespace NKikimr::NHttpProxy {
 
         try {
             auto signature = context.GetSignature();
-            Processors->Execute(context.MethodName, std::move(context), std::move(signature), ctx);
+            auto methodName = context.MethodName;
+            Processors->Execute(std::move(methodName), std::move(context), std::move(signature), ctx);
         } catch (const NKikimr::NSQS::TSQSException& e) {
             context.ResponseData.Status = NYdb::EStatus::BAD_REQUEST;
             context.ResponseData.ErrorText = e.what();

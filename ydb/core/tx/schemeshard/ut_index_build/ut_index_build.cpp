@@ -1,3 +1,4 @@
+#include <ydb/core/base/table_index.h>
 #include <ydb/core/tx/schemeshard/ut_helpers/helpers.h>
 #include <ydb/core/tx/schemeshard/schemeshard_billing_helpers.h>
 #include <ydb/core/testlib/tablet_helpers.h>
@@ -291,7 +292,7 @@ Y_UNIT_TEST_SUITE(IndexBuildTest) {
         auto descr = TestGetBuildIndex(runtime, tenantSchemeShard, "/MyRoot/ServerLessDB", txId);
         Y_ASSERT(descr.GetIndexBuild().GetState() == Ydb::Table::IndexBuildState::STATE_DONE);
 
-        const TString meteringData = R"({"usage":{"start":0,"quantity":179,"finish":0,"unit":"request_unit","type":"delta"},"tags":{},"id":"106-9437197-2-101-1818-101-1818","cloud_id":"CLOUD_ID_VAL","source_wt":0,"source_id":"sless-docapi-ydb-ss","resource_id":"DATABASE_ID_VAL","schema":"ydb.serverless.requests.v1","folder_id":"FOLDER_ID_VAL","version":"1.0.0"})";
+        const TString meteringData = R"({"usage":{"start":0,"quantity":179,"finish":0,"unit":"request_unit","type":"delta"},"tags":{},"id":"106-72075186233409549-2-101-1818-101-1818","cloud_id":"CLOUD_ID_VAL","source_wt":0,"source_id":"sless-docapi-ydb-ss","resource_id":"DATABASE_ID_VAL","schema":"ydb.serverless.requests.v1","folder_id":"FOLDER_ID_VAL","version":"1.0.0"})";
 
         UNIT_ASSERT_NO_DIFF(meteringMessages, meteringData + "\n");
 
@@ -375,10 +376,19 @@ Y_UNIT_TEST_SUITE(IndexBuildTest) {
         }
 
         TVector<TString> billRecords;
-        runtime.SetObserverFunc([&billRecords](TAutoPtr<IEventHandle>& ev) {
+        TVector<bool> shadowData;
+        TVector<bool> keepEraseMarkers;
+        runtime.SetObserverFunc([&](TAutoPtr<IEventHandle>& ev) {
             if (ev->Type == NMetering::TEvMetering::TEvWriteMeteringJson::EventType) {
                 auto* msg = ev->Get<NMetering::TEvMetering::TEvWriteMeteringJson>();
                 billRecords.push_back(msg->MeteringJson);
+            } else if (ev->Type == TSchemeBoardEvents::TEvNotifyUpdate::EventType) {
+                auto* msg = ev->Get<TSchemeBoardEvents::TEvNotifyUpdate>();
+                if (msg->Path.EndsWith(NTableIndex::ImplTable)) {
+                    auto& desc = msg->DescribeSchemeResult.GetPathDescription().GetTable().GetPartitionConfig();
+                    shadowData.push_back(desc.GetShadowData());
+                    keepEraseMarkers.push_back(desc.GetCompactionPolicy().GetKeepEraseMarkers());
+                }
             }
 
             return TTestActorRuntime::EEventAction::PROCESS;
@@ -396,6 +406,14 @@ Y_UNIT_TEST_SUITE(IndexBuildTest) {
         Y_ASSERT(descr.GetIndexBuild().GetState() == Ydb::Table::IndexBuildState::STATE_DONE);
 
         UNIT_ASSERT(billRecords.empty());
+
+        UNIT_ASSERT_VALUES_EQUAL(shadowData.size(), 2);
+        UNIT_ASSERT_VALUES_EQUAL(shadowData[0], true);
+        UNIT_ASSERT_VALUES_EQUAL(shadowData[1], false);
+
+        UNIT_ASSERT_VALUES_EQUAL(keepEraseMarkers.size(), 2);
+        UNIT_ASSERT_VALUES_EQUAL(keepEraseMarkers[0], true);
+        UNIT_ASSERT_VALUES_EQUAL(keepEraseMarkers[1], false);
     }
 
     Y_UNIT_TEST(CancellationNotEnoughRetries) {
@@ -453,7 +471,7 @@ Y_UNIT_TEST_SUITE(IndexBuildTest) {
                     auto& tx = *msg->Record.MutableTransaction(0);
                     auto& config = *tx.MutableInitiateIndexBuild();
                     NKikimrSchemeOp::TIndexCreationConfig& indexConfig = *config.MutableIndex();
-                    NKikimrSchemeOp::TTableDescription& indexTableDescr = *indexConfig.MutableIndexImplTableDescription();
+                    NKikimrSchemeOp::TTableDescription& indexTableDescr = indexConfig.MutableIndexImplTableDescriptions()->at(0);
 
                     indexTableDescr.MutablePartitionConfig()->MutablePartitioningPolicy()->SetSizeToSplit(10);
                     indexTableDescr.MutablePartitionConfig()->MutablePartitioningPolicy()->SetMaxPartitionsCount(10);

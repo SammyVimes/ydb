@@ -16,12 +16,13 @@ using namespace NNet;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const auto& Logger = PipesLogger;
+static constexpr auto& Logger = PipesLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TNamedPipe::TNamedPipe(const TString& path, bool owning)
+TNamedPipe::TNamedPipe(const TString& path, std::optional<int> capacity, bool owning)
     : Path_(path)
+    , Capacity_(capacity)
     , Owning_(owning)
 { }
 
@@ -36,9 +37,9 @@ TNamedPipe::~TNamedPipe()
     }
 }
 
-TNamedPipePtr TNamedPipe::Create(const TString& path, int permissions)
+TNamedPipePtr TNamedPipe::Create(const TString& path, int permissions, std::optional<int> capacity)
 {
-    auto pipe = New<TNamedPipe>(path, /* owning */ true);
+    auto pipe = New<TNamedPipe>(path, capacity, /*owning*/ true);
     pipe->Open(permissions);
     YT_LOG_DEBUG("Named pipe created (Path: %v, Permissions: %v)", path, permissions);
     return pipe;
@@ -46,7 +47,7 @@ TNamedPipePtr TNamedPipe::Create(const TString& path, int permissions)
 
 TNamedPipePtr TNamedPipe::FromPath(const TString& path)
 {
-    return New<TNamedPipe>(path, /* owning */ false);
+    return New<TNamedPipe>(path, /*capacity*/ std::nullopt, /*owning*/ false);
 }
 
 void TNamedPipe::Open(int permissions)
@@ -63,10 +64,10 @@ IConnectionReaderPtr TNamedPipe::CreateAsyncReader()
     return CreateInputConnectionFromPath(Path_, TIODispatcher::Get()->GetPoller(), MakeStrong(this));
 }
 
-IConnectionWriterPtr TNamedPipe::CreateAsyncWriter()
+IConnectionWriterPtr TNamedPipe::CreateAsyncWriter(bool useDeliveryFence)
 {
     YT_VERIFY(!Path_.empty());
-    return CreateOutputConnectionFromPath(Path_, TIODispatcher::Get()->GetPoller(), MakeStrong(this));
+    return CreateOutputConnectionFromPath(Path_, TIODispatcher::Get()->GetPoller(), MakeStrong(this), Capacity_, useDeliveryFence);
 }
 
 TString TNamedPipe::GetPath() const
@@ -207,11 +208,20 @@ void TPipe::CloseWriteFD()
 
 ////////////////////////////////////////////////////////////////////////////////
 
-TString ToString(const TPipe& pipe)
+void FormatValue(TStringBuilderBase* builder, const TPipe& pipe, TStringBuf spec)
 {
-    return Format("{ReadFD: %v, WriteFD: %v}",
-        pipe.GetReadFD(),
-        pipe.GetWriteFD());
+    // TODO(arkady-e1ppa): We format pipe twice
+    // (pipe itself and its serialization)
+    // This is probably redundant.
+    // Check if it is later and remove
+    // the second step.
+    FormatValue(
+        builder,
+        Format(
+            "{ReadFD: %v, WriteFD: %v}",
+            pipe.GetReadFD(),
+            pipe.GetWriteFD()),
+        spec);
 }
 
 ////////////////////////////////////////////////////////////////////////////////

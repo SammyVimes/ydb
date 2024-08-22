@@ -1,15 +1,12 @@
 PROGRAM(ydbd)
 
-IF (OS_LINUX)
-    ALLOCATOR(TCMALLOC_256K)
-ELSE()
-    IF (PROFILE_MEMORY_ALLOCATIONS)
-        ALLOCATOR(LF_DBG)
-    ELSE()
-        ALLOCATOR(LF_YT)
-    ENDIF()
+IF (NOT SANITIZER_TYPE)  # for some reasons some tests with asan are failed, see comment in CPPCOM-32
+    NO_EXPORT_DYNAMIC_SYMBOLS()
 ENDIF()
 
+IF (OS_LINUX)
+    ALLOCATOR(TCMALLOC_256K)
+ENDIF()
 
 IF (OS_DARWIN)
     STRIP()
@@ -35,6 +32,7 @@ IF (ARCH_X86_64)
 ENDIF()
 
 PEERDIR(
+    ydb/apps/version
     ydb/core/driver_lib/run
     ydb/core/protos
     ydb/core/security
@@ -54,6 +52,7 @@ PEERDIR(
     ydb/library/yql/udfs/common/histogram
     ydb/library/yql/udfs/common/hyperloglog
     ydb/library/yql/udfs/common/ip_base
+    ydb/library/yql/udfs/common/knn
     ydb/library/yql/udfs/common/json
     ydb/library/yql/udfs/common/json2
     ydb/library/yql/udfs/common/math
@@ -77,9 +76,7 @@ PEERDIR(
 CHECK_DEPENDENT_DIRS(
     ALLOW_ONLY
     PEERDIRS
-    arc/api/public
-    build/internal/platform
-    build/platform
+    build
     certs
     contrib
     library
@@ -90,6 +87,7 @@ CHECK_DEPENDENT_DIRS(
     tools/rorescompiler
     util
     ydb
+    yt
 )
 
 YQL_LAST_ABI_VERSION()

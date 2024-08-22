@@ -2,9 +2,9 @@
 
 #include "common.h"
 
-#include <yt/yt/core/misc/error.h>
+#include <yt/yt/core/misc/stripped_error.h>
 
-#include <yt/yt/core/ytree/yson_serializable.h>
+#include <util/system/file.h>
 
 #include <errno.h>
 
@@ -110,6 +110,7 @@ ui64 GetProcessCumulativeMajorPageFaults(int pid = -1);
 size_t GetCurrentProcessId();
 size_t GetCurrentThreadId();
 std::vector<size_t> GetCurrentProcessThreadIds();
+bool IsUserspaceThread(size_t tid);
 
 void ChownChmodDirectory(
     const TString& path,
@@ -156,6 +157,9 @@ void SafeSetTtyWindowSize(TFileDescriptor slaveFD, int height, int width);
 
 bool TryMakeNonblocking(TFileDescriptor fd);
 void SafeMakeNonblocking(TFileDescriptor fd);
+
+bool TrySetPipeCapacity(TFileDescriptor fd, int capacity);
+void SafeSetPipeCapacity(TFileDescriptor fd, int capacity);
 
 bool TrySetUid(int uid);
 void SafeSetUid(int uid);
@@ -339,8 +343,37 @@ struct TDiskStat
 
 TDiskStat ParseDiskStat(const TString& statLine);
 
+// See https://docs.kernel.org/block/stat.html for more info.
+struct TBlockDeviceStat
+{
+    i64 ReadsCompleted = 0;
+    i64 ReadsMerged = 0;
+    i64 SectorsRead = 0;
+    TDuration TimeSpentReading;
+
+    i64 WritesCompleted = 0;
+    i64 WritesMerged = 0;
+    i64 SectorsWritten = 0;
+    TDuration TimeSpentWriting;
+
+    i64 IOCurrentlyInProgress = 0;
+    TDuration TimeSpentDoingIO;
+    TDuration WeightedTimeSpentDoingIO;
+
+    i64 DiscardsCompleted = 0;
+    i64 DiscardsMerged = 0;
+    i64 SectorsDiscarded = 0;
+    TDuration TimeSpentDiscarding;
+
+    i64 FlushesCompleted = 0;
+    TDuration TimeSpentFlushing;
+};
+
+TBlockDeviceStat ParseBlockDeviceStat(const TString& statLine);
+
 //! DeviceName to stat info
 THashMap<TString, TDiskStat> GetDiskStats();
+std::optional<TBlockDeviceStat> GetBlockDeviceStat(const TString& deviceName);
 std::vector<TString> ListDisks();
 
 ////////////////////////////////////////////////////////////////////////////////

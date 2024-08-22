@@ -193,26 +193,8 @@ void TStrategyBase::AddGetRequest(TLogContext &logCtx, TGroupDiskRequests &group
     disk.DiskParts[partIdx].Requested.Add(intervalSet);
 }
 
-bool TStrategyBase::VerifyTheWholeSituation(TBlobState &state) {
-    switch (state.WholeSituation) {
-        case TBlobState::ESituation::Unknown:
-            Y_ABORT("Blob Id# %s whole situation Unknown", state.Id.ToString().c_str());
-        case TBlobState::ESituation::Lost:
-            Y_ABORT("Blob Id# %s whole situation Lost", state.Id.ToString().c_str());
-        case TBlobState::ESituation::Error:
-            Y_ABORT("Blob Id# %s whole situation Error", state.Id.ToString().c_str());
-        case TBlobState::ESituation::Sent:
-            Y_ABORT("Blob Id# %s whole situation Sent", state.Id.ToString().c_str());
-        case TBlobState::ESituation::Absent:
-            return true;
-        case TBlobState::ESituation::Present:
-            return false;
-    }
-    Y_ABORT("Blob Id# %s unexpected WholeSituation# %" PRIu32, state.Id.ToString().c_str(), (ui32)state.WholeSituation);
-}
-
 void TStrategyBase::PreparePartLayout(const TBlobState &state, const TBlobStorageGroupInfo &info,
-        TBlobStorageGroupType::TPartLayout *layout, ui32 slowDiskIdx) {
+        TBlobStorageGroupType::TPartLayout *layout, const TStackVec<ui32, 2>& slowDiskIdxs) {
     Y_ABORT_UNLESS(layout);
     const ui32 totalPartCount = info.Type.TotalPartCount();
     const ui32 blobSubringSize = info.Type.BlobSubgroupSize();
@@ -234,26 +216,29 @@ void TStrategyBase::PreparePartLayout(const TBlobState &state, const TBlobStorag
         if (!isErrorDisk) {
             for (ui32 partIdx = beginPartIdx; partIdx < endPartIdx; ++partIdx) {
                 TBlobState::ESituation partSituation = disk.DiskParts[partIdx].Situation;
+                bool isOnSlowDisk = (std::find(slowDiskIdxs.begin(), slowDiskIdxs.end(), diskIdx) != slowDiskIdxs.end());
                 if (partSituation == TBlobState::ESituation::Present ||
-                        (diskIdx != slowDiskIdx && partSituation == TBlobState::ESituation::Sent)) {
+                        (!isOnSlowDisk && partSituation == TBlobState::ESituation::Sent)) {
                     layout->VDiskPartMask[diskIdx] |= (1ul << partIdx);
                 }
                 layout->VDiskMask |= (1ul << diskIdx);
             }
         }
     }
-    if (slowDiskIdx == InvalidVDiskIdx) {
+    if (slowDiskIdxs.empty()) {
         layout->SlowVDiskMask = 0;
     } else {
-        Y_DEBUG_ABORT_UNLESS(slowDiskIdx < sizeof(layout->SlowVDiskMask) * 8);
-        layout->SlowVDiskMask = (1ull << slowDiskIdx);
+        layout->SlowVDiskMask = 0;
+        for (ui32 slowDiskIdx : slowDiskIdxs) {
+            Y_DEBUG_ABORT_UNLESS(slowDiskIdx < sizeof(layout->SlowVDiskMask) * 8);
+            layout->SlowVDiskMask |= (1ull << slowDiskIdx);
+        }
     }
 }
 
 bool TStrategyBase::IsPutNeeded(const TBlobState &state, const TBlobStorageGroupType::TPartPlacement &partPlacement) {
     bool isNeeded = false;
-    for (ui32 i = 0; i < partPlacement.Records.size(); ++i) {
-        const TBlobStorageGroupType::TPartPlacement::TVDiskPart& record = partPlacement.Records[i];
+    for (const TBlobStorageGroupType::TPartPlacement::TVDiskPart& record : partPlacement.Records) {
         const TBlobState::TDisk &disk = state.Disks[record.VDiskIdx];
         TBlobState::ESituation partSituation = disk.DiskParts[record.PartIdx].Situation;
         switch (partSituation) {
@@ -337,8 +322,7 @@ void TStrategyBase::PreparePutsForPartPlacement(TLogContext &logCtx, TBlobState 
                     << " blob Id# " << partId.ToString());
             Y_ABORT_UNLESS(state.Parts[record.PartIdx].Data.IsMonolith());
             groupDiskRequests.AddPut(disk.OrderNumber, partId, state.Parts[record.PartIdx].Data.GetMonolith(),
-                    TDiskPutRequest::ReasonInitial, info.Type.IsHandoffInSubgroup(record.VDiskIdx),
-                    state.ExtraBlockChecks, state.Span, state.BlobIdx);
+                TDiskPutRequest::ReasonInitial, info.Type.IsHandoffInSubgroup(record.VDiskIdx), state.BlobIdx);
             disk.DiskParts[record.PartIdx].Situation = TBlobState::ESituation::Sent;
         }
     }
@@ -404,45 +388,49 @@ void TStrategyBase::Prepare3dcPartPlacement(const TBlobState &state,
     }
 }
 
-i32 TStrategyBase::MarkSlowSubgroupDisk(TBlobState &state, const TBlobStorageGroupInfo &info, TBlackboard &blackboard,
-        bool isPut) {
+ui32 TStrategyBase::MakeSlowSubgroupDiskMask(TBlobState &state, const TBlobStorageGroupInfo &info, TBlackboard &blackboard,
+        bool isPut, const TAccelerationParams& accelerationParams) {
+    if (info.GetTotalVDisksNum() == 1) {
+        // when there is only one disk, we consider it not slow
+        return 0;
+    }
     // Find the slowest disk
     switch (blackboard.AccelerationMode) {
         case TBlackboard::AccelerationModeSkipOneSlowest: {
-            i32 worstSubgroupIdx = -1;
-            ui64 worstPredictedNs = 0;
-            ui64 nextToWorstPredictedNs = 0;
+            TDiskDelayPredictions worstDisks;
             state.GetWorstPredictedDelaysNs(info, *blackboard.GroupQueues,
                     (isPut ? HandleClassToQueueId(blackboard.PutHandleClass) :
                             HandleClassToQueueId(blackboard.GetHandleClass)),
-                    &worstPredictedNs, &nextToWorstPredictedNs, &worstSubgroupIdx);
+                    &worstDisks, accelerationParams.PredictedDelayMultiplier);
 
             // Check if the slowest disk exceptionally slow, or just not very fast
-            i32 slowDiskSubgroupIdx = -1;
-            if (nextToWorstPredictedNs > 0 && worstPredictedNs > nextToWorstPredictedNs * 2) {
-                slowDiskSubgroupIdx = worstSubgroupIdx;
+            ui32 slowDiskSubgroupMask = 0;
+            if (worstDisks[1].PredictedNs > 0 && worstDisks[0].PredictedNs > worstDisks[1].PredictedNs *
+                    accelerationParams.SlowDiskThreshold) {
+                slowDiskSubgroupMask = 1 << worstDisks[0].DiskIdx;
             }
 
             // Mark single slow disk
             for (size_t diskIdx = 0; diskIdx < state.Disks.size(); ++diskIdx) {
                 state.Disks[diskIdx].IsSlow = false;
             }
-            if (slowDiskSubgroupIdx >= 0) {
-                state.Disks[slowDiskSubgroupIdx].IsSlow = true;
+            if (slowDiskSubgroupMask > 0) {
+                state.Disks[worstDisks[0].DiskIdx].IsSlow = true;
             }
 
-            return slowDiskSubgroupIdx;
+            return slowDiskSubgroupMask;
         }
         case TBlackboard::AccelerationModeSkipMarked: {
+            ui32 slowDiskSubgroupMask = 0;
             for (size_t diskIdx = 0; diskIdx < state.Disks.size(); ++diskIdx) {
                 if (state.Disks[diskIdx].IsSlow) {
-                    return diskIdx;
+                    slowDiskSubgroupMask |= 1 << diskIdx;
                 }
             }
-            return -1;
+            return slowDiskSubgroupMask;
         }
     }
-    return -1;
+    return 0;
 }
 
 }//NKikimr

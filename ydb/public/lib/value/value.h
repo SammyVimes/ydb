@@ -89,6 +89,12 @@ public:
     NScheme::TTypeId GetDataType() const;
     // gets text representation of simple 'Data' types
     TString GetDataText() const;
+
+    // gets text representation of simple 'Pg' types
+    TString GetPgText() const;
+    // gets text representation of simple 'Data' and 'Pg' types
+    TString GetSimpleValueText() const;
+
     // returns text representation of value's type
     template <typename Format> TString GetTypeText(const Format& format = Format()) const;
     // returns text representation of value itself
@@ -149,6 +155,10 @@ public:
     TWriteValue& Datetime(ui32 value);
     TWriteValue& Timestamp(ui64 value);
     TWriteValue& Interval(i64 value);
+    TWriteValue& Date32(i32 value);
+    TWriteValue& Datetime64(i64 value);
+    TWriteValue& Timestamp64(i64 value);
+    TWriteValue& Interval64(i64 value);
     TWriteValue& operator =(bool value);
     TWriteValue& operator =(ui8 value);
     TWriteValue& operator =(i8 value);

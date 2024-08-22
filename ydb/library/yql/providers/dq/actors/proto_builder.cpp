@@ -1,6 +1,7 @@
 #include "proto_builder.h"
 
 #include <ydb/library/yql/providers/common/codec/yql_codec.h>
+#include <ydb/library/yql/core/yql_type_annotation.h>
 #include <ydb/library/yql/dq/proto/dq_transport.pb.h>
 #include <ydb/library/yql/dq/runtime/dq_transport.h>
 #include <ydb/library/yql/minikql/mkql_node_cast.h>
@@ -23,6 +24,7 @@ TVector<ui32> BuildColumnOrder(const TVector<TString>& columns, NKikimr::NMiniKQ
     if (resultType->GetKind() != TType::EKind::Struct || columns.empty()) {
         return {};
     }
+    TColumnOrder order(columns);
 
     TVector<ui32> columnOrder;
     THashMap<TString, ui32> column2id;
@@ -34,8 +36,8 @@ TVector<ui32> BuildColumnOrder(const TVector<TString>& columns, NKikimr::NMiniKQ
     columnOrder.resize(columns.size());
 
     int id = 0;
-    for (const auto& columnName : columns) {
-        columnOrder[id++] = column2id[columnName];
+    for (const auto& [columnName, generated] : order) {
+        columnOrder[id++] = column2id[generated];
     }
     return columnOrder;
 }
@@ -59,22 +61,40 @@ bool TProtoBuilder::CanBuildResultSet() const {
     return ResultType->GetKind() == TType::EKind::Struct;
 }
 
-TString TProtoBuilder::BuildYson(TVector<NYql::NDq::TDqSerializedBatch>&& rows, ui64 maxBytesLimit) {
+TString TProtoBuilder::BuildYson(TVector<NYql::NDq::TDqSerializedBatch>&& rows, ui64 maxBytesLimit, ui64 maxRowsLimit, bool* truncated) {
+    if (truncated) {
+        *truncated = false;
+    }
+    
+    TThrowingBindTerminator t;
     ui64 size = 0;
+    ui64 count = 0;
     TStringStream out;
     NYson::TYsonWriter writer((IOutputStream*)&out);
     writer.OnBeginList();
 
     auto full = WriteData(std::move(rows), [&](const NYql::NUdf::TUnboxedValuePod& value) {
-        auto rowYson = NCommon::WriteYsonValue(value, ResultType, ColumnOrder.empty() ? nullptr : &ColumnOrder);
-        writer.OnListItem();
-        writer.OnRaw(rowYson);
-        size += rowYson.size();
-        return size <= maxBytesLimit;
+        bool ret = (size <= maxBytesLimit && count <= maxRowsLimit);
+        if (ret) {
+            auto rowYson = NCommon::WriteYsonValue(value, ResultType, ColumnOrder.empty() ? nullptr : &ColumnOrder);
+            size += rowYson.size();
+            ++count;
+            ret = (size <= maxBytesLimit && count <= maxRowsLimit);
+            if (ret) {
+                writer.OnListItem();
+                writer.OnRaw(rowYson);
+            }
+        }
+
+        return ret;
     });
 
     if (!full) {
-        ythrow yexception() << "Too big yson result size: " << size << " > " << maxBytesLimit;
+        if (!truncated) {
+            ythrow yexception() << "Too big yson result size: " << size << " > " << maxBytesLimit;
+        } else {
+            *truncated = true;
+        }
     }
 
     writer.OnEndList();
@@ -82,6 +102,7 @@ TString TProtoBuilder::BuildYson(TVector<NYql::NDq::TDqSerializedBatch>&& rows, 
 }
 
 bool TProtoBuilder::WriteYsonData(NYql::NDq::TDqSerializedBatch&& data, const std::function<bool(const TString& rawYson)>& func) {
+    TThrowingBindTerminator t;
     return WriteData(std::move(data), [&](const NYql::NUdf::TUnboxedValuePod& value) {
         auto rowYson = NCommon::WriteYsonValue(value, ResultType, ColumnOrder.empty() ? nullptr : &ColumnOrder);
         return func(rowYson);
@@ -89,6 +110,7 @@ bool TProtoBuilder::WriteYsonData(NYql::NDq::TDqSerializedBatch&& data, const st
 }
 
 bool TProtoBuilder::WriteData(NYql::NDq::TDqSerializedBatch&& data, const std::function<bool(const NYql::NUdf::TUnboxedValuePod& value)>& func) {
+    TThrowingBindTerminator t;
     TGuard<TScopedAlloc> allocGuard(Alloc);
 
     TMemoryUsageInfo memInfo("ProtoBuilder");
@@ -106,6 +128,7 @@ bool TProtoBuilder::WriteData(NYql::NDq::TDqSerializedBatch&& data, const std::f
 }
 
 bool TProtoBuilder::WriteData(TVector<NYql::NDq::TDqSerializedBatch>&& rows, const std::function<bool(const NYql::NUdf::TUnboxedValuePod& value)>& func) {
+    TThrowingBindTerminator t;
     TGuard<TScopedAlloc> allocGuard(Alloc);
 
     TMemoryUsageInfo memInfo("ProtoBuilder");

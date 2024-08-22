@@ -7,6 +7,7 @@ namespace NKikimr::NOlap {
 
 bool TInsertTable::Insert(IDbWrapper& dbTable, TInsertedData&& data) {
     if (auto* dataPtr = Summary.AddInserted(std::move(data))) {
+        AddBlobLink(dataPtr->GetBlobRange().BlobId);
         dbTable.Insert(*dataPtr);
         return true;
     } else {
@@ -21,7 +22,10 @@ TInsertionSummary::TCounters TInsertTable::Commit(IDbWrapper& dbTable, ui64 plan
     TInsertionSummary::TCounters counters;
     for (auto writeId : writeIds) {
         std::optional<TInsertedData> data = Summary.ExtractInserted(writeId);
-        Y_ABORT_UNLESS(data, "Commit %" PRIu64 ":%" PRIu64 " : writeId %" PRIu64 " not found", planStep, txId, (ui64)writeId);
+        if (!data) {
+            AFL_WARN(NKikimrServices::TX_COLUMNSHARD)("ps", planStep)("tx", txId)("write_id", (ui64)writeId)("event", "hasn't data for commit");
+            continue;
+        }
 
         counters.Rows += data->GetMeta().GetNumRows();
         counters.RawBytes += data->GetMeta().GetRawBytes();
@@ -60,15 +64,7 @@ void TInsertTable::Abort(IDbWrapper& dbTable, const THashSet<TWriteId>& writeIds
 }
 
 THashSet<TWriteId> TInsertTable::OldWritesToAbort(const TInstant& now) const {
-    // TODO: This protection does not save us from real flooder activity.
-    // This cleanup is for seldom aborts caused by rare reasons. So there's a temporary simple O(N) here
-    // keeping in mind we need a smarter cleanup logic here not a better algo.
-    if (LastCleanup > now - CleanDelay) {
-        return {};
-    }
-    LastCleanup = now;
-
-    return Summary.GetDeprecatedInsertions(now - WaitCommitDelay);
+    return Summary.GetExpiredInsertions(now - WaitCommitDelay, CleanupPackageSize);
 }
 
 THashSet<TWriteId> TInsertTable::DropPath(IDbWrapper& dbTable, ui64 pathId) {
@@ -86,15 +82,29 @@ THashSet<TWriteId> TInsertTable::DropPath(IDbWrapper& dbTable, ui64 pathId) {
     return Summary.GetInsertedByPathId(pathId);
 }
 
-void TInsertTable::EraseCommitted(IDbWrapper& dbTable, const TInsertedData& data) {
-    if (Summary.EraseCommitted(data)) {
+void TInsertTable::EraseCommittedOnExecute(IDbWrapper& dbTable, const TInsertedData& data, const std::shared_ptr<IBlobsDeclareRemovingAction>& blobsAction) {
+    if (Summary.HasCommitted(data)) {
         dbTable.EraseCommitted(data);
+        RemoveBlobLinkOnExecute(data.GetBlobRange().BlobId, blobsAction);
     }
 }
 
-void TInsertTable::EraseAborted(IDbWrapper& dbTable, const TInsertedData& data) {
-    if (Summary.EraseAborted((TWriteId)data.WriteTxId)) {
+void TInsertTable::EraseCommittedOnComplete(const TInsertedData& data) {
+    if (Summary.EraseCommitted(data)) {
+        RemoveBlobLinkOnComplete(data.GetBlobRange().BlobId);
+    }
+}
+
+void TInsertTable::EraseAbortedOnExecute(IDbWrapper& dbTable, const TInsertedData& data, const std::shared_ptr<IBlobsDeclareRemovingAction>& blobsAction) {
+    if (Summary.HasAborted((TWriteId)data.WriteTxId)) {
         dbTable.EraseAborted(data);
+        RemoveBlobLinkOnExecute(data.GetBlobRange().BlobId, blobsAction);
+    }
+}
+
+void TInsertTable::EraseAbortedOnComplete(const TInsertedData& data) {
+    if (Summary.EraseAborted((TWriteId)data.WriteTxId)) {
+        RemoveBlobLinkOnComplete(data.GetBlobRange().BlobId);
     }
 }
 
@@ -126,10 +136,38 @@ std::vector<TCommittedBlob> TInsertTable::Read(ui64 pathId, const TSnapshot& sna
     std::vector<TCommittedBlob> result;
     result.reserve(ret.size());
     for (auto&& i : ret) {
-        result.emplace_back(TCommittedBlob(i->GetBlobRange(), i->GetSnapshot(), i->GetSchemaVersion(), i->GetMeta().GetFirstPK(pkSchema), i->GetMeta().GetLastPK(pkSchema)));
+        result.emplace_back(TCommittedBlob(
+            i->GetBlobRange(), i->GetSnapshot(), i->GetSchemaVersion(), i->GetMeta().GetNumRows(), i->GetMeta().GetFirstPK(pkSchema), i->GetMeta().GetLastPK(pkSchema)
+        , i->GetMeta().GetModificationType() == NEvWrite::EModificationType::Delete, i->GetMeta().GetSchemaSubset()));
     }
 
     return result;
+}
+
+bool TInsertTableAccessor::RemoveBlobLinkOnExecute(const TUnifiedBlobId& blobId, const std::shared_ptr<IBlobsDeclareRemovingAction>& blobsAction) {
+    AFL_VERIFY(blobsAction);
+    auto itBlob = BlobLinks.find(blobId);
+    AFL_VERIFY(itBlob != BlobLinks.end());
+    AFL_VERIFY(itBlob->second >= 1);
+    if (itBlob->second == 1) {
+        blobsAction->DeclareSelfRemove(itBlob->first);
+        return true;
+    } else {
+        return false;
+    }
+}
+
+bool TInsertTableAccessor::RemoveBlobLinkOnComplete(const TUnifiedBlobId& blobId) {
+    auto itBlob = BlobLinks.find(blobId);
+    AFL_VERIFY(itBlob != BlobLinks.end());
+    AFL_VERIFY(itBlob->second >= 1);
+    if (itBlob->second == 1) {
+        BlobLinks.erase(itBlob);
+        return true;
+    } else {
+        --itBlob->second;
+        return false;
+    }
 }
 
 }

@@ -60,6 +60,30 @@ void TSrcIdMetaInitializer::DoPrepare(NInitializer::IInitializerInput::TPtr cont
         }
 
         result.emplace_back(new NInitializer::TGenericTableModifier<NRequest::TDialogCreateTable>(request, "create"));
+
+        {
+            Ydb::Table::AlterTableRequest request;
+            request.set_session_id("");
+            request.set_path(tablePath);
+
+            {
+                auto& column = *request.add_add_columns();
+                column.set_name("SeqNo");
+                column.mutable_type()->mutable_optional_type()->mutable_item()->set_type_id(Ydb::Type::UINT64);
+            }
+
+            result.emplace_back(new NInitializer::TGenericTableModifier<NRequest::TDialogAlterTable>(request, "add_column_SeqNo"));
+        }
+
+        {
+            Ydb::Table::AlterTableRequest request;
+            request.set_session_id("");
+            request.set_path(tablePath);
+            request.mutable_alter_partitioning_settings()->set_min_partitions_count(50);
+            request.mutable_alter_partitioning_settings()->set_partitioning_by_load(::Ydb::FeatureFlag_Status::FeatureFlag_Status_ENABLED);
+
+            result.emplace_back(new NInitializer::TGenericTableModifier<NRequest::TDialogAlterTable>(request, "enable_autopartitioning_by_load"));
+        }
     }
     result.emplace_back(NInitializer::TACLModifierConstructor::GetReadOnlyModifier(tablePath, "acl"));
     controller->OnPreparationFinished(result);

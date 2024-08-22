@@ -6,7 +6,7 @@
 #include <ydb/library/yql/minikql/computation/mkql_custom_list.h>
 #include <ydb/library/yql/minikql/mkql_string_util.h>
 #include <ydb/library/yql/parser/pg_wrapper/interface/codec.h>
-#include <ydb/core/tx/datashard/sys_tables.h>
+#include <ydb/core/tx/locks/sys_tables.h>
 
 #include <library/cpp/containers/stack_vector/stack_vec.h>
 
@@ -36,6 +36,20 @@ void ConvertTableKeys(const TScheme& scheme, const TScheme::TTableInfo* tableInf
         *keyDataBytes = bytes;
 }
 
+void ConvertTableValues(const TScheme& scheme, const TScheme::TTableInfo* tableInfo, const TArrayRef<const IEngineFlatHost::TUpdateCommand>& commands, TSmallVec<NTable::TUpdateOp>& ops, ui64* valueBytes) {
+    ui64 bytes = 0;
+    ops.reserve(commands.size());
+    for (size_t i = 0; i < commands.size(); i++) {
+        const IEngineFlatHost::TUpdateCommand& upd = commands[i];
+        Y_ABORT_UNLESS(upd.Operation == TKeyDesc::EColumnOperation::Set);
+        auto vtypeinfo = scheme.GetColumnInfo(tableInfo, upd.Column)->PType;
+        ops.emplace_back(upd.Column, NTable::ECellOp::Set, upd.Value.IsNull() ? TRawTypeValue() : TRawTypeValue(upd.Value.Data(), upd.Value.Size(), vtypeinfo));
+        bytes += upd.Value.IsNull() ? 1 : upd.Value.Size();
+    }
+    if (valueBytes)
+        *valueBytes = bytes;
+}
+
 TEngineHost::TEngineHost(NTable::TDatabase& db, TEngineHostCounters& counters, const TEngineHostSettings& settings)
     : Db(db)
     , Scheme(db.GetScheme())
@@ -54,74 +68,12 @@ const TScheme::TTableInfo* TEngineHost::GetTableInfo(const TTableId& tableId) co
 bool TEngineHost::IsReadonly() const {
     return Settings.IsReadonly;
 }
-
-
-bool TEngineHost::IsValidKey(TKeyDesc& key, std::pair<ui64, ui64>& maxSnapshotTime) const {
-    Y_UNUSED(maxSnapshotTime);
-
-    auto* tableInfo = Scheme.GetTableInfo(LocalTableId(key.TableId));
-
-#define EH_VALIDATE(cond, err_status) \
-    do { \
-        if (!(cond)) { \
-            key.Status = TKeyDesc::EStatus::err_status; \
-            return false; \
-        } \
-    } while(false) \
-    /**/
-
-    EH_VALIDATE(tableInfo, NotExists); // Table does not exist
-    EH_VALIDATE(key.KeyColumnTypes.size() <= tableInfo->KeyColumns.size(), TypeCheckFailed);
-
-    // Specified keys types should be valid for any operation
-    for (size_t keyIdx = 0; keyIdx < key.KeyColumnTypes.size(); keyIdx++) {
-        ui32 keyCol = tableInfo->KeyColumns[keyIdx];
-        auto vtype = Scheme.GetColumnInfo(tableInfo, keyCol)->PType;
-        EH_VALIDATE(key.KeyColumnTypes[keyIdx] == vtype, TypeCheckFailed);
-    }
-
-    if (key.RowOperation == TKeyDesc::ERowOperation::Read) {
-        if (key.Range.Point) {
-            EH_VALIDATE(key.KeyColumnTypes.size() == tableInfo->KeyColumns.size(), TypeCheckFailed);
-        } else {
-            EH_VALIDATE(key.KeyColumnTypes.size() <= tableInfo->KeyColumns.size(), TypeCheckFailed);
-        }
-
-        for (size_t i = 0; i < key.Columns.size(); i++) {
-            const TKeyDesc::TColumnOp& cop = key.Columns[i];
-            if (IsSystemColumn(cop.Column)) {
-                continue;
-            }
-            auto* cinfo = Scheme.GetColumnInfo(tableInfo, cop.Column);
-            EH_VALIDATE(cinfo, TypeCheckFailed); // Unknown column
-            auto vtype = cinfo->PType;
-            EH_VALIDATE(cop.ExpectedType == vtype, TypeCheckFailed);
-            EH_VALIDATE(cop.Operation == TKeyDesc::EColumnOperation::Read, OperationNotSupported);
-        }
-    } else if (key.RowOperation == TKeyDesc::ERowOperation::Update) {
-        EH_VALIDATE(key.KeyColumnTypes.size() == tableInfo->KeyColumns.size(), TypeCheckFailed); // Key must be full for updates
-        for (size_t i = 0; i < key.Columns.size(); i++) {
-            const TKeyDesc::TColumnOp& cop = key.Columns[i];
-            auto* cinfo = Scheme.GetColumnInfo(tableInfo, cop.Column);
-            EH_VALIDATE(cinfo, TypeCheckFailed); // Unknown column
-            auto vtype = cinfo->PType;
-            EH_VALIDATE(cop.ExpectedType.GetTypeId() == 0 || cop.ExpectedType == vtype, TypeCheckFailed);
-            EH_VALIDATE(cop.Operation == TKeyDesc::EColumnOperation::Set, OperationNotSupported); // TODO[serxa]: support inplace operations in IsValidKey
-        }
-    } else if (key.RowOperation == TKeyDesc::ERowOperation::Erase) {
-        EH_VALIDATE(key.KeyColumnTypes.size() == tableInfo->KeyColumns.size(), TypeCheckFailed);
-    } else {
-        EH_VALIDATE(false, OperationNotSupported);
-    }
-
-#undef EH_VALIDATE
-
-    key.Status = TKeyDesc::EStatus::Ok;
-    return true;
+bool TEngineHost::IsValidKey(TKeyDesc& key) const {
+    ui64 localTableId = LocalTableId(key.TableId);
+    return NMiniKQL::IsValidKey(Scheme, localTableId, key);
 }
-
 ui64 TEngineHost::CalculateReadSize(const TVector<const TKeyDesc*>& keys) const {
-    NTable::TSizeEnv env;
+    auto env = Db.CreateSizeEnv();
 
     for (const TKeyDesc* ki : keys) {
         DoCalculateReadSize(*ki, env);
@@ -168,7 +120,7 @@ ui64 TEngineHost::CalculateResultSize(const TKeyDesc& key) const {
     if (key.Range.Point) {
         return Db.EstimateRowSize(localTid);
     } else {
-        NTable::TSizeEnv env;
+        auto env = Db.CreateSizeEnv();
         DoCalculateReadSize(key, env);
         ui64 size = env.GetSize();
 
@@ -339,10 +291,10 @@ NUdf::TUnboxedValue TEngineHost::SelectRow(const TTableId& tableId, const TArray
     return std::move(rowResult);
 }
 
-template<class TTableIt>
-class TSelectRangeLazyRow : public TComputationValue<TSelectRangeLazyRow<TTableIt>> {
+template<class TTableIter>
+class TSelectRangeLazyRow : public TComputationValue<TSelectRangeLazyRow<TTableIter>> {
 private:
-    using TBase = TComputationValue<TSelectRangeLazyRow<TTableIt>>;
+    using TBase = TComputationValue<TSelectRangeLazyRow<TTableIter>>;
     NUdf::TUnboxedValue GetElement(ui32 index) const override {
         BuildValue(index);
         return GetPtr()[index];
@@ -383,7 +335,7 @@ public:
         }
     }
 
-    void OwnDb(THolder<TTableIt>&& iter) {
+    void OwnDb(THolder<TTableIter>&& iter) {
         Iter = std::move(iter);
     }
 
@@ -396,7 +348,7 @@ public:
 private:
     TSelectRangeLazyRow(const TDbTupleRef& dbData, const THolderFactory& holderFactory, ui32 maskSize,
         const TSmallVec<NTable::TTag>& systemColumnTags, ui64 shardId)
-        : TComputationValue<TSelectRangeLazyRow<TTableIt>>(&holderFactory.GetMemInfo())
+        : TComputationValue<TSelectRangeLazyRow<TTableIter>>(&holderFactory.GetMemInfo())
         , Iter()
         , DbData(dbData)
         , MaskSize(maskSize)
@@ -461,7 +413,7 @@ private:
     }
 
 private:
-    THolder<TTableIt> Iter;
+    THolder<TTableIter> Iter;
     TDbTupleRef DbData;
     ui32 MaskSize;
     TSmallVec<NTable::TTag> SystemColumnTags;
@@ -473,14 +425,14 @@ public:
     template<class>
     friend class TIterator;
 
-    template<class TTableIt>
-    class TIterator : public TComputationValue<TIterator<TTableIt>> {
+    template<class TTableIter>
+    class TIterator : public TComputationValue<TIterator<TTableIter>> {
         static const ui32 PeriodicCallbackIterations = 1000;
 
-        using TBase = TComputationValue<TIterator<TTableIt>>;
+        using TBase = TComputationValue<TIterator<TTableIter>>;
 
     public:
-        TIterator(TMemoryUsageInfo* memInfo, const TSelectRangeLazyRowsList& list, TAutoPtr<TTableIt>&& iter,
+        TIterator(TMemoryUsageInfo* memInfo, const TSelectRangeLazyRowsList& list, TAutoPtr<TTableIter>&& iter,
             const TSmallVec<NTable::TTag>& systemColumnTags, ui64 shardId)
             : TBase(memInfo)
             , List(list)
@@ -572,7 +524,7 @@ public:
                 if (HasCurrent && CurrentRowValue.UniqueBoxed()) {
                     CurrentRow()->Reuse(rowValues);
                 } else {
-                    CurrentRowValue = TSelectRangeLazyRow<TTableIt>::Create(rowValues, List.HolderFactory, SystemColumnTags, ShardId);
+                    CurrentRowValue = TSelectRangeLazyRow<TTableIter>::Create(rowValues, List.HolderFactory, SystemColumnTags, ShardId);
                 }
 
                 value = CurrentRowValue;
@@ -616,13 +568,13 @@ public:
             }
         }
 
-        TSelectRangeLazyRow<TTableIt>* CurrentRow() const {
-            return static_cast<TSelectRangeLazyRow<TTableIt>*>(CurrentRowValue.AsBoxed().Get());
+        TSelectRangeLazyRow<TTableIter>* CurrentRow() const {
+            return static_cast<TSelectRangeLazyRow<TTableIter>*>(CurrentRowValue.AsBoxed().Get());
         }
 
     private:
         const TSelectRangeLazyRowsList& List;
-        THolder<TTableIt> Iter;
+        THolder<TTableIter> Iter;
         bool HasCurrent;
         ui64 Iterations;
         ui64 Items;
@@ -679,13 +631,13 @@ public:
             auto read = Db.IterateRangeReverse(LocalTid, keyRange, Tags, EngineHost.GetReadVersion(TableId), TxMap, TxObserver);
 
             return NUdf::TUnboxedValuePod(
-                new TIterator<NTable::TTableReverseIt>(GetMemInfo(), *this, std::move(read), SystemColumnTags, ShardId)
+                new TIterator<NTable::TTableReverseIter>(GetMemInfo(), *this, std::move(read), SystemColumnTags, ShardId)
             );
         } else {
             auto read = Db.IterateRange(LocalTid, keyRange, Tags, EngineHost.GetReadVersion(TableId), TxMap, TxObserver);
 
             return NUdf::TUnboxedValuePod(
-                new TIterator<NTable::TTableIt>(GetMemInfo(), *this, std::move(read), SystemColumnTags, ShardId)
+                new TIterator<NTable::TTableIter>(GetMemInfo(), *this, std::move(read), SystemColumnTags, ShardId)
             );
         }
     }
@@ -776,7 +728,7 @@ static NUdf::TUnboxedValue CreateEmptyRange(const THolderFactory& holderFactory)
     NUdf::TUnboxedValue* itemsPtr = nullptr;
     auto res = holderFactory.CreateDirectArrayHolder(4, itemsPtr);
     // Empty list (data container)
-    itemsPtr[0] = NUdf::TUnboxedValue(holderFactory.GetEmptyContainer());
+    itemsPtr[0] = NUdf::TUnboxedValue(holderFactory.GetEmptyContainerLazy());
     // Truncated flag
     itemsPtr[1] = NUdf::TUnboxedValuePod(false);
     // First key
@@ -880,14 +832,7 @@ void TEngineHost::UpdateRow(const TTableId& tableId, const TArrayRef<const TCell
 
     ui64 valueBytes = 0;
     TSmallVec<NTable::TUpdateOp> ops;
-    for (size_t i = 0; i < commands.size(); i++) {
-        const TUpdateCommand& upd = commands[i];
-        Y_ABORT_UNLESS(upd.Operation == TKeyDesc::EColumnOperation::Set); // TODO[serxa]: support inplace update in update row
-        auto vtypeinfo = Scheme.GetColumnInfo(tableInfo, upd.Column)->PType;
-        ops.emplace_back(upd.Column, NTable::ECellOp::Set,
-            upd.Value.IsNull() ? TRawTypeValue() : TRawTypeValue(upd.Value.Data(), upd.Value.Size(), vtypeinfo));
-        valueBytes += upd.Value.IsNull() ? 1 : upd.Value.Size();
-    }
+    ConvertTableValues(Scheme, tableInfo, commands, ops, &valueBytes);
 
     auto* collector = GetChangeCollector(tableId);
 
@@ -977,6 +922,68 @@ void TEngineHost::SetPeriodicCallback(TPeriodicCallback&& callback) {
     PeriodicCallback = std::move(callback);
 }
 
+bool IsValidKey(const TScheme& scheme, ui64 localTableId, TKeyDesc& key) {
+    auto* tableInfo = scheme.GetTableInfo(localTableId);
+    Y_ABORT_UNLESS(tableInfo);
+
+#define EH_VALIDATE(cond, err_status)                   \
+    do {                                                \
+        if (!(cond)) {                                  \
+            key.Status = TKeyDesc::EStatus::err_status; \
+            return false;                               \
+        }                                               \
+    } while (false) /**/
+
+    EH_VALIDATE(tableInfo, NotExists);  // Table does not exist
+    EH_VALIDATE(key.KeyColumnTypes.size() <= tableInfo->KeyColumns.size(), TypeCheckFailed);
+
+    // Specified keys types should be valid for any operation
+    for (size_t keyIdx = 0; keyIdx < key.KeyColumnTypes.size(); keyIdx++) {
+        ui32 keyCol = tableInfo->KeyColumns[keyIdx];
+        auto vtype = scheme.GetColumnInfo(tableInfo, keyCol)->PType;
+        EH_VALIDATE(key.KeyColumnTypes[keyIdx] == vtype, TypeCheckFailed);
+    }
+
+    if (key.RowOperation == TKeyDesc::ERowOperation::Read) {
+        if (key.Range.Point) {
+            EH_VALIDATE(key.KeyColumnTypes.size() == tableInfo->KeyColumns.size(), TypeCheckFailed);
+        } else {
+            EH_VALIDATE(key.KeyColumnTypes.size() <= tableInfo->KeyColumns.size(), TypeCheckFailed);
+        }
+
+        for (size_t i = 0; i < key.Columns.size(); i++) {
+            const TKeyDesc::TColumnOp& cop = key.Columns[i];
+            if (IsSystemColumn(cop.Column)) {
+                continue;
+            }
+            auto* cinfo = scheme.GetColumnInfo(tableInfo, cop.Column);
+            EH_VALIDATE(cinfo, TypeCheckFailed);  // Unknown column
+            auto vtype = cinfo->PType;
+            EH_VALIDATE(cop.ExpectedType == vtype, TypeCheckFailed);
+            EH_VALIDATE(cop.Operation == TKeyDesc::EColumnOperation::Read, OperationNotSupported);
+        }
+    } else if (key.RowOperation == TKeyDesc::ERowOperation::Update) {
+        EH_VALIDATE(key.KeyColumnTypes.size() == tableInfo->KeyColumns.size(), TypeCheckFailed);  // Key must be full for updates
+        for (size_t i = 0; i < key.Columns.size(); i++) {
+            const TKeyDesc::TColumnOp& cop = key.Columns[i];
+            auto* cinfo = scheme.GetColumnInfo(tableInfo, cop.Column);
+            EH_VALIDATE(cinfo, TypeCheckFailed);  // Unknown column
+            auto vtype = cinfo->PType;
+            EH_VALIDATE(cop.ExpectedType.GetTypeId() == 0 || cop.ExpectedType == vtype, TypeCheckFailed);
+            EH_VALIDATE(cop.Operation == TKeyDesc::EColumnOperation::Set, OperationNotSupported);  // TODO[serxa]: support inplace operations in IsValidKey
+        }
+    } else if (key.RowOperation == TKeyDesc::ERowOperation::Erase) {
+        EH_VALIDATE(key.KeyColumnTypes.size() == tableInfo->KeyColumns.size(), TypeCheckFailed);
+    } else {
+        EH_VALIDATE(false, OperationNotSupported);
+    }
+
+#undef EH_VALIDATE
+
+    key.Status = TKeyDesc::EStatus::Ok;
+    return true;
+}
+
 void AnalyzeRowType(TStructLiteral* columnIds, TSmallVec<NTable::TTag>& tags, TSmallVec<NTable::TTag>& systemColumnTags) {
     // Find out tags that should be read in Select*() functions
     tags.reserve(columnIds->GetValuesCount());
@@ -1044,6 +1051,23 @@ NUdf::TUnboxedValue GetCellValue(const TCell& cell, NScheme::TTypeInfo type) {
             return NUdf::TUnboxedValuePod(v);
         }
 
+        case NYql::NProto::TypeIds::Date32: {
+            NUdf::TDataType<NUdf::TDate32>::TLayout v = cell.AsValue<i32>();
+            return NUdf::TUnboxedValuePod(v);
+        }
+        case NYql::NProto::TypeIds::Datetime64: {
+            NUdf::TDataType<NUdf::TDatetime64>::TLayout v = cell.AsValue<i64>();
+            return NUdf::TUnboxedValuePod(v);
+        }
+        case NYql::NProto::TypeIds::Timestamp64: {
+            NUdf::TDataType<NUdf::TTimestamp64>::TLayout v = cell.AsValue<i64>();
+            return NUdf::TUnboxedValuePod(v);
+        }
+        case NYql::NProto::TypeIds::Interval64: {
+            NUdf::TDataType<NUdf::TInterval64>::TLayout v = cell.AsValue<i64>();
+            return NUdf::TUnboxedValuePod(v);
+        }
+
         case NYql::NProto::TypeIds::TzDate:
         case NYql::NProto::TypeIds::TzDatetime:
         case NYql::NProto::TypeIds::TzTimestamp:
@@ -1066,7 +1090,7 @@ NUdf::TUnboxedValue GetCellValue(const TCell& cell, NScheme::TTypeInfo type) {
         return NYql::NCommon::PgValueFromNativeBinary(cell.AsBuf(), NPg::PgTypeIdFromTypeDesc(type.GetTypeDesc()));
     }
 
-    Y_DEBUG_ABORT_UNLESS(false, "Unsupported type: %" PRIu16, type.GetTypeId());
+    Y_DEBUG_ABORT("Unsupported type: %" PRIu16, type.GetTypeId());
     return MakeString(NUdf::TStringRef(cell.Data(), cell.Size()));
 }
 

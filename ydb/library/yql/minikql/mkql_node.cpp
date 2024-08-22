@@ -24,42 +24,182 @@ TTypeEnvironment::TTypeEnvironment(TScopedAlloc& alloc)
     , EmptyStruct(nullptr)
     , EmptyTuple(nullptr)
 {
-    NamesPool.reserve(64);
-    TypeOfType = TTypeType::Create(*this);
-    TypeOfType->Type = TypeOfType;
-    TypeOfVoid = TVoidType::Create(TypeOfType, *this);
-    Void = TVoid::Create(*this);
-    TypeOfNull = TNullType::Create(TypeOfType, *this);
-    Null = TNull::Create(*this);
-    TypeOfEmptyList = TEmptyListType::Create(TypeOfType, *this);
-    EmptyList = TEmptyList::Create(*this);
-    TypeOfEmptyDict = TEmptyDictType::Create(TypeOfType, *this);
-    EmptyDict = TEmptyDict::Create(*this);
-    Ui32 = TDataType::Create(NUdf::TDataType<ui32>::Id, *this);
-    Ui64 = TDataType::Create(NUdf::TDataType<ui64>::Id, *this);
-    AnyType = TAnyType::Create(TypeOfType, *this);
-    EmptyStruct = TStructLiteral::Create(0, nullptr, TStructType::Create(0, nullptr, *this), *this);
-    EmptyTuple = TTupleLiteral::Create(0, nullptr, TTupleType::Create(0, nullptr, *this), *this);
-    ListOfVoid = TListLiteral::Create(nullptr, 0, TListType::Create(Void->GetGenericType(), *this), *this);
 }
 
 TTypeEnvironment::~TTypeEnvironment() {
 }
 
 void TTypeEnvironment::ClearCookies() const {
-    TypeOfType->SetCookie(0);
-    TypeOfVoid->SetCookie(0);
-    Void->SetCookie(0);
-    TypeOfNull->SetCookie(0);
-    Null->SetCookie(0);
-    TypeOfEmptyList->SetCookie(0);
-    EmptyList->SetCookie(0);
-    TypeOfEmptyDict->SetCookie(0);
-    EmptyDict->SetCookie(0);
-    EmptyStruct->SetCookie(0);
-    ListOfVoid->SetCookie(0);
-    AnyType->SetCookie(0);
-    EmptyTuple->SetCookie(0);
+    if (TypeOfType) {
+        TypeOfType->SetCookie(0);
+    }
+    if (TypeOfVoid) {
+        TypeOfVoid->SetCookie(0);
+    }
+    if (Void) {
+        Void->SetCookie(0);
+    }
+    if (TypeOfNull) {
+        TypeOfNull->SetCookie(0);
+    }
+    if (Null) {
+        Null->SetCookie(0);
+    }
+    if (TypeOfEmptyList) {
+        TypeOfEmptyList->SetCookie(0);
+    }
+    if (EmptyList) {
+        EmptyList->SetCookie(0);
+    }
+    if (TypeOfEmptyDict) {
+        TypeOfEmptyDict->SetCookie(0);
+    }
+    if (EmptyDict) {
+        EmptyDict->SetCookie(0);
+    }
+    if (EmptyStruct) {
+        EmptyStruct->SetCookie(0);
+    }
+    if (ListOfVoid) {
+        ListOfVoid->SetCookie(0);
+    }
+    if (AnyType) {
+        AnyType->SetCookie(0);
+    }
+    if (EmptyTuple) {
+        EmptyTuple->SetCookie(0);
+    }
+}
+
+TTypeType* TTypeEnvironment::GetTypeOfTypeLazy() const {
+    if (!TypeOfType) {
+        TypeOfType = TTypeType::Create(*this);
+        TypeOfType->Type = TypeOfType;
+    }
+    return TypeOfType;
+}
+
+TVoidType* TTypeEnvironment::GetTypeOfVoidLazy() const {
+    if (!TypeOfVoid) {
+        TypeOfVoid = TVoidType::Create(GetTypeOfTypeLazy(), *this);
+    }
+    return TypeOfVoid;
+}
+
+TVoid* TTypeEnvironment::GetVoidLazy() const {
+    if (!Void) {
+        Void = TVoid::Create(*this);
+    }
+    return Void;
+}
+
+TNullType* TTypeEnvironment::GetTypeOfNullLazy() const {
+    if (!TypeOfNull) {
+        TypeOfNull = TNullType::Create(GetTypeOfTypeLazy(), *this);
+    }
+    return TypeOfNull;
+}
+
+TNull* TTypeEnvironment::GetNullLazy() const {
+    if (!Null) {
+        Null = TNull::Create(*this);
+    }
+    return Null;
+}
+
+TEmptyListType* TTypeEnvironment::GetTypeOfEmptyListLazy() const {
+    if (!TypeOfEmptyList) {
+        TypeOfEmptyList = TEmptyListType::Create(GetTypeOfTypeLazy(), *this);
+    }
+    return TypeOfEmptyList;
+}
+
+TEmptyList* TTypeEnvironment::GetEmptyListLazy() const {
+    if (!EmptyList) {
+        EmptyList = TEmptyList::Create(*this);
+    }
+    return EmptyList;
+}
+
+TEmptyDictType* TTypeEnvironment::GetTypeOfEmptyDictLazy() const {
+    if (!TypeOfEmptyDict) {
+        TypeOfEmptyDict = TEmptyDictType::Create(GetTypeOfTypeLazy(), *this);
+    }
+    return TypeOfEmptyDict;
+}
+
+TEmptyDict* TTypeEnvironment::GetEmptyDictLazy() const {
+    if (!EmptyDict) {
+        EmptyDict = TEmptyDict::Create(*this);
+    }
+    return EmptyDict;
+}
+
+TStructLiteral* TTypeEnvironment::GetEmptyStructLazy() const {
+    if (!EmptyStruct) {
+        EmptyStruct = TStructLiteral::Create(
+            0,
+            nullptr,
+            TStructType::Create(0, nullptr, *this), *this, false);
+    }
+    return EmptyStruct;
+}
+
+TListLiteral* TTypeEnvironment::GetListOfVoidLazy() const {
+    if (!ListOfVoid) {
+        ListOfVoid = TListLiteral::Create(nullptr, 0, TListType::Create(GetVoidLazy()->GetGenericType(), *this), *this);
+    }
+    return ListOfVoid;
+}
+
+TAnyType* TTypeEnvironment::GetAnyTypeLazy() const {
+    if (!AnyType) {
+        AnyType = TAnyType::Create(GetTypeOfTypeLazy(), *this);
+    }
+    return AnyType;
+}
+
+TTupleLiteral* TTypeEnvironment::GetEmptyTupleLazy() const {
+    if (!EmptyTuple) {
+        EmptyTuple = TTupleLiteral::Create(0, nullptr, TTupleType::Create(0, nullptr, *this), *this, false);
+    }
+    return EmptyTuple;
+}
+
+TDataType* TTypeEnvironment::GetUi32Lazy() const {
+    if (!Ui32) {
+        Ui32 = TDataType::Create(NUdf::TDataType<ui32>::Id, *this);
+    }
+    return Ui32;
+}
+
+TDataType* TTypeEnvironment::GetUi64Lazy() const {
+    if (!Ui64) {
+        Ui64 = TDataType::Create(NUdf::TDataType<ui64>::Id, *this);
+    }
+    return Ui64;
+}
+
+std::vector<TNode*>& TTypeEnvironment::GetNodeStack() const {
+    return Stack;
+}
+
+TInternName TTypeEnvironment::InternName(const TStringBuf& name) const {
+    if (NamesPool.empty()) {
+        NamesPool.reserve(64);
+    }
+
+    auto it = NamesPool.find(name);
+    if (it != NamesPool.end()) {
+        return TInternName(*it);
+    }
+
+    // Copy to arena and null-terminate
+    char* data = (char*)AllocateBuffer(name.size()+1);
+    memcpy(data, name.data(), name.size());
+    data[name.size()] = 0;
+
+    return TInternName(*NamesPool.insert(TStringBuf(data, name.size())).first);
 }
 
 #define LITERALS_LIST(xx) \
@@ -370,12 +510,9 @@ void TTypeType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-bool TTypeType::CalculatePresortSupport() {
-    return false;
-}
 
 TDataType::TDataType(NUdf::TDataTypeId schemeType, const TTypeEnvironment& env)
-    : TType(EKind::Data, env.GetTypeOfType())
+    : TType(EKind::Data, env.GetTypeOfTypeLazy(), true)
     , SchemeType(schemeType)
     , DataSlot(NUdf::FindDataSlot(schemeType))
 {
@@ -421,10 +558,6 @@ TNode* TDataType::DoCloneOnCallableWrite(const TTypeEnvironment& env) const {
 
 void TDataType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
-}
-
-bool TDataType::CalculatePresortSupport() {
-    return true;
 }
 
 TDataDecimalType::TDataDecimalType(ui8 precision, ui8 scale, const TTypeEnvironment& env)
@@ -491,10 +624,14 @@ bool TDataLiteral::Equals(const TDataLiteral& nodeToCompare) const {
         case NUdf::TDataType<NUdf::TDate>::Id:
         case NUdf::TDataType<ui16>::Id:   return self.Get<ui16>() == that.Get<ui16>();
         case NUdf::TDataType<i16>::Id:    return self.Get<i16>() == that.Get<i16>();
+        case NUdf::TDataType<NUdf::TDate32>::Id:
         case NUdf::TDataType<i32>::Id:    return self.Get<i32>() == that.Get<i32>();
         case NUdf::TDataType<NUdf::TDatetime>::Id:
         case NUdf::TDataType<ui32>::Id:   return self.Get<ui32>() == that.Get<ui32>();
         case NUdf::TDataType<NUdf::TInterval>::Id:
+        case NUdf::TDataType<NUdf::TInterval64>::Id:
+        case NUdf::TDataType<NUdf::TDatetime64>::Id:
+        case NUdf::TDataType<NUdf::TTimestamp64>::Id:
         case NUdf::TDataType<i64>::Id:    return self.Get<i64>() == that.Get<i64>();
         case NUdf::TDataType<NUdf::TTimestamp>::Id:
         case NUdf::TDataType<ui64>::Id:   return self.Get<ui64>() == that.Get<ui64>();
@@ -507,9 +644,22 @@ bool TDataLiteral::Equals(const TDataLiteral& nodeToCompare) const {
         default: return self.AsStringRef() == that.AsStringRef();
     }
 }
+static const THashSet<TStringBuf> PG_SUPPORTED_PRESORT = {
+    "bool",
+    "int2",
+    "int4",
+    "int8",
+    "float4",
+    "float8",
+    "bytea",
+    "varchar",
+    "text",
+    "cstring"
+};
 
 TPgType::TPgType(ui32 typeId, const TTypeEnvironment& env)
-    : TType(EKind::Pg, env.GetTypeOfType())
+    : TType(EKind::Pg, env.GetTypeOfTypeLazy(), 
+        NYql::NPg::HasType(typeId) && PG_SUPPORTED_PRESORT.contains(NYql::NPg::LookupType(typeId).Name))
     , TypeId(typeId)
 {
 }
@@ -545,30 +695,13 @@ void TPgType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-static THashSet<TStringBuf> PG_SUPPORTED_PRESORT = {
-    "bool",
-    "int2",
-    "int4",
-    "int8",
-    "float4",
-    "float8",
-    "bytea",
-    "varchar",
-    "text",
-    "cstring"
-};
-
-bool TPgType::CalculatePresortSupport() {
-    return PG_SUPPORTED_PRESORT.contains(GetName());
-}
-
 const TString& TPgType::GetName() const {
     return NYql::NPg::LookupType(TypeId).Name;
 }
 
 TStructType::TStructType(ui32 membersCount, std::pair<TInternName, TType*>* members, const TTypeEnvironment& env,
     bool validate)
-    : TType(EKind::Struct, env.GetTypeOfType())
+    : TType(EKind::Struct, env.GetTypeOfTypeLazy(), CalculatePresortSupport(membersCount, members))
     , MembersCount(membersCount)
     , Members(members)
 {
@@ -699,9 +832,9 @@ void TStructType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-bool TStructType::CalculatePresortSupport() {
-    for (ui32 i = 0; i < MembersCount; ++i) {
-        if (!Members[i].second->IsPresortSupported()) {
+bool TStructType::CalculatePresortSupport(ui32 membersCount, std::pair<TInternName, TType*>* members) {
+    for (ui32 i = 0; i < membersCount; ++i) {
+        if (!members[i].second->IsPresortSupported()) {
             return false;
         }
     }
@@ -755,7 +888,7 @@ TStructLiteral::TStructLiteral(TRuntimeNode* values, TStructType* type, bool val
     }
 }
 
-TStructLiteral* TStructLiteral::Create(ui32 valuesCount, const TRuntimeNode* values, TStructType* type, const TTypeEnvironment& env) {
+TStructLiteral* TStructLiteral::Create(ui32 valuesCount, const TRuntimeNode* values, TStructType* type, const TTypeEnvironment& env, bool useCachedEmptyStruct) {
     MKQL_ENSURE(valuesCount == type->GetMembersCount(), "Wrong count of members");
     TRuntimeNode* allocatedValues = nullptr;
     if (valuesCount) {
@@ -763,9 +896,8 @@ TStructLiteral* TStructLiteral::Create(ui32 valuesCount, const TRuntimeNode* val
         for (ui32 i = 0; i < valuesCount; ++i) {
             allocatedValues[i] = values[i];
         }
-    } else if (env.GetEmptyStruct()) {
-        // if EmptyStruct has already been initialized
-        return env.GetEmptyStruct();
+    } else if (useCachedEmptyStruct) {
+        return env.GetEmptyStructLazy();
     }
 
     return ::new(env.Allocate<TStructLiteral>()) TStructLiteral(allocatedValues, type);
@@ -843,9 +975,9 @@ bool TStructLiteral::Equals(const TStructLiteral& nodeToCompare) const {
 }
 
 TListType::TListType(TType* itemType, const TTypeEnvironment& env, bool validate)
-    : TType(EKind::List, env.GetTypeOfType())
+    : TType(EKind::List, env.GetTypeOfTypeLazy(), itemType->IsPresortSupported())
     , Data(itemType)
-    , IndexDictKey(env.GetUi64())
+    , IndexDictKey(env.GetUi64Lazy())
 {
     Y_UNUSED(validate);
 }
@@ -885,10 +1017,6 @@ TNode* TListType::DoCloneOnCallableWrite(const TTypeEnvironment& env) const {
 
 void TListType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
-}
-
-bool TListType::CalculatePresortSupport() {
-    return GetItemType()->IsPresortSupported();
 }
 
 TListLiteral::TListLiteral(TRuntimeNode* items, ui32 count, TListType* type, const TTypeEnvironment& env, bool validate)
@@ -1023,7 +1151,7 @@ bool TListLiteral::Equals(const TListLiteral& nodeToCompare) const {
 }
 
 TStreamType::TStreamType(TType* itemType, const TTypeEnvironment& env, bool validate)
-    : TType(EKind::Stream, env.GetTypeOfType())
+    : TType(EKind::Stream, env.GetTypeOfTypeLazy(), false)
     , Data(itemType)
 {
     Y_UNUSED(validate);
@@ -1066,12 +1194,8 @@ void TStreamType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-bool TStreamType::CalculatePresortSupport() {
-    return false;
-}
-
 TFlowType::TFlowType(TType* itemType, const TTypeEnvironment& env, bool validate)
-    : TType(EKind::Flow, env.GetTypeOfType())
+    : TType(EKind::Flow, env.GetTypeOfTypeLazy(), false)
     , Data(itemType)
 {
     Y_UNUSED(validate);
@@ -1114,12 +1238,8 @@ void TFlowType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-bool TFlowType::CalculatePresortSupport() {
-    return false;
-}
-
 TOptionalType::TOptionalType(TType* itemType, const TTypeEnvironment& env, bool validate)
-    : TType(EKind::Optional, env.GetTypeOfType())
+    : TType(EKind::Optional, env.GetTypeOfTypeLazy(), itemType->IsPresortSupported())
     , Data(itemType)
 {
     Y_UNUSED(validate);
@@ -1162,12 +1282,8 @@ void TOptionalType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-bool TOptionalType::CalculatePresortSupport() {
-    return GetItemType()->IsPresortSupported();
-}
-
 TTaggedType::TTaggedType(TType* baseType, TInternName tag, const TTypeEnvironment& env)
-    : TType(EKind::Tagged, env.GetTypeOfType())
+    : TType(EKind::Tagged, env.GetTypeOfTypeLazy(), baseType->IsPresortSupported())
     , BaseType(baseType)
     , Tag(tag)
 {
@@ -1208,10 +1324,6 @@ TNode* TTaggedType::DoCloneOnCallableWrite(const TTypeEnvironment& env) const {
 
 void TTaggedType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
-}
-
-bool TTaggedType::CalculatePresortSupport() {
-    return GetBaseType()->IsPresortSupported();
 }
 
 TOptionalLiteral::TOptionalLiteral(TOptionalType* type, bool validate)
@@ -1343,12 +1455,9 @@ void TDictType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-bool TDictType::CalculatePresortSupport() {
-    return KeyType->IsPresortSupported() && PayloadType->IsPresortSupported();
-}
 
 TDictType::TDictType(TType* keyType, TType* payloadType, const TTypeEnvironment& env, bool validate)
-    : TType(EKind::Dict, env.GetTypeOfType())
+    : TType(EKind::Dict, env.GetTypeOfTypeLazy(), keyType->IsPresortSupported() && payloadType->IsPresortSupported())
     , KeyType(keyType)
     , PayloadType(payloadType)
 {
@@ -1492,7 +1601,7 @@ bool TDictLiteral::Equals(const TDictLiteral& nodeToCompare) const {
 
 TCallableType::TCallableType(const TInternName &name, TType* returnType, ui32 argumentsCount,
         TType **arguments, TNode* payload, const TTypeEnvironment& env)
-    : TType(EKind::Callable, env.GetTypeOfType())
+    : TType(EKind::Callable, env.GetTypeOfTypeLazy(), false)
     , IsMergeDisabled0(false)
     , ArgumentsCount(argumentsCount)
     , Name(name)
@@ -1583,15 +1692,15 @@ bool TCallableType::IsConvertableTo(const TCallableType& typeToCompare, bool ign
     if (IsMergeDisabled0 != typeToCompare.IsMergeDisabled0)
         return false;
 
-    if (ArgumentsCount != typeToCompare.ArgumentsCount)
+    if (ArgumentsCount < typeToCompare.ArgumentsCount)
         return false;
 
     // function with fewer optional args can't be converted to function
     // with more optional args
-    if (OptionalArgs < typeToCompare.OptionalArgs)
+    if (ArgumentsCount - OptionalArgs > typeToCompare.ArgumentsCount - typeToCompare.OptionalArgs)
         return false;
 
-    for (size_t index = 0; index < ArgumentsCount; ++index) {
+    for (size_t index = 0; index < typeToCompare.ArgumentsCount; ++index) {
         const auto arg = Arguments[index];
         const auto otherArg = typeToCompare.Arguments[index];
         if (!arg->IsConvertableTo(*otherArg, ignoreTagged))
@@ -1601,7 +1710,25 @@ bool TCallableType::IsConvertableTo(const TCallableType& typeToCompare, bool ign
     if (!ReturnType->IsConvertableTo(*typeToCompare.ReturnType, ignoreTagged))
         return false;
 
-    return !Payload || Payload->Equals(*typeToCompare.Payload);
+    if (!Payload) {
+        return true;
+    }
+
+    if (!typeToCompare.Payload) {
+        return false;
+    }
+
+    TCallablePayload parsedPayload(Payload), parsedPayloadToCompare(typeToCompare.Payload);
+    for (size_t index = 0; index < typeToCompare.ArgumentsCount; ++index) {
+        if (parsedPayload.GetArgumentName(index) != parsedPayloadToCompare.GetArgumentName(index)) {
+            return false;
+        }
+        if (parsedPayload.GetArgumentFlags(index) != parsedPayloadToCompare.GetArgumentFlags(index)) {
+            return false;
+        }
+    }
+
+    return true;
 }
 
 void TCallableType::SetOptionalArgumentsCount(ui32 count) {
@@ -1678,10 +1805,6 @@ TNode* TCallableType::DoCloneOnCallableWrite(const TTypeEnvironment& env) const 
 
 void TCallableType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
-}
-
-bool TCallableType::CalculatePresortSupport() {
-    return false;
 }
 
 TCallable::TCallable(ui32 inputsCount, TRuntimeNode* inputs, TCallableType* type, bool validate)
@@ -1860,6 +1983,26 @@ void TCallable::SetResult(TRuntimeNode result, const TTypeEnvironment& env) {
     Result.Freeze();
 }
 
+TCallablePayload::TCallablePayload(NMiniKQL::TNode* node)
+{
+    auto structObj = AS_VALUE(NMiniKQL::TStructLiteral, NMiniKQL::TRuntimeNode(node, true));
+    auto argsIndex = structObj->GetType()->GetMemberIndex("Args");
+    auto payloadIndex = structObj->GetType()->GetMemberIndex("Payload");
+    Payload_ = AS_VALUE(NMiniKQL::TDataLiteral, structObj->GetValue(payloadIndex))->AsValue().AsStringRef();
+    auto args = structObj->GetValue(argsIndex);
+    auto argsList = AS_VALUE(NMiniKQL::TListLiteral, args);
+    auto itemType = AS_TYPE(NMiniKQL::TStructType, AS_TYPE(NMiniKQL::TListType, args)->GetItemType());
+    auto nameIndex = itemType->GetMemberIndex("Name");
+    auto flagsIndex = itemType->GetMemberIndex("Flags");
+    ArgsNames_.reserve(argsList->GetItemsCount());
+    ArgsFlags_.reserve(argsList->GetItemsCount());
+    for (ui32 i = 0; i < argsList->GetItemsCount(); ++i) {
+        auto arg = AS_VALUE(NMiniKQL::TStructLiteral, argsList->GetItems()[i]);
+        ArgsNames_.push_back(AS_VALUE(NMiniKQL::TDataLiteral, arg->GetValue(nameIndex))->AsValue().AsStringRef());
+        ArgsFlags_.push_back(AS_VALUE(NMiniKQL::TDataLiteral, arg->GetValue(flagsIndex))->AsValue().Get<ui64>());
+    }
+}
+
 bool TRuntimeNode::HasValue() const {
     TRuntimeNode current = *this;
     for (;;) {
@@ -1928,16 +2071,12 @@ void TAnyType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-bool TAnyType::CalculatePresortSupport() {
-    return false;
-}
-
 TAnyType* TAnyType::Create(TTypeType* type, const TTypeEnvironment& env) {
     return ::new(env.Allocate<TAnyType>()) TAnyType(type);
 }
 
 TAny* TAny::Create(const TTypeEnvironment& env) {
-    return ::new(env.Allocate<TAny>()) TAny(env.GetAnyType());
+    return ::new(env.Allocate<TAny>()) TAny(env.GetAnyTypeLazy());
 }
 
 void TAny::DoUpdateLinks(const THashMap<TNode*, TNode*>& links) {
@@ -2010,7 +2149,7 @@ TTupleLiteral::TTupleLiteral(TRuntimeNode* values, TTupleType* type, bool valida
     }
 }
 
-TTupleLiteral* TTupleLiteral::Create(ui32 valuesCount, const TRuntimeNode* values, TTupleType* type, const TTypeEnvironment& env) {
+TTupleLiteral* TTupleLiteral::Create(ui32 valuesCount, const TRuntimeNode* values, TTupleType* type, const TTypeEnvironment& env, bool useCachedEmptyTuple) {
     MKQL_ENSURE(valuesCount == type->GetElementsCount(), "Wrong count of elements");
     TRuntimeNode* allocatedValues = nullptr;
     if (valuesCount) {
@@ -2018,9 +2157,8 @@ TTupleLiteral* TTupleLiteral::Create(ui32 valuesCount, const TRuntimeNode* value
         for (ui32 i = 0; i < valuesCount; ++i) {
             allocatedValues[i] = values[i];
         }
-    } else if (env.GetEmptyTuple()) {
-        // if EmptyTuple has already been initialized
-        return env.GetEmptyTuple();
+    } else if (useCachedEmptyTuple) {
+        return env.GetEmptyTupleLazy();
     }
 
     return ::new(env.Allocate<TTupleLiteral>()) TTupleLiteral(allocatedValues, type);
@@ -2123,12 +2261,8 @@ void TResourceType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
 }
 
-bool TResourceType::CalculatePresortSupport() {
-    return false;
-}
-
 TResourceType* TResourceType::Create(const TStringBuf& tag, const TTypeEnvironment& env) {
-    return ::new(env.Allocate<TResourceType>()) TResourceType(env.GetTypeOfType(), env.InternName(tag));
+    return ::new(env.Allocate<TResourceType>()) TResourceType(env.GetTypeOfTypeLazy(), env.InternName(tag));
 }
 
 TVariantType* TVariantType::Create(TType* underlyingType, const TTypeEnvironment& env) {
@@ -2148,7 +2282,7 @@ bool TVariantType::IsConvertableTo(const TVariantType& typeToCompare, bool ignor
 }
 
 TVariantType::TVariantType(TType* underlyingType, const TTypeEnvironment& env, bool validate)
-    : TType(EKind::Variant, env.GetTypeOfType())
+    : TType(EKind::Variant, env.GetTypeOfTypeLazy(), underlyingType->IsPresortSupported())
     , Data(underlyingType)
 {
     if (validate) {
@@ -2183,10 +2317,6 @@ TNode* TVariantType::DoCloneOnCallableWrite(const TTypeEnvironment& env) const {
 
 void TVariantType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
-}
-
-bool TVariantType::CalculatePresortSupport() {
-    return GetUnderlyingType()->IsPresortSupported();
 }
 
 TVariantLiteral* TVariantLiteral::Create(TRuntimeNode item, ui32 index, TVariantType* type, const TTypeEnvironment& env) {
@@ -2256,7 +2386,7 @@ void TVariantLiteral::DoFreeze(const TTypeEnvironment& env) {
 }
 
 TBlockType::TBlockType(TType* itemType, EShape shape, const TTypeEnvironment& env)
-    : TType(EKind::Block, env.GetTypeOfType())
+    : TType(EKind::Block, env.GetTypeOfTypeLazy(), false)
     , ItemType(itemType)
     , Shape(shape)
 {
@@ -2299,10 +2429,6 @@ TNode* TBlockType::DoCloneOnCallableWrite(const TTypeEnvironment& env) const {
 
 void TBlockType::DoFreeze(const TTypeEnvironment& env) {
     Y_UNUSED(env);
-}
-
-bool TBlockType::CalculatePresortSupport() {
-    return false;
 }
 
 bool IsNumericType(NUdf::TDataTypeId typeId) {
@@ -2387,7 +2513,7 @@ EValueRepresentation GetValueRepresentation(const TType* type) {
 }
 
 TArrayRef<TType* const> GetWideComponents(const TFlowType* type) {
-    if (RuntimeVersion > 35) {
+    if (type->GetItemType()->IsMulti()) {
         return AS_TYPE(TMultiType, type->GetItemType())->GetElements();
     }
     return AS_TYPE(TTupleType, type->GetItemType())->GetElements();

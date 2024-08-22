@@ -46,6 +46,8 @@ void Serialize(
             .OptionalItem("suspended", operation.Suspended)
             .OptionalItem("result", operation.Result)
             .OptionalItem("events", operation.Events)
+            .OptionalItem("scheduling_attributes_per_pool_tree", operation.SchedulingAttributesPerPoolTree)
+            // COMPAT(omgronny)
             .OptionalItem("slot_index_per_pool_tree", operation.SlotIndexPerPoolTree)
             .OptionalItem("alerts", operation.Alerts)
             .OptionalItem("alert_events", operation.AlertEvents)
@@ -87,15 +89,15 @@ void Deserialize(TOperation& operation, NYTree::IAttributeDictionaryPtr attribut
         using T = std::remove_reference_t<decltype(field)>;
         if constexpr (std::is_same_v<T, NYson::TYsonString>) {
             if (auto value = attributes->FindYson(name)) {
-               field = std::move(value);
-               attributes->Remove(name);
+                field = std::move(value);
+                attributes->Remove(name);
             } else {
                 field = {};
             }
         } else {
             using TValue = typename TOptionalTraits<T>::TValue;
             if (auto value = attributes->FindAndRemove<TValue>(name)) {
-               field = std::move(value);
+                field = std::move(value);
             } else {
                 field.reset();
             }
@@ -121,6 +123,7 @@ void Deserialize(TOperation& operation, NYTree::IAttributeDictionaryPtr attribut
     setField(operation.Suspended, "suspended");
     setField(operation.Events, "events");
     setField(operation.Result, "result");
+    setField(operation.SchedulingAttributesPerPoolTree, "scheduling_attributes_per_pool_tree");
     setField(operation.SlotIndexPerPoolTree, "slot_index_per_pool_tree");
     setField(operation.Alerts, "alerts");
     setField(operation.AlertEvents, "alert_events");
@@ -196,6 +199,7 @@ void Serialize(const TJob& job, NYson::IYsonConsumer* consumer, TStringBuf idKey
             .OptionalItem("stderr_size", job.StderrSize)
             .OptionalItem("fail_context_size", job.FailContextSize)
             .OptionalItem("error", job.Error)
+            .OptionalItem("interruption_info", job.InterruptionInfo)
             .OptionalItem("abort_reason", TryGetJobAbortReasonFromError(job.Error))
             .OptionalItem("brief_statistics", job.BriefStatistics)
             .OptionalItem("input_paths", job.InputPaths)
@@ -209,6 +213,7 @@ void Serialize(const TJob& job, NYson::IYsonConsumer* consumer, TStringBuf idKey
             .OptionalItem("monitoring_descriptor", job.MonitoringDescriptor)
             .OptionalItem("is_stale", job.IsStale)
             .OptionalItem("job_cookie", job.JobCookie)
+            .OptionalItem("archive_features", job.ArchiveFeatures)
         .EndMap();
 }
 

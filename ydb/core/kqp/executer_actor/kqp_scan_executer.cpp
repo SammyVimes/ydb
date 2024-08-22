@@ -1,7 +1,6 @@
 #include "kqp_executer.h"
 #include "kqp_executer_impl.h"
 #include "kqp_partition_helper.h"
-#include "kqp_result_channel.h"
 #include "kqp_tasks_graph.h"
 #include "kqp_tasks_validate.h"
 #include "kqp_shards_resolver.h"
@@ -46,13 +45,13 @@ public:
 
     TKqpScanExecuter(IKqpGateway::TExecPhysicalRequest&& request, const TString& database,
         const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, TKqpRequestCounters::TPtr counters,
-        const NKikimrConfig::TTableServiceConfig::TAggregationConfig& aggregation,
-        const NKikimrConfig::TTableServiceConfig::TExecuterRetriesConfig& executerRetriesConfig,
+        const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
         TPreparedQueryHolder::TConstPtr preparedQuery,
-        const NKikimrConfig::TTableServiceConfig::EChannelTransportVersion chanTransportVersion,
-        TDuration maximalSecretsSnapshotWaitTime, const TIntrusivePtr<TUserRequestContext>& userRequestContext)
-        : TBase(std::move(request), database, userToken, counters, executerRetriesConfig, chanTransportVersion, aggregation,
-            maximalSecretsSnapshotWaitTime, userRequestContext, TWilsonKqp::ScanExecuter, "ScanExecuter"
+        const TIntrusivePtr<TUserRequestContext>& userRequestContext,
+        ui32 statementResultIndex)
+        : TBase(std::move(request), database, userToken, counters, tableServiceConfig,
+            userRequestContext, statementResultIndex, TWilsonKqp::ScanExecuter, "ScanExecuter",
+            false
         )
         , PreparedQuery(preparedQuery)
     {
@@ -65,13 +64,13 @@ public:
         size_t resultsSize = Request.Transactions[0].Body->ResultsSize();
         YQL_ENSURE(resultsSize != 0);
 
-        bool streamResult = Request.Transactions[0].Body->GetResults(0).GetIsStream();
+        StreamResult = Request.Transactions[0].Body->GetResults(0).GetIsStream();
 
-        if (streamResult) {
+        if (StreamResult) {
             YQL_ENSURE(resultsSize == 1);
         } else {
             for (size_t i = 1; i < resultsSize; ++i) {
-                YQL_ENSURE(Request.Transactions[0].Body->GetResults(i).GetIsStream() == streamResult);
+                YQL_ENSURE(Request.Transactions[0].Body->GetResults(i).GetIsStream() == StreamResult);
             }
         }
     }
@@ -90,6 +89,8 @@ public:
 
         } catch (const yexception& e) {
             InternalError(e.what());
+        } catch (const TMemoryLimitExceededException&) {
+            RuntimeError(Ydb::StatusIds::PRECONDITION_FAILED, NYql::TIssues({NYql::TIssue(BuildMemoryLimitExceptionMessage())}));
         }
         ReportEventElapsedTime();
     }
@@ -110,7 +111,8 @@ private:
         try {
             switch (ev->GetTypeRewrite()) {
                 hFunc(TEvDqCompute::TEvState, HandleComputeStats);
-                hFunc(TEvKqpExecuter::TEvStreamDataAck, HandleExecute);
+                hFunc(TEvDqCompute::TEvChannelData, HandleChannelData); // from CA
+                hFunc(TEvKqpExecuter::TEvStreamDataAck, HandleStreamAck);
                 hFunc(TEvKqp::TEvAbortExecution, HandleAbortExecution);
                 hFunc(TEvents::TEvUndelivered, HandleUndelivered);
                 hFunc(TEvPrivate::TEvRetry, HandleRetry);
@@ -123,27 +125,10 @@ private:
             }
         } catch (const yexception& e) {
             InternalError(e.what());
+        } catch (const TMemoryLimitExceededException&) {
+            RuntimeError(Ydb::StatusIds::PRECONDITION_FAILED, NYql::TIssues({NYql::TIssue(BuildMemoryLimitExceptionMessage())}));
         }
         ReportEventElapsedTime();
-    }
-
-    void HandleExecute(TEvKqpExecuter::TEvStreamDataAck::TPtr& ev) {
-        LOG_T("Recv stream data ack, seqNo: " << ev->Get()->Record.GetSeqNo()
-            << ", freeSpace: " << ev->Get()->Record.GetFreeSpace()
-            << ", enough: " << ev->Get()->Record.GetEnough()
-            << ", from: " << ev->Sender);
-
-        auto& resultChannelProxies = GetResultChannelProxies();
-        if (resultChannelProxies.empty()) {
-            return;
-        }
-
-        // Forward only for stream results, data results acks event theirselves.
-        YQL_ENSURE(!ResponseEv->TxResults.empty() && ResponseEv->TxResults[0].IsStream);
-
-        auto channelIt = resultChannelProxies.begin();
-        auto handle = ev->Forward(channelIt->second->SelfId());
-        channelIt->second->Receive(handle);
     }
 
 private:
@@ -206,7 +191,7 @@ private:
                         YQL_ENSURE(false, "unknown source type");
                 }
             } else if (stageInfo.Meta.ShardOperations.empty()) {
-                BuildComputeTasks(stageInfo);
+                BuildComputeTasks(stageInfo, ShardsOnNode.size());
             } else if (stageInfo.Meta.IsSysView()) {
                 BuildSysViewScanTasks(stageInfo);
             } else if (stageInfo.Meta.IsOlap() || stageInfo.Meta.IsDatashard()) {
@@ -248,8 +233,6 @@ private:
         ui32 nShardScans = 0;
         TVector<ui64> computeTasks;
 
-        InitializeChannelProxies();
-
         // calc stats
         for (auto& task : TasksGraph.GetTasks()) {
             auto& stageInfo = TasksGraph.GetStageInfo(task.StageId);
@@ -289,32 +272,6 @@ private:
 
 public:
 
-    void FillResponseStats(Ydb::StatusIds::StatusCode status) {
-        auto& response = *ResponseEv->Record.MutableResponse();
-
-        response.SetStatus(status);
-
-        if (Stats) {
-            ReportEventElapsedTime();
-
-            Stats->FinishTs = TInstant::Now();
-            Stats->Finish();
-
-            if (Stats->CollectStatsByLongTasks || CollectFullStats(Request.StatsMode)) {
-                const auto& tx = Request.Transactions[0].Body;
-                auto planWithStats = AddExecStatsToTxPlan(tx->GetPlan(), response.GetResult().GetStats());
-                response.MutableResult()->MutableStats()->AddTxPlansWithStats(planWithStats);
-            }
-
-            if (Stats->CollectStatsByLongTasks) {
-                const auto& txPlansWithStats = response.GetResult().GetStats().GetTxPlansWithStats();
-                if (!txPlansWithStats.empty()) {
-                    LOG_N("Full stats: " << txPlansWithStats);
-                }
-            }
-        }
-    }
-
     void Finalize() {
         FillResponseStats(Ydb::StatusIds::SUCCESS);
 
@@ -332,10 +289,33 @@ public:
 private:
     void ExecuteScanTx() {
 
-        Planner = CreateKqpPlanner(TasksGraph, TxId, SelfId(), GetSnapshot(),
-            Database, UserToken, Deadline.GetOrElse(TInstant::Zero()), Request.StatsMode, AppData()->EnableKqpSpilling,
-            Request.RlPath, ExecuterSpan, std::move(ResourcesSnapshot), ExecuterRetriesConfig, /* useDataQueryPool */ false, /* localComputeTasks */ false,
-            Request.MkqlMemoryLimit, nullptr, false, GetUserRequestContext());
+        Planner = CreateKqpPlanner({
+            .TasksGraph = TasksGraph,
+            .TxId = TxId,
+            .Executer = SelfId(),
+            .Snapshot = GetSnapshot(),
+            .Database = Database,
+            .UserToken = UserToken,
+            .Deadline = Deadline.GetOrElse(TInstant::Zero()),
+            .StatsMode = Request.StatsMode,
+            .WithSpilling = AppData()->EnableKqpSpilling,
+            .RlPath = Request.RlPath,
+            .ExecuterSpan = ExecuterSpan,
+            .ResourcesSnapshot = std::move(ResourcesSnapshot),
+            .ExecuterRetriesConfig = ExecuterRetriesConfig,
+            .UseDataQueryPool = false,
+            .LocalComputeTasks = false,
+            .MkqlMemoryLimit = Request.MkqlMemoryLimit,
+            .AsyncIoFactory = nullptr,
+            .AllowSinglePartitionOpt = false,
+            .UserRequestContext = GetUserRequestContext(),
+            .FederatedQuerySetup = std::nullopt,
+            .OutputChunkMaxSize = Request.OutputChunkMaxSize,
+            .GUCSettings = nullptr,
+            .MayRunTasksLocally = false,
+            .ResourceManager_ = Request.ResourceManager_,
+            .CaFactory_ = Request.CaFactory_
+        });
 
         LOG_D("Execute scan tx, PendingComputeTasks: " << TasksGraph.GetTasks().size());
         auto err = Planner->PlanExecution();
@@ -380,13 +360,12 @@ private:
 
 IActor* CreateKqpScanExecuter(IKqpGateway::TExecPhysicalRequest&& request, const TString& database,
     const TIntrusiveConstPtr<NACLib::TUserToken>& userToken, TKqpRequestCounters::TPtr counters,
-    const NKikimrConfig::TTableServiceConfig::TAggregationConfig& aggregation,
-    const NKikimrConfig::TTableServiceConfig::TExecuterRetriesConfig& executerRetriesConfig,
-    TPreparedQueryHolder::TConstPtr preparedQuery, const NKikimrConfig::TTableServiceConfig::EChannelTransportVersion chanTransportVersion,
-    TDuration maximalSecretsSnapshotWaitTime, const TIntrusivePtr<TUserRequestContext>& userRequestContext)
+    const NKikimrConfig::TTableServiceConfig& tableServiceConfig,
+    TPreparedQueryHolder::TConstPtr preparedQuery,
+    const TIntrusivePtr<TUserRequestContext>& userRequestContext, ui32 statementResultIndex)
 {
-    return new TKqpScanExecuter(std::move(request), database, userToken, counters, aggregation, executerRetriesConfig,
-        preparedQuery, chanTransportVersion, maximalSecretsSnapshotWaitTime, userRequestContext);
+    return new TKqpScanExecuter(std::move(request), database, userToken, counters, tableServiceConfig,
+        preparedQuery, userRequestContext, statementResultIndex);
 }
 
 } // namespace NKqp

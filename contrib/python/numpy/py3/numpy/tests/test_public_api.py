@@ -185,7 +185,7 @@ PUBLIC_ALIASED_MODULES = [
 PRIVATE_BUT_PRESENT_MODULES = ['numpy.' + s for s in [
     "compat",
     "compat.py3k",
-    #"conftest",
+    "conftest",
     "core",
     "core.arrayprint",
     "core.defchararray",
@@ -339,6 +339,8 @@ SKIP_LIST = [
 ]
 if sys.version_info < (3, 12):
     SKIP_LIST += ["numpy.distutils.msvc9compiler"]
+else:
+    SKIP_LIST += ["numpy.distutils"]
 
 
 # suppressing warnings from deprecated modules

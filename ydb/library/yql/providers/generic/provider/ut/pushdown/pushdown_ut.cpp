@@ -180,7 +180,7 @@ public:
                 .Ptr();
         ::google::protobuf::Any settings;
         TString sourceType;
-        dqIntegration->FillSourceSettings(*dqSourceNode, settings, sourceType);
+        dqIntegration->FillSourceSettings(*dqSourceNode, settings, sourceType, 1);
         UNIT_ASSERT_STRINGS_EQUAL(sourceType, "PostgreSqlGeneric");
         UNIT_ASSERT(settings.Is<Generic::TSource>());
         settings.UnpackTo(DqSourceSettings_);
@@ -243,6 +243,7 @@ struct TPushdownFixture: public NUnitTest::TBaseFixture {
             TypesCtx.Get(),
             FunctionRegistry.Get(),
             DatabaseResolver,
+            nullptr,
             GenericClient,
             GatewaysCfg.GetGeneric());
 
@@ -409,7 +410,7 @@ Y_UNIT_TEST_SUITE_F(PushdownTest, TPushdownFixture) {
     Y_UNIT_TEST(PartialAnd) {
         AssertFilter(
             // Note that R"ast()ast" is empty string!
-            // division must be excluded from pushdown, but the other parts of "And" statement - not
+            // Unwrap must be excluded from pushdown, but the other parts of "And" statement - not
             R"ast(
                 (Coalesce
                     (And
@@ -417,7 +418,7 @@ Y_UNIT_TEST_SUITE_F(PushdownTest, TPushdownFixture) {
                             (Not (Member $row '"col_bool"))
                             (== (* (Member $row '"col_int64") (Member $row '"col_int32")) (Int64 '42))
                         )
-                        (< (/ (Int64 '42) (Member $row '"col_int64")) (Int64 '10))
+                        (< (Unwrap (/ (Int64 '42) (Member $row '"col_int64"))) (Int64 '10))
                         (>= (Member $row '"col_uint32") (- (Uint32 '15) (Uint32 '1)))
                     )
                     (Bool '"true")
@@ -506,12 +507,12 @@ Y_UNIT_TEST_SUITE_F(PushdownTest, TPushdownFixture) {
     Y_UNIT_TEST(PartialAndOneBranchPushdownable) {
         AssertFilter(
             // Note that R"ast()ast" is empty string!
-            // division must be excluded from pushdown, but the other part of "And" statement - not.
+            // Unwrap must be excluded from pushdown, but the other part of "And" statement - not.
             // So we expect only one branch of "And" to be pushed down.
             R"ast(
                 (Coalesce
                     (And
-                        (< (/ (Int64 '42) (Member $row '"col_int64")) (Int64 '10))
+                        (< (Unwrap (/ (Int64 '42) (Member $row '"col_int64"))) (Int64 '10))
                         (>= (Member $row '"col_uint32") (Uint32 '15))
                     )
                     (Bool '"true")

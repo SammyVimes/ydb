@@ -23,6 +23,7 @@ struct TGetClusterMetaOptions
     bool PopulateMasterCacheNodeAddresses = false;
     bool PopulateTimestampProviderAddresses = false;
     bool PopulateFeatures = false;
+    bool PopulateUserDirectory = false;
 };
 
 struct TClusterMeta
@@ -30,6 +31,7 @@ struct TClusterMeta
     std::shared_ptr<NNodeTrackerClient::NProto::TNodeDirectory> NodeDirectory;
     std::shared_ptr<NHiveClient::NProto::TClusterDirectory> ClusterDirectory;
     std::shared_ptr<NChunkClient::NProto::TMediumDirectory> MediumDirectory;
+    std::shared_ptr<NObjectClient::NProto::TUserDirectory> UserDirectory;
     std::vector<TString> MasterCacheNodeAddresses;
     std::vector<TString> TimestampProviderAddresses;
     NYTree::IMapNodePtr Features;
@@ -38,7 +40,7 @@ struct TClusterMeta
 struct TCheckClusterLivenessOptions
     : public TTimeoutOptions
 {
-    //! Checks cypress root availability.
+    //! Checks Cypress root availability.
     bool CheckCypressRoot = false;
     //! Checks secondary master cells generic availability.
     bool CheckSecondaryMasterCells = false;
@@ -55,6 +57,8 @@ struct TCheckClusterLivenessOptions
 
 struct IEtcClientBase
 {
+    virtual ~IEtcClientBase() = default;
+
     virtual TFuture<NObjectClient::TObjectId> CreateObject(
         NObjectClient::EObjectType type,
         const TCreateObjectOptions& options = {}) = 0;
@@ -64,6 +68,8 @@ struct IEtcClientBase
 
 struct IEtcClient
 {
+    virtual ~IEtcClient() = default;
+
     virtual TFuture<TClusterMeta> GetClusterMeta(
         const TGetClusterMetaOptions& options = {}) = 0;
 

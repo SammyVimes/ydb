@@ -19,7 +19,7 @@ using namespace NYql::NNodes;
 
 bool UseSource(const TKqpOptimizeContext& kqpCtx, const NYql::TKikimrTableDescription& tableDesc) {
     bool useSource = kqpCtx.Config->EnableKqpScanQuerySourceRead && kqpCtx.IsScanQuery();
-    useSource = useSource || (kqpCtx.Config->EnableKqpDataQuerySourceRead && kqpCtx.IsDataQuery());
+    useSource = useSource || kqpCtx.IsDataQuery();
     useSource = useSource || kqpCtx.IsGenericQuery();
     useSource = useSource &&
         tableDesc.Metadata->Kind != EKikimrTableKind::SysView &&
@@ -40,7 +40,6 @@ TExprBase KqpRewriteReadTable(TExprBase node, TExprContext& ctx, const TKqpOptim
     };
     TMaybe<TMatchedRead> matched;
 
-    TMaybeNode<TKqpReadTable> mayberead;
     VisitExpr(stage.Program().Body().Ptr(), [&](const TExprNode::TPtr& node) {
             TExprBase expr(node);
             if (auto cast = expr.Maybe<TKqpReadTable>()) {

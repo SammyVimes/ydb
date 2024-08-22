@@ -20,9 +20,19 @@ namespace NYT::NClient::NFederated {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-//! Creates federated client with given underlying clients.
-NApi::IClientPtr CreateClient(const std::vector<NApi::IClientPtr>& clients, TFederationConfigPtr config);
+struct IFederatedClientTransactionMixin
+{
+    //! Try fetch sticky proxy address if underlying transaction supports it.
+    virtual std::optional<TString> TryGetStickyProxyAddress() const = 0;
+};
 
 ////////////////////////////////////////////////////////////////////////////////
 
-} // NYT::NClient::NFederated
+//! Creates a federated client with given underlying clients.
+NApi::IClientPtr CreateClient(
+    std::vector<NApi::IClientPtr> clients,
+    TFederationConfigPtr config);
+
+////////////////////////////////////////////////////////////////////////////////
+
+} // namespace NYT::NClient::NFederated

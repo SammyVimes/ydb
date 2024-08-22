@@ -19,6 +19,7 @@
                                 "Node Type": "ConstantExpr",
                                 "Operators": [
                                     {
+                                        "Inputs": [],
                                         "Iterator": "precompute_0_0",
                                         "Name": "Iterator"
                                     }
@@ -37,9 +38,19 @@
                                 "Node Type": "Aggregate-Limit",
                                 "Operators": [
                                     {
+                                        "Inputs": [
+                                            {
+                                                "InternalOperatorId": 1
+                                            }
+                                        ],
                                         "Name": "Aggregate"
                                     },
                                     {
+                                        "Inputs": [
+                                            {
+                                                "ExternalPlanNodeId": 2
+                                            }
+                                        ],
                                         "Limit": "1",
                                         "Name": "Limit"
                                     }
@@ -55,18 +66,25 @@
                                                 "Node Type": "Aggregate-TableFullScan",
                                                 "Operators": [
                                                     {
+                                                        "Inputs": [
+                                                            {
+                                                                "InternalOperatorId": 1
+                                                            }
+                                                        ],
                                                         "Name": "Aggregate"
                                                     },
                                                     {
+                                                        "Inputs": [],
                                                         "Name": "TableFullScan",
                                                         "ReadColumns": null,
                                                         "ReadRanges": [
-                                                            "EventTime (-\u221e, +\u221e)",
                                                             "CounterID (-\u221e, +\u221e)",
                                                             "EventDate (-\u221e, +\u221e)",
                                                             "UserID (-\u221e, +\u221e)",
+                                                            "EventTime (-\u221e, +\u221e)",
                                                             "WatchID (-\u221e, +\u221e)"
                                                         ],
+                                                        "Scan": "Parallel",
                                                         "Table": "clickbench/plans/row/hits"
                                                     }
                                                 ],
@@ -82,7 +100,10 @@
                         ],
                         "Subplan Name": "CTE precompute_0_0"
                     }
-                ]
+                ],
+                "Stats": {
+                    "ResourcePoolId": "default"
+                }
             },
             "tables": [
                 {
@@ -90,10 +111,10 @@
                     "reads": [
                         {
                             "scan_by": [
-                                "EventTime (-\u221e, +\u221e)",
                                 "CounterID (-\u221e, +\u221e)",
                                 "EventDate (-\u221e, +\u221e)",
                                 "UserID (-\u221e, +\u221e)",
+                                "EventTime (-\u221e, +\u221e)",
                                 "WatchID (-\u221e, +\u221e)"
                             ],
                             "type": "FullScan"

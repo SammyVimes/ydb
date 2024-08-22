@@ -1,4 +1,4 @@
-#include "mkql_builtins_decimal.h"
+#include "mkql_builtins_decimal.h" // Y_IGNORE
 #include "mkql_builtins_compare.h"
 
 #include <cmath>
@@ -209,6 +209,7 @@ void RegisterAggrMax(IBuiltinFunctionRegistry& registry) {
     RegisterNumericAggregateFunction<TAggrMax, TBinaryArgsSameOpt>(registry, "AggrMax");
     RegisterBooleanAggregateFunction<TAggrMax, TBinaryArgsSameOpt>(registry, "AggrMax");
     RegisterDatetimeAggregateFunction<TAggrMax, TBinaryArgsSameOpt>(registry, "AggrMax");
+    RegisterBigDateAggregateFunction<TAggrMax, TBinaryArgsSameOpt>(registry, "AggrMax");
     RegisterTzDatetimeAggregateFunction<TAggrTzMax, TBinaryArgsSameOpt>(registry, "AggrMax");
 
     RegisterCustomAggregateFunction<NUdf::TDataType<NUdf::TDecimal>, TDecimalAggrMax, TBinaryArgsSameOpt>(registry, "AggrMax");

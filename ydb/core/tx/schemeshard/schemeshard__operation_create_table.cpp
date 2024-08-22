@@ -3,6 +3,7 @@
 #include "schemeshard_impl.h"
 
 #include <ydb/core/protos/flat_scheme_op.pb.h>
+#include <ydb/core/protos/datashard_config.pb.h>
 
 #include <ydb/core/base/subdomain.h>
 
@@ -441,14 +442,15 @@ public:
                 .IsAtLocalSchemeShard()
                 .IsResolved()
                 .NotDeleted()
-                .NotUnderDeleting();
+                .NotUnderDeleting()
+                .FailOnRestrictedCreateInTempZone(Transaction.GetAllowCreateInTempDir());
 
             if (checks) {
                 if (parentPath.Base()->IsTableIndex()) {
                     checks.IsInsideTableIndexPath()
                           .IsUnderCreating(NKikimrScheme::StatusNameConflict)
                           .IsUnderTheSameOperation(OperationId.GetTxId()); //allow only as part of creating base table
-                } else {
+                } else if (!Transaction.GetAllowAccessToPrivatePaths()) {
                     checks.IsCommonSensePath()
                           .IsLikeDirectory();
                 }
@@ -537,12 +539,6 @@ public:
 
         TString errStr;
 
-        if ((schema.HasTemporary() && schema.GetTemporary()) && !AppData()->FeatureFlags.GetEnableTempTables()) {
-            result->SetError(NKikimrScheme::StatusPreconditionFailed,
-                TStringBuilder() << "It is not allowed to create temp table: " << schema.GetName());
-            return result;
-        }
-
         if (!CheckColumnTypesConstraints(schema, errStr)) {
             result->SetError(NKikimrScheme::StatusPreconditionFailed, errStr);
             return result;
@@ -563,7 +559,17 @@ public:
 
         const NScheme::TTypeRegistry* typeRegistry = AppData()->TypeRegistry;
         const TSchemeLimits& limits = domainInfo->GetSchemeLimits();
-        TTableInfo::TAlterDataPtr alterData = TTableInfo::CreateAlterData(nullptr, schema, *typeRegistry, limits, *domainInfo, context.SS->EnableTablePgTypes, errStr, LocalSequences);
+        TTableInfo::TAlterDataPtr alterData = TTableInfo::CreateAlterData(
+            nullptr,
+            schema,
+            *typeRegistry,
+            limits,
+            *domainInfo,
+            context.SS->EnableTablePgTypes,
+            context.SS->EnableTableDatetime64,
+            errStr,
+            LocalSequences);
+
         if (!alterData.Get()) {
             result->SetError(NKikimrScheme::StatusSchemeError, errStr);
             return result;
@@ -644,6 +650,14 @@ public:
 
         Y_ABORT_UNLESS(tableInfo->GetPartitions().back().EndOfRange.empty(), "End of last range must be +INF");
 
+        if (tableInfo->IsAsyncReplica()) {
+            newTable->SetAsyncReplica();
+        }
+
+        if (tableInfo->IsRestoreTable()) {
+            newTable->SetRestoreTable();
+        }
+
         context.SS->Tables[newTable->PathId] = tableInfo;
         context.SS->TabletCounters->Simple()[COUNTER_TABLE_COUNT].Add(1);
         context.SS->IncrementPathDbRefCount(newTable->PathId, "new path created");
@@ -656,13 +670,12 @@ public:
         context.SS->ChangeTxState(db, OperationId, TTxState::CreateParts);
         context.OnComplete.ActivateTx(OperationId);
 
-        context.SS->PersistPath(db, newTable->PathId);
         context.SS->ApplyAndPersistUserAttrs(db, newTable->PathId);
 
         if (!acl.empty()) {
             newTable->ApplyACL(acl);
-            context.SS->PersistACL(db, newTable);
         }
+        context.SS->PersistPath(db, newTable->PathId);
         context.SS->PersistTable(db, newTable->PathId);
         context.SS->PersistTxState(db, OperationId);
 

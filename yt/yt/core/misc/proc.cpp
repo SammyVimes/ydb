@@ -64,7 +64,7 @@ namespace NYT {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static inline const NLogging::TLogger Logger("Proc");
+YT_DEFINE_GLOBAL(const NLogging::TLogger, Logger, "Proc");
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -311,6 +311,24 @@ std::vector<size_t> GetCurrentProcessThreadIds()
     return result;
 #else
     return {};
+#endif
+}
+
+bool IsUserspaceThread(size_t tid)
+{
+#ifdef __linux__
+    TFileInput file(Format("/proc/%v/stat", tid));
+    auto statFields = SplitString(file.ReadLine(), " ");
+    constexpr int StartStackIndex = 27;
+    if (statFields.size() < StartStackIndex) {
+        return false;
+    }
+    // This is just a heuristic.
+    auto startStack = FromString<ui64>(statFields[StartStackIndex]);
+    return startStack != 0;
+#else
+    Y_UNUSED(tid);
+    return false;
 #endif
 }
 
@@ -741,14 +759,14 @@ void SetUid(int uid)
 #ifdef _linux_
     const auto* passwd = getpwuid(uid);
     int gid = (passwd && errno == 0)
-      ? passwd->pw_gid
-      : uid; // fallback value.
+        ? passwd->pw_gid
+        : uid; // fallback value.
 
     if (setresgid(gid, gid, gid) != 0) {
         THROW_ERROR_EXCEPTION("Unable to set gids")
-                << TErrorAttribute("uid", uid)
-                << TErrorAttribute("gid", gid)
-                << TError::FromSystem();
+            << TErrorAttribute("uid", uid)
+            << TErrorAttribute("gid", gid)
+            << TError::FromSystem();
     }
 
     if (setresuid(uid, uid, uid) != 0) {
@@ -896,6 +914,27 @@ void SafeMakeNonblocking(int fd)
     }
 }
 
+bool TrySetPipeCapacity(int fd, int capacity)
+{
+#ifdef _linux_
+    int res = fcntl(fd, F_SETPIPE_SZ, capacity);
+
+    return  res != -1;
+#else
+    Y_UNUSED(fd);
+    Y_UNUSED(capacity);
+    return true;
+#endif
+}
+
+void SafeSetPipeCapacity(int fd, int capacity)
+{
+    if (!TrySetPipeCapacity(fd, capacity)) {
+        THROW_ERROR_EXCEPTION("Failed to set capacity for descriptor %v", fd)
+            << TError::FromSystem();
+    }
+}
+
 bool TrySetUid(int uid)
 {
 #ifdef _linux_
@@ -952,17 +991,17 @@ bool TryClose(TFileDescriptor fd, bool ignoreBadFD)
     return false;
 }
 
-bool TryDup2(TFileDescriptor /* oldFD */, TFileDescriptor /* newFD */)
+bool TryDup2(TFileDescriptor /*oldFD*/, TFileDescriptor /*newFD*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-void SafeDup2(TFileDescriptor /* oldFD */, TFileDescriptor /* newFD */)
+void SafeDup2(TFileDescriptor /*oldFD*/, TFileDescriptor /*newFD*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-void SafeSetCloexec(TFileDescriptor /* fd */)
+void SafeSetCloexec(TFileDescriptor /*fd*/)
 {
     YT_UNIMPLEMENTED();
 }
@@ -972,7 +1011,7 @@ bool TryExecve(const char /* *path */, const char* /* argv[] */, const char* /* 
     YT_UNIMPLEMENTED();
 }
 
-TError StatusToError(int /* status */)
+TError StatusToError(int /*status*/)
 {
     YT_UNIMPLEMENTED();
 }
@@ -982,47 +1021,47 @@ void CloseAllDescriptors()
     YT_UNIMPLEMENTED();
 }
 
-void SafePipe(TFileDescriptor /* fd */ [2])
+void SafePipe(TFileDescriptor /*fd*/ [2])
 {
     YT_UNIMPLEMENTED();
 }
 
-TFileDescriptor SafeDup(TFileDescriptor /* fd */)
+TFileDescriptor SafeDup(TFileDescriptor /*fd*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-void SafeOpenPty(TFileDescriptor* /* masterFD */, TFileDescriptor* /* slaveFD */, int /* height */, int /* width */)
+void SafeOpenPty(TFileDescriptor* /*masterFD*/, TFileDescriptor* /*slaveFD*/, int /*height*/, int /*width*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-void SafeLoginTty(TFileDescriptor /* slaveFD */)
+void SafeLoginTty(TFileDescriptor /*slaveFD*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-void SafeSetTtyWindowSize(TFileDescriptor /* slaveFD */, int /* height */, int /* width */)
+void SafeSetTtyWindowSize(TFileDescriptor /*slaveFD*/, int /*height*/, int /*width*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-bool TryMakeNonblocking(TFileDescriptor /* fd */)
+bool TryMakeNonblocking(TFileDescriptor /*fd*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-void SafeMakeNonblocking(TFileDescriptor /* fd */)
+void SafeMakeNonblocking(TFileDescriptor /*fd*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-void SafeSetUid(int /* uid */)
+void SafeSetUid(int /*uid*/)
 {
     YT_UNIMPLEMENTED();
 }
 
-TString SafeGetUsernameByUid(int /* uid */)
+TString SafeGetUsernameByUid(int /*uid*/)
 {
     YT_UNIMPLEMENTED();
 }
@@ -1160,7 +1199,7 @@ void SendSignal(const std::vector<int>& pids, const TString& signalName)
     auto sig = FindSignalIdBySignalName(signalName);
     for (int pid : pids) {
         if (kill(pid, *sig) != 0 && errno != ESRCH) {
-            THROW_ERROR_EXCEPTION("Unable to kill process %d", pid)
+            THROW_ERROR_EXCEPTION("Unable to kill process %v", pid)
                 << TError::FromSystem();
         }
     }
@@ -1490,6 +1529,43 @@ THashMap<TString, TDiskStat> GetDiskStats()
 #endif
 }
 
+TBlockDeviceStat ParseBlockDeviceStat(const TString& statLine)
+{
+    auto buffer = SplitString(statLine, " ");
+    TBlockDeviceStat result;
+    TryParseField(buffer, 0, result.ReadsCompleted);
+    TryParseField(buffer, 1, result.ReadsMerged);
+    TryParseField(buffer, 2, result.SectorsRead);
+    TryParseField(buffer, 3, result.TimeSpentReading);
+    TryParseField(buffer, 4, result.WritesCompleted);
+    TryParseField(buffer, 5, result.WritesMerged);
+    TryParseField(buffer, 6, result.SectorsWritten);
+    TryParseField(buffer, 7, result.TimeSpentWriting);
+    TryParseField(buffer, 8, result.IOCurrentlyInProgress);
+    TryParseField(buffer, 9, result.TimeSpentDoingIO);
+    TryParseField(buffer, 10, result.WeightedTimeSpentDoingIO);
+    TryParseField(buffer, 11, result.DiscardsCompleted);
+    TryParseField(buffer, 12, result.DiscardsMerged);
+    TryParseField(buffer, 13, result.SectorsDiscarded);
+    TryParseField(buffer, 14, result.TimeSpentDiscarding);
+    TryParseField(buffer, 15, result.FlushesCompleted);
+    TryParseField(buffer, 16, result.TimeSpentFlushing);
+    return result;
+}
+
+std::optional<TBlockDeviceStat> GetBlockDeviceStat(const TString& deviceName)
+{
+#ifdef _linux_
+    const TString path = Format("/sys/block/%v/stat", deviceName);
+    TFileInput diskStatsFile(path);
+    auto data = diskStatsFile.ReadAll();
+    return ParseBlockDeviceStat(Strip(data));
+#else
+    Y_UNUSED(deviceName);
+    return std::nullopt;
+#endif
+}
+
 std::vector<TString> ListDisks()
 {
 #ifdef _linux_
@@ -1514,24 +1590,36 @@ TTaskDiskStatistics GetSelfThreadTaskDiskStatistics()
 {
 #ifdef _linux_
     static const TString path = "/proc/thread-self/io";
+    static std::atomic<bool> supported = true;
 
     TTaskDiskStatistics stat;
 
-    TIFStream ioFile(path);
-    for (TString line; ioFile.ReadLine(line); ) {
-        if (line.empty()) {
-            continue;
-        }
+    if (supported) {
+        try {
+            TIFStream ioFile(path);
+            for (TString line; ioFile.ReadLine(line); ) {
+                if (line.empty()) {
+                    continue;
+                }
 
-        auto fields = SplitString(line, " ", 2);
-        if (fields.size() != 2) {
-            continue;
-        }
+                auto fields = SplitString(line, " ", 2);
+                if (fields.size() != 2) {
+                    continue;
+                }
 
-        if (fields[0] == "read_bytes:") {
-            TryFromString(fields[1], stat.ReadBytes);
-        } else if (fields[0] == "write_bytes:") {
-            TryFromString(fields[1], stat.ReadBytes);
+                if (fields[0] == "read_bytes:") {
+                    TryFromString(fields[1], stat.ReadBytes);
+                } else if (fields[0] == "write_bytes:") {
+                    TryFromString(fields[1], stat.ReadBytes);
+                }
+            }
+        } catch (const TSystemError& ex) {
+            if (ex.Status() == ENOENT) {
+                supported = false;
+                YT_LOG_WARNING(ex, "Task I/O accounting is not supported by kernel");
+            } else {
+                throw;
+            }
         }
     }
 
@@ -1565,7 +1653,7 @@ TFile MemfdCreate(const TString& name)
 const TString& GetLinuxKernelVersion()
 {
 #ifdef _linux_
-    static TString release = []() -> TString {
+    static TString release = [] () -> TString {
         utsname buf{};
         if (uname(&buf) != 0) {
             return "unknown";

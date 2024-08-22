@@ -30,10 +30,8 @@
 #include <ydb/library/yql/providers/pq/proto/dq_io.pb.h>
 #include <ydb/library/yql/providers/pq/task_meta/task_meta.h>
 #include <ydb/library/yql/providers/s3/provider/yql_s3_provider.h>
-#include <ydb/library/yql/providers/ydb/provider/yql_ydb_provider.h>
 #include <ydb/library/yql/providers/solomon/gateway/yql_solomon_gateway.h>
 #include <ydb/library/yql/providers/solomon/provider/yql_solomon_provider.h>
-#include <ydb/library/yql/providers/s3/actors/yql_s3_applicator_actor.h>
 #include <ydb/library/yql/providers/s3/proto/sink.pb.h>
 #include <ydb/library/yql/sql/settings/translation_settings.h>
 #include <ydb/library/yql/minikql/mkql_alloc.h>
@@ -183,64 +181,68 @@ public:
     }
 
     void Bootstrap() {
-        TProgramFactory progFactory(false, FunctionRegistry, NextUniqueId, DataProvidersInit, "yq");
-        progFactory.SetModules(ModuleResolver);
-        progFactory.SetUdfResolver(NYql::NCommon::CreateSimpleUdfResolver(FunctionRegistry, nullptr));
-        progFactory.SetGatewaysConfig(&GatewaysConfig);
+        try {
+            TProgramFactory progFactory(false, FunctionRegistry, NextUniqueId, DataProvidersInit, "yq");
+            progFactory.SetModules(ModuleResolver);
+            progFactory.SetUdfResolver(NYql::NCommon::CreateSimpleUdfResolver(FunctionRegistry, nullptr));
+            progFactory.SetGatewaysConfig(&GatewaysConfig);
 
-        Program = progFactory.Create("-stdin-", Sql, SessionId);
-        Program->EnableResultPosition();
+            Program = progFactory.Create("-stdin-", Sql, SessionId);
+            Program->EnableResultPosition();
 
-        // parse phase
-        {
-            if (!Program->ParseSql(SqlSettings)) {
-                SendStatusAndDie(TProgram::TStatus::Error, "Failed to parse query");
+            // parse phase
+            {
+                if (!Program->ParseSql(SqlSettings)) {
+                    SendStatusAndDie(TProgram::TStatus::Error, "Failed to parse query");
+                    return;
+                }
+
+                if (ExecuteMode == FederatedQuery::ExecuteMode::PARSE) {
+                    SendStatusAndDie(TProgram::TStatus::Ok);
+                    return;
+                }
+            }
+
+            // compile phase
+            {
+                if (!Program->Compile("")) {
+                    SendStatusAndDie(TProgram::TStatus::Error, "Failed to compile query");
+                    return;
+                }
+
+                if (ExecuteMode == FederatedQuery::ExecuteMode::COMPILE) {
+                    SendStatusAndDie(TProgram::TStatus::Ok);
+                    return;
+                }
+            }
+
+            Compiled = true;
+
+            // next phases can be async: optimize, validate, run
+            TProgram::TFutureStatus futureStatus;
+            switch (ExecuteMode) {
+            case FederatedQuery::ExecuteMode::EXPLAIN:
+                futureStatus = Program->OptimizeAsyncWithConfig("", TraceOptPipelineConfigurator);
+                break;
+            case FederatedQuery::ExecuteMode::VALIDATE:
+                futureStatus = Program->ValidateAsync("");
+                break;
+            case FederatedQuery::ExecuteMode::RUN:
+                futureStatus = Program->RunAsyncWithConfig("", TraceOptPipelineConfigurator);
+                break;
+            default:
+                SendStatusAndDie(TProgram::TStatus::Error, TStringBuilder() << "Unexpected execute mode " << static_cast<int>(ExecuteMode));
                 return;
             }
 
-            if (ExecuteMode == FederatedQuery::ExecuteMode::PARSE) {
-                SendStatusAndDie(TProgram::TStatus::Ok);
-                return;
-            }
+            futureStatus.Subscribe([actorSystem = NActors::TActivationContext::ActorSystem(), selfId = SelfId()](const TProgram::TFutureStatus& f) {
+                actorSystem->Send(selfId, new TEvents::TEvAsyncContinue(f));
+            });
+
+            Become(&TProgramRunnerActor::StateFunc);
+        } catch (...) {
+            SendStatusAndDie(TProgram::TStatus::Error, CurrentExceptionMessage());
         }
-
-        // compile phase
-        {
-            if (!Program->Compile("")) {
-                SendStatusAndDie(TProgram::TStatus::Error, "Failed to compile query");
-                return;
-            }
-
-            if (ExecuteMode == FederatedQuery::ExecuteMode::COMPILE) {
-                SendStatusAndDie(TProgram::TStatus::Ok);
-                return;
-            }
-        }
-
-        Compiled = true;
-
-        // next phases can be async: optimize, validate, run
-        TProgram::TFutureStatus futureStatus;
-        switch (ExecuteMode) {
-        case FederatedQuery::ExecuteMode::EXPLAIN:
-            futureStatus = Program->OptimizeAsyncWithConfig("", TraceOptPipelineConfigurator);
-            break;
-        case FederatedQuery::ExecuteMode::VALIDATE:
-            futureStatus = Program->ValidateAsync("");
-            break;
-        case FederatedQuery::ExecuteMode::RUN:
-            futureStatus = Program->RunAsyncWithConfig("", TraceOptPipelineConfigurator);
-            break;
-        default:
-            SendStatusAndDie(TProgram::TStatus::Error, TStringBuilder() << "Unexpected execute mode " << static_cast<int>(ExecuteMode));
-            return;
-        }
-
-        futureStatus.Subscribe([actorSystem = NActors::TActivationContext::ActorSystem(), selfId = SelfId()](const TProgram::TFutureStatus& f) {
-            actorSystem->Send(selfId, new TEvents::TEvAsyncContinue(f));
-        });
-
-        Become(&TProgramRunnerActor::StateFunc);
     }
 
     void SendStatusAndDie(NYql::TProgram::TStatus status, const TString& message = "") {
@@ -332,7 +334,6 @@ public:
         , Params(std::move(params))
         , CreatedAt(Params.CreatedAt)
         , QueryCounters(queryCounters)
-        , EnableCheckpointCoordinator(Params.QueryType == FederatedQuery::QueryContent::STREAMING && Params.Config.GetCheckpointCoordinator().GetEnabled())
         , MaxTasksPerStage(Params.Config.GetCommon().GetMaxTasksPerStage() ? Params.Config.GetCommon().GetMaxTasksPerStage() : 500)
         , MaxTasksPerOperation(Params.Config.GetCommon().GetMaxTasksPerOperation() ? Params.Config.GetCommon().GetMaxTasksPerOperation() : 40)
         , Compressor(Params.Config.GetCommon().GetQueryArtifactsCompressionMethod(), Params.Config.GetCommon().GetQueryArtifactsCompressionMinSize())
@@ -778,7 +779,11 @@ private:
             mkqlDefaultLimit = 8_GB;
         }
 
+        // This part is for backward compatibility. TODO: remove this part after migration to TS3GatewayConfig
         auto s3ReadDefaultInflightLimit = Params.Config.GetReadActorsFactoryConfig().GetS3ReadActorFactoryConfig().GetDataInflight();
+        if (s3ReadDefaultInflightLimit == 0) {
+            s3ReadDefaultInflightLimit = Params.Config.GetGateways().GetS3().GetDataInflight();
+        }
         if (s3ReadDefaultInflightLimit == 0) {
             s3ReadDefaultInflightLimit = 200_MB;
         }
@@ -919,21 +924,6 @@ private:
             EvalInfos.emplace(info.ExecuterId, info);
         } else {
             DqGraphParams.push_back(ev->Get()->GraphParams);
-
-            NYql::IDqGateway::TResult gatewayResult;
-            // fake it till you make it
-            // generate dummy result for YQL facade now, remove this gateway completely
-            // when top-level YQL facade call like Preprocess() is implemented
-            if (ev->Get()->GraphParams.GetResultType()) {
-                // for resultable graphs return dummy "select 1" result (it is not used and is required to satisfy YQL facade only)
-                gatewayResult.SetSuccess();
-                gatewayResult.Data = "[[\001\0021]]";
-                gatewayResult.Truncated = true;
-                gatewayResult.RowsCount = 0;
-            } else {
-                // for resultless results expect infinite INSERT FROM SELECT and just return "nothing"
-            }
-            ev->Get()->Result.SetValue(gatewayResult);
         }
     }
 
@@ -1274,7 +1264,21 @@ private:
                 << ". " << it->second.Index << " response. Issues count: " << result.IssuesSize()
                 << ". Rows count: " << result.GetRowsCount());
 
-            queryResult.Data = result.yson();
+            TVector<NDq::TDqSerializedBatch> rows;
+            for (const auto& s : result.GetSample()) {
+                NDq::TDqSerializedBatch batch;
+                batch.Proto = s;
+                rows.emplace_back(std::move(batch));
+            }
+
+            TProtoBuilder protoBuilder(ResultFormatSettings->ResultType, ResultFormatSettings->Columns);
+
+            bool ysonTruncated = false;
+            queryResult.Data = protoBuilder.BuildYson(std::move(rows), ResultFormatSettings->SizeLimit.GetOrElse(Max<ui64>()),
+                ResultFormatSettings->RowsLimit.GetOrElse(Max<ui64>()), &ysonTruncated);
+
+            queryResult.RowsCount = result.GetRowsCount();
+            queryResult.Truncated = result.GetTruncated() || ysonTruncated;
 
             TIssues issues;
             IssuesFromMessage(result.GetIssues(), issues);
@@ -1304,8 +1308,6 @@ private:
             }
 
             queryResult.AddIssues(issues);
-            queryResult.Truncated = result.GetTruncated();
-            queryResult.RowsCount = result.GetRowsCount();
             it->second.Result.SetValue(queryResult);
             EvalInfos.erase(it);
         }
@@ -1525,6 +1527,7 @@ private:
         *request.MutableSettings() = dqGraphParams.GetSettings();
         *request.MutableSecureParams() = dqGraphParams.GetSecureParams();
         *request.MutableColumns() = dqGraphParams.GetColumns();
+        PrepareResultFormatSettings(dqGraphParams, *dqConfiguration);
         NTasksPacker::UnPack(*request.MutableTask(), dqGraphParams.GetTasks(), dqGraphParams.GetStageProgram());
         Send(info.ExecuterId, new NYql::NDqs::TEvGraphRequest(request, info.ControlId, info.ResultId));
         LOG_D("Evaluation Executer: " << info.ExecuterId << ", Controller: " << info.ControlId << ", ResultActor: " << info.ResultId);
@@ -1538,7 +1541,12 @@ private:
         dqConfiguration->FreezeDefaults();
         dqConfiguration->FallbackPolicy = EFallbackPolicy::Never;
 
-        ExecuterId = Register(NYql::NDq::MakeDqExecuter(MakeNodesManagerId(), SelfId(), Params.QueryId, "", dqConfiguration, QueryCounters.Counters, TInstant::Now(), EnableCheckpointCoordinator));
+        bool enableCheckpointCoordinator =
+            Params.QueryType == FederatedQuery::QueryContent::STREAMING && 
+            Params.Config.GetCheckpointCoordinator().GetEnabled() && 
+            !dqConfiguration->DisableCheckpoints.Get().GetOrElse(false);
+
+        ExecuterId = Register(NYql::NDq::MakeDqExecuter(MakeNodesManagerId(), SelfId(), Params.QueryId, "", dqConfiguration, QueryCounters.Counters, TInstant::Now(), enableCheckpointCoordinator));
 
         NActors::TActorId resultId;
         if (dqGraphParams.GetResultType()) {
@@ -1557,12 +1565,15 @@ private:
                     CreateResultWriter(
                         ExecuterId, dqGraphParams.GetResultType(),
                         writerResultId, columns, dqGraphParams.GetSession(), Params.Deadline, Params.ResultBytesLimit));
+
+            PrepareResultFormatSettings(dqGraphParams, *dqConfiguration);
         } else {
             LOG_D("ResultWriter was NOT CREATED since ResultType is empty");
             resultId = ExecuterId;
+            ClearResultFormatSettings();
         }
 
-        if (EnableCheckpointCoordinator) {
+        if (enableCheckpointCoordinator) {
             ControlId = Register(MakeCheckpointCoordinator(
                 ::NFq::TCoordinatorId(Params.QueryId + "-" + ToString(DqGraphIndex), Params.PreviousQueryRevision),
                 NYql::NDq::MakeCheckpointStorageID(),
@@ -1607,6 +1618,21 @@ private:
         NTasksPacker::UnPack(*request.MutableTask(), dqGraphParams.GetTasks(), dqGraphParams.GetStageProgram());
         Send(ExecuterId, new NYql::NDqs::TEvGraphRequest(request, ControlId, resultId));
         LOG_D("Executer: " << ExecuterId << ", Controller: " << ControlId << ", ResultIdActor: " << resultId);
+    }
+
+    void PrepareResultFormatSettings(NFq::NProto::TGraphParams& dqGraphParams, const TDqConfiguration& dqConfiguration) {
+        ResultFormatSettings.ConstructInPlace();
+        for (const auto& c : dqGraphParams.GetColumns()) {
+            ResultFormatSettings->Columns.push_back(c);
+        }
+
+        ResultFormatSettings->ResultType = dqGraphParams.GetResultType();
+        ResultFormatSettings->SizeLimit = dqConfiguration._AllResultsBytesLimit.Get();
+        ResultFormatSettings->RowsLimit = dqConfiguration._RowsLimitPerWrite.Get();
+    }
+
+    void ClearResultFormatSettings() {
+        ResultFormatSettings.Clear();
     }
 
     void SetupYqlCore(NYql::TYqlCoreConfig& yqlCore) const {
@@ -1790,7 +1816,7 @@ private:
                     }
                 }
 
-                Register(NYql::NDq::MakeS3ApplicatorActor(SelfId()
+                Register(Params.S3ActorsFactory->CreateS3ApplicatorActor(SelfId()
                                             , Params.S3Gateway
                                             , Params.QueryId
                                             , Params.JobId
@@ -1867,6 +1893,10 @@ private:
             issue.set_severity(NYql::TSeverityIds::S_ERROR);
         }
 
+        if (!QueryStateUpdateRequest.has_result_id() && FinalQueryStatus != FederatedQuery::QueryMeta::COMPLETED && FinalQueryStatus != FederatedQuery::QueryMeta::COMPLETING) {
+            QueryStateUpdateRequest.mutable_result_id()->set_value("");
+        }
+
         Send(Pinger, new TEvents::TEvForwardPingRequest(QueryStateUpdateRequest, true));
 
         PassAway();
@@ -1936,16 +1966,12 @@ private:
         }
 
         {
-           dataProvidersInit.push_back(GetYdbDataProviderInitializer(Params.YqSharedResources->UserSpaceYdbDriver, Params.CredentialsFactory, dbResolver));
-        }
-
-        {
-           dataProvidersInit.push_back(GetGenericDataProviderInitializer(Params.ConnectorClient, dbResolver));
+           dataProvidersInit.push_back(GetGenericDataProviderInitializer(Params.ConnectorClient, dbResolver, Params.CredentialsFactory));
         }
 
         {
            dataProvidersInit.push_back(GetS3DataProviderInitializer(Params.S3Gateway, Params.CredentialsFactory,
-                Params.Config.GetReadActorsFactoryConfig().GetS3ReadActorFactoryConfig().GetAllowLocalFiles()));
+                Params.Config.GetReadActorsFactoryConfig().HasS3ReadActorFactoryConfig() ? Params.Config.GetReadActorsFactoryConfig().GetS3ReadActorFactoryConfig().GetAllowLocalFiles() : Params.Config.GetGateways().GetS3().GetAllowLocalFiles())); // This part is for backward compatibility. TODO: remove this part after migration to TS3GatewayConfig
         }
 
         {
@@ -2252,7 +2278,6 @@ private:
     TString SessionId;
     ::NYql::NCommon::TServiceCounters QueryCounters;
     const ::NMonitoring::TDynamicCounters::TCounterPtr QueryUptime;
-    bool EnableCheckpointCoordinator = false;
     Fq::Private::PingTaskRequest QueryStateUpdateRequest;
 
     const ui64 MaxTasksPerStage;
@@ -2261,6 +2286,8 @@ private:
 
     NYql::NDqProto::EDqStatsMode StatsMode = NYql::NDqProto::EDqStatsMode::DQ_STATS_MODE_NONE;
     TMap<TString, TString> Statistics;
+
+    TMaybe<NCommon::TResultFormatSettings> ResultFormatSettings;
 
     // Consumers creation
     NActors::TActorId ReadRulesCreatorId;

@@ -11,7 +11,7 @@ using namespace NConcurrency;
 
 TStringBuf ToHttpString(EMethod method)
 {
-    switch(method) {
+    switch (method) {
 #define XX(num, name, string) case EMethod::name: return #string;
         YT_HTTP_METHOD_MAP(XX)
 #undef XX
@@ -21,7 +21,7 @@ TStringBuf ToHttpString(EMethod method)
 
 TStringBuf ToHttpString(EStatusCode code)
 {
-    switch(code) {
+    switch (code) {
 #define XX(num, name, string) case EStatusCode::name: return #string;
         YT_HTTP_STATUS_MAP(XX)
 #undef XX
@@ -131,16 +131,14 @@ const TCompactVector<TString, 1>& THeaders::GetAll(TStringBuf header) const
     return it->second.Values;
 }
 
-void THeaders::WriteTo(
-    IOutputStream* out,
-    const THashSet<TString, TCaseInsensitiveStringHasher, TCaseInsensitiveStringEqualityComparer>* filtered) const
+void THeaders::WriteTo(IOutputStream* out, const THeaderNames* filtered) const
 {
     for (const auto& [name, entry] : NameToEntry_) {
         // TODO(prime): sanitize headers
         const auto& header = entry.OriginalHeaderName;
         const auto& values = entry.Values;
 
-        if (filtered && filtered->find(header) != filtered->end()) {
+        if (filtered && filtered->contains(header)) {
             continue;
         }
 
@@ -166,11 +164,15 @@ void THeaders::MergeFrom(const THeadersPtr& headers)
     }
 }
 
-std::vector<std::pair<TString, TString>> THeaders::Dump() const
+std::vector<std::pair<TString, TString>> THeaders::Dump(const THeaderNames* filtered) const
 {
     std::vector<std::pair<TString, TString>> result;
 
     for (const auto& [name, entry] : NameToEntry_) {
+        if (filtered && filtered->contains(entry.OriginalHeaderName)) {
+            continue;
+        }
+
         for (const auto& value : entry.Values) {
             result.emplace_back(entry.OriginalHeaderName, value);
         }

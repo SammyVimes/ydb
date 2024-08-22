@@ -56,7 +56,7 @@ public:
             cluster = input->Child(TNode::idx_Cluster)->Content();
         }
 
-        if (cluster != "pg_catalog") {
+        if (cluster != "pg_catalog" && cluster != "information_schema") {
             ctx.AddError(TIssue(ctx.GetPosition(input->Pos()), TStringBuilder() << "Unexpected cluster: " << cluster));
             return TStatus::Error;
         }
@@ -107,11 +107,24 @@ public:
 
         auto tableName = input->Child(TNode::idx_Table)->Content();
         TVector<const TItemExprType*> items;
-        if (tableName == "pg_type") {
-            FillPgTypeSchema(items, ctx);
-        } else {
+        auto columnsPtr = NPg::GetStaticColumns().FindPtr(NPg::TTableInfoKey{ cluster, TString(tableName) });
+        if (!columnsPtr) {
             ctx.AddError(TIssue(ctx.GetPosition(input->Child(TPgReadTable::idx_Table)->Pos()), TStringBuilder() << "Unsupported table: " << tableName));
             return TStatus::Error;
+        }
+
+        for (const auto& c: *columnsPtr) {
+            AddColumn(items, ctx, c.Name, c.UdtType);
+        }
+
+        const auto relKind = NPg::LookupStaticTable(NPg::TTableInfoKey{ cluster, TString(tableName) }).Kind;
+        if (relKind == NPg::ERelKind::Relation) {
+            AddSystemColumn(items, ctx, "tableoid", "oid");
+            AddSystemColumn(items, ctx, "xmin", "xid");
+            AddSystemColumn(items, ctx, "cmin", "cid");
+            AddSystemColumn(items, ctx, "xmax", "xid");
+            AddSystemColumn(items, ctx, "cmax", "cid");
+            AddSystemColumn(items, ctx, "ctid", "tid");
         }
 
         TVector<TString> columnOrder;
@@ -136,17 +149,16 @@ public:
         }
 
         input->SetTypeAnn(resType);
-        return State_->Types->SetColumnOrder(*input, columnOrder, ctx);
+        return State_->Types->SetColumnOrder(*input, TColumnOrder(columnOrder), ctx);
     }
 
 private:
-    void FillPgTypeSchema(TVector<const TItemExprType*>& items, TExprContext& ctx) {
-        AddColumn(items, ctx, "oid", "oid");
-        AddColumn(items, ctx, "typname", "name");
-    }
-
     void AddColumn(TVector<const TItemExprType*>& items, TExprContext& ctx, const TString& name, const TString& type) {
         items.push_back(ctx.MakeType<TItemExprType>(name, ctx.MakeType<TPgExprType>(NPg::LookupType(type).TypeId)));
+    }
+
+    void AddSystemColumn(TVector<const TItemExprType*>& items, TExprContext& ctx, const TString& name, const TString& type) {
+        AddColumn(items, ctx, YqlVirtualPrefix + name, type);
     }
 
 private:

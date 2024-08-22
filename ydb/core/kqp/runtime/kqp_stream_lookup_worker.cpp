@@ -3,6 +3,8 @@
 #include <ydb/core/kqp/common/kqp_resolve.h>
 #include <ydb/core/kqp/runtime/kqp_scan_data.h>
 #include <ydb/core/tx/datashard/range_ops.h>
+#include <ydb/core/scheme/protos/type_info.pb.h>
+#include <ydb/public/api/protos/ydb_status_codes.pb.h>
 
 #include <ydb/library/yql/minikql/mkql_node_serialization.h>
 
@@ -140,7 +142,8 @@ TKqpStreamLookupWorker::TKqpStreamLookupWorker(NKikimrKqp::TKqpStreamLookupSetti
     , HolderFactory(holderFactory)
     , InputDesc(inputDesc)
     , TablePath(settings.GetTable().GetPath())
-    , TableId(MakeTableId(settings.GetTable())) {
+    , TableId(MakeTableId(settings.GetTable()))
+    , Strategy(settings.GetLookupStrategy()) {
 
     KeyColumns.reserve(settings.GetKeyColumns().size());
     i32 keyOrder = 0;
@@ -150,8 +153,13 @@ TKqpStreamLookupWorker::TKqpStreamLookupWorker(NKikimrKqp::TKqpStreamLookupSetti
             TSysTables::TTableColumnInfo{
                 keyColumn.GetName(),
                 keyColumn.GetId(),
-                NScheme::TTypeInfo{static_cast<NScheme::TTypeId>(keyColumn.GetTypeId())},
-                "",
+                NScheme::TTypeInfo{
+                    static_cast<NScheme::TTypeId>(keyColumn.GetTypeId()),
+                    keyColumn.GetTypeId() == NScheme::NTypeIds::Pg
+                        ? NPg::TypeDescFromPgTypeId(keyColumn.GetTypeInfo().GetPgTypeId())
+                        : nullptr
+                },
+                keyColumn.GetTypeInfo().GetPgTypeMod(),
                 keyOrder++
             }
         );
@@ -169,7 +177,12 @@ TKqpStreamLookupWorker::TKqpStreamLookupWorker(NKikimrKqp::TKqpStreamLookupSetti
         Columns.emplace_back(TSysTables::TTableColumnInfo{
             column.GetName(),
             column.GetId(),
-            NScheme::TTypeInfo{static_cast<NScheme::TTypeId>(column.GetTypeId())}
+            NScheme::TTypeInfo{static_cast<NScheme::TTypeId>(column.GetTypeId()),
+                column.GetTypeId() == NScheme::NTypeIds::Pg
+                    ? NPg::TypeDescFromPgTypeId(column.GetTypeInfo().GetPgTypeId())
+                    : nullptr,
+            },
+            column.GetTypeInfo().GetPgTypeMod()
         });
     }
 }
@@ -228,6 +241,59 @@ public:
             // full pk, build point
             UnprocessedKeys.emplace_back(std::move(keyCells));
         }
+    }
+
+    std::vector<THolder<TEvDataShard::TEvRead>> RebuildRequest(const ui64& prevReadId, ui32 firstUnprocessedQuery, 
+        TMaybe<TOwnedCellVec> lastProcessedKey, ui64& newReadId) final {
+
+        auto it = PendingKeysByReadId.find(prevReadId);
+        if (it == PendingKeysByReadId.end()) {
+            return {};
+        }
+
+        std::vector<TOwnedTableRange> unprocessedRanges;
+        std::vector<TOwnedTableRange> unprocessedPoints;
+
+        auto& ranges = it->second;
+
+        if (lastProcessedKey) {
+            YQL_ENSURE(firstUnprocessedQuery < ranges.size());
+            auto unprocessedRange = ranges[firstUnprocessedQuery];
+            YQL_ENSURE(!unprocessedRange.Point);
+
+            unprocessedRanges.emplace_back(*lastProcessedKey, false,
+                unprocessedRange.GetOwnedTo(), unprocessedRange.InclusiveTo);
+            ++firstUnprocessedQuery;
+        }
+
+        for (ui32 i = firstUnprocessedQuery; i < ranges.size(); ++i) {
+            if (ranges[i].Point) {
+                unprocessedPoints.emplace_back(std::move(ranges[i]));
+            } else {
+                unprocessedRanges.emplace_back(std::move(ranges[i]));
+            }
+        }
+
+        PendingKeysByReadId.erase(it);
+
+        std::vector<THolder<TEvDataShard::TEvRead>> requests;
+        requests.reserve(unprocessedPoints.size() + unprocessedRanges.size());
+
+        if (!unprocessedPoints.empty()) {
+            THolder<TEvDataShard::TEvRead> request(new TEvDataShard::TEvRead());
+            FillReadRequest(++newReadId, request, unprocessedPoints);
+            requests.emplace_back(std::move(request));
+            PendingKeysByReadId.insert({newReadId, std::move(unprocessedPoints)});
+        }
+
+        if (!unprocessedRanges.empty()) {
+            THolder<TEvDataShard::TEvRead> request(new TEvDataShard::TEvRead());
+            FillReadRequest(++newReadId, request, unprocessedRanges);
+            requests.emplace_back(std::move(request));
+            PendingKeysByReadId.insert({newReadId, std::move(unprocessedRanges)});
+        }
+        
+        return requests;
     }
 
     TReadList BuildRequests(const TPartitionInfo& partitioning, ui64& readId) final {
@@ -344,7 +410,9 @@ public:
 
     void ResetRowsProcessing(ui64 readId, ui32 firstUnprocessedQuery, TMaybe<TOwnedCellVec> lastProcessedKey) final {
         auto it = PendingKeysByReadId.find(readId);
-        YQL_ENSURE(it != PendingKeysByReadId.end());
+        if (it == PendingKeysByReadId.end()) {
+            return;
+        }
 
         if (lastProcessedKey) {
             YQL_ENSURE(firstUnprocessedQuery < it->second.size());
@@ -426,14 +494,87 @@ public:
     void AddInputRow(NUdf::TUnboxedValue inputRow) final {
         auto joinKey = inputRow.GetElement(0);
         std::vector<TCell> joinKeyCells(LookupKeyColumns.size());
-        for (size_t colId = 0; colId < LookupKeyColumns.size(); ++colId) {
-            const auto* joinKeyColumn = LookupKeyColumns[colId];
-            YQL_ENSURE(joinKeyColumn->KeyOrder < static_cast<i64>(joinKeyCells.size()));
-            joinKeyCells[joinKeyColumn->KeyOrder] = MakeCell(joinKeyColumn->PType,
-                joinKey.GetElement(colId), TypeEnv, true);
+
+        if (joinKey.HasValue()) {
+            for (size_t colId = 0; colId < LookupKeyColumns.size(); ++colId) {
+                const auto* joinKeyColumn = LookupKeyColumns[colId];
+                YQL_ENSURE(joinKeyColumn->KeyOrder < static_cast<i64>(joinKeyCells.size()));
+                joinKeyCells[joinKeyColumn->KeyOrder] = MakeCell(joinKeyColumn->PType,
+                    joinKey.GetElement(colId), TypeEnv, true);
+            }
         }
 
         UnprocessedRows.emplace_back(std::make_pair(TOwnedCellVec(joinKeyCells), std::move(inputRow.GetElement(1))));
+    }
+
+    std::vector<THolder<TEvDataShard::TEvRead>> RebuildRequest(const ui64& prevReadId, ui32 firstUnprocessedQuery, 
+        TMaybe<TOwnedCellVec> lastProcessedKey, ui64& newReadId) final {
+
+        auto readIt = PendingKeysByReadId.find(prevReadId);
+        if (readIt == PendingKeysByReadId.end()) {
+            return {};
+        }
+
+        std::vector<TOwnedTableRange> unprocessedRanges;
+        std::vector<TOwnedTableRange> unprocessedPoints;
+
+        auto& ranges = readIt->second;
+
+        if (lastProcessedKey) {
+            YQL_ENSURE(firstUnprocessedQuery < ranges.size());
+            auto unprocessedRange = ranges[firstUnprocessedQuery];
+            YQL_ENSURE(!unprocessedRange.Point);
+
+            unprocessedRanges.emplace_back(*lastProcessedKey, false,
+                unprocessedRange.GetOwnedTo(), unprocessedRange.InclusiveTo);
+            ++firstUnprocessedQuery;
+        }
+
+        for (ui32 i = firstUnprocessedQuery; i < ranges.size(); ++i) {
+            auto leftRowIt = PendingLeftRowsByKey.find(ExtractKeyPrefix(ranges[i]));
+            YQL_ENSURE(leftRowIt != PendingLeftRowsByKey.end());
+            leftRowIt->second.PendingReads.erase(prevReadId);
+
+            if (ranges[i].Point) {
+                unprocessedPoints.emplace_back(std::move(ranges[i]));
+            } else {
+                unprocessedRanges.emplace_back(std::move(ranges[i]));
+            }
+        }
+
+        PendingKeysByReadId.erase(readIt);
+
+        std::vector<THolder<TEvDataShard::TEvRead>> readRequests;
+
+        if (!unprocessedPoints.empty()) {
+            THolder<TEvDataShard::TEvRead> request(new TEvDataShard::TEvRead());
+            FillReadRequest(++newReadId, request, unprocessedPoints);
+            readRequests.emplace_back(std::move(request));
+
+            for (const auto& point : unprocessedPoints) {
+                auto rowIt = PendingLeftRowsByKey.find(point.From);
+                YQL_ENSURE(rowIt != PendingLeftRowsByKey.end());
+                rowIt->second.PendingReads.insert(newReadId);
+            }
+
+            PendingKeysByReadId.insert({newReadId, std::move(unprocessedPoints)});
+        }
+
+        if (!unprocessedRanges.empty()) {
+            THolder<TEvDataShard::TEvRead> request(new TEvDataShard::TEvRead());
+            FillReadRequest(++newReadId, request, unprocessedRanges);
+            readRequests.emplace_back(std::move(request));
+
+            for (const auto& range : unprocessedRanges) {
+                auto rowIt = PendingLeftRowsByKey.find(ExtractKeyPrefix(range));
+                YQL_ENSURE(rowIt != PendingLeftRowsByKey.end());
+                rowIt->second.PendingReads.insert(newReadId);
+            }
+
+            PendingKeysByReadId.insert({newReadId, std::move(unprocessedRanges)});
+        }
+
+        return readRequests;
     }
 
     TReadList BuildRequests(const TPartitionInfo& partitioning, ui64& readId) final {
@@ -464,9 +605,18 @@ public:
                 break;
             }
 
-            UnprocessedRows.pop_front();
+            auto hasNulls = [](const TOwnedCellVec& cellVec) {
+                for (const auto& cell : cellVec) {
+                    if (cell.IsNull()) {
+                        return true;
+                    }
+                }
 
-            if (!joinKey.data()->IsNull()) {  // don't use nulls as lookup keys, because null != null
+                return false;
+            };
+
+            UnprocessedRows.pop_front();
+            if (!hasNulls(joinKey)) {  // don't use nulls as lookup keys, because null != null
                 std::vector <std::pair<ui64, TOwnedTableRange>> partitions;
                 if (joinKey.size() < KeyColumns.size()) {
                     // build prefix range [[key_prefix, NULL, ..., NULL], [key_prefix, +inf, ..., +inf])
@@ -549,7 +699,10 @@ public:
 
     void ResetRowsProcessing(ui64 readId, ui32 firstUnprocessedQuery, TMaybe<TOwnedCellVec> lastProcessedKey) final {
         auto readIt = PendingKeysByReadId.find(readId);
-        YQL_ENSURE(readIt != PendingKeysByReadId.end());
+        if (readIt == PendingKeysByReadId.end()) {
+            return;
+        }
+
         auto& ranges = readIt->second;
 
         if (lastProcessedKey) {
@@ -590,11 +743,16 @@ public:
                 for (size_t joinKeyIdx = 0; joinKeyIdx < LookupKeyColumns.size(); ++joinKeyIdx) {
                     auto it = ReadColumns.find(LookupKeyColumns[joinKeyIdx]->Name);
                     YQL_ENSURE(it != ReadColumns.end());
-                    joinKeyCells[joinKeyIdx] = row[std::distance(ReadColumns.begin(), it)];
+                    joinKeyCells[LookupKeyColumns[joinKeyIdx]->KeyOrder] = row[std::distance(ReadColumns.begin(), it)];
                 }
 
                 auto leftRowIt = PendingLeftRowsByKey.find(joinKeyCells);
                 YQL_ENSURE(leftRowIt != PendingLeftRowsByKey.end());
+
+                if (Strategy == NKqpProto::EStreamLookupStrategy::SEMI_JOIN && leftRowIt->second.RightRowExist) {
+                    // Semi join should return one result row per key
+                    continue;
+                }
 
                 TReadResultStats rowStats;
                 i64 availableSpace = freeSpace - (i64)resultStats.ResultBytesCount;
@@ -779,7 +937,8 @@ private:
             resultRowItems[1] = NUdf::TUnboxedValuePod();
         }
 
-        rowStats.ReadRowsCount += (rightRowSize > 0 ? 1 : 0);
+        rowStats.ReadRowsCount += (leftRowInfo.RightRowExist ? 1 : 0);
+        // TODO: use datashard statistics KIKIMR-16924
         rowStats.ReadBytesCount += rightRowSize;
         rowStats.ResultRowsCount += 1;
         rowStats.ResultBytesCount += leftRowSize + rightRowSize;
@@ -809,6 +968,7 @@ std::unique_ptr<TKqpStreamLookupWorker> CreateStreamLookupWorker(NKikimrKqp::TKq
         case NKqpProto::EStreamLookupStrategy::LOOKUP:
             return std::make_unique<TKqpLookupRows>(std::move(settings), typeEnv, holderFactory, inputDesc);
         case NKqpProto::EStreamLookupStrategy::JOIN:
+        case NKqpProto::EStreamLookupStrategy::SEMI_JOIN:
             return std::make_unique<TKqpJoinRows>(std::move(settings), typeEnv, holderFactory, inputDesc);
         default:
             return {};

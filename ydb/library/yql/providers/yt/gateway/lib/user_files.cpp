@@ -1,6 +1,7 @@
 #include "user_files.h"
 
 #include <ydb/library/yql/providers/yt/common/yql_names.h>
+#include <ydb/library/yql/providers/common/provider/yql_provider.h>
 #include <ydb/library/yql/utils/log/log.h>
 #include <ydb/library/yql/utils/yql_panic.h>
 
@@ -26,6 +27,17 @@ void TUserFiles::AddFile(const TUserDataKey& key, const TUserDataBlock& block) {
 
     TFileInfo userFile;
     userFile.IsUdf = block.Usage.Test(EUserDataBlockUsage::Udf);
+    userFile.IsPgExt = block.Usage.Test(EUserDataBlockUsage::PgExt);
+    userFile.IsPgCatalog = (key.Alias() == NCommon::PgCatalogFileName);
+
+    if (block.Options.contains("bypass_artifact_cache")) {
+        auto option = block.Options.at(TString("bypass_artifact_cache"));
+        try {
+            userFile.BypassArtifactCache = FromString<bool>(option);
+        } catch (const TFromStringException &) {
+            YQL_LOG_CTX_THROW yexception() << "FileOption: invalid value for option bypass_artifact_cache: " << option;
+        }
+    }
 
     // we can optimize file copy if file resides on the same cluster
     // and provide only link
@@ -89,8 +101,6 @@ inline bool TUserFiles::IsEmpty() const {
     auto guard = Guard(Mutex);
     return Files.empty();
 }
-
-
 
 } // NYql
 

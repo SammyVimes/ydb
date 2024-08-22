@@ -39,13 +39,14 @@ namespace NYT::NApi::NRpcProxy {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-using namespace NYPath;
-using namespace NYson;
+using namespace NConcurrency;
+using namespace NObjectClient;
 using namespace NTableClient;
 using namespace NTabletClient;
-using namespace NObjectClient;
 using namespace NTransactionClient;
+using namespace NYPath;
 using namespace NYTree;
+using namespace NYson;
 
 using NYT::ToProto;
 using NYT::FromProto;
@@ -141,6 +142,13 @@ TFuture<ITransactionPtr> TClientBase::StartTransaction(
         ToProto(req->mutable_parent_id(), options.ParentId);
     }
     ToProto(req->mutable_prerequisite_transaction_ids(), options.PrerequisiteTransactionIds);
+
+    if (options.ReplicateToMasterCellTags) {
+        ToProto(
+            req->mutable_replicate_to_master_cell_tags()->mutable_cell_tags(),
+            *options.ReplicateToMasterCellTags);
+    }
+
     // XXX(sandello): Better? Remove these fields from the protocol at all?
     // COMPAT(kiselyovp): remove auto_abort from the protocol
     req->set_auto_abort(false);
@@ -384,7 +392,7 @@ TFuture<void> TClientBase::MultisetAttributesNode(
     std::sort(children.begin(), children.end());
     for (const auto& [attribute, value] : children) {
         auto* protoSubrequest = req->add_subrequests();
-        protoSubrequest->set_attribute(attribute);
+        protoSubrequest->set_attribute(ToProto<TProtobufString>(attribute));
         protoSubrequest->set_value(ConvertToYsonString(value).ToString());
     }
 
@@ -740,7 +748,10 @@ TFuture<ITableReaderPtr> TClientBase::CreateTableReader(
     ToProto(req->mutable_transactional_options(), options);
     ToProto(req->mutable_suppressable_access_tracking_options(), options);
 
-    return NRpcProxy::CreateTableReader(std::move(req));
+    return NRpc::CreateRpcClientInputStream(std::move(req))
+        .Apply(BIND([=] (IAsyncZeroCopyInputStreamPtr inputStream) {
+            return NRpcProxy::CreateTableReader(std::move(inputStream));
+        }));
 }
 
 TFuture<ITableWriterPtr> TClientBase::CreateTableWriter(
@@ -759,7 +770,20 @@ TFuture<ITableWriterPtr> TClientBase::CreateTableWriter(
 
     ToProto(req->mutable_transactional_options(), options);
 
-    return NRpcProxy::CreateTableWriter(std::move(req));
+    auto schema = New<TTableSchema>();
+    return NRpc::CreateRpcClientOutputStream(
+        std::move(req),
+        BIND ([=] (const TSharedRef& metaRef) {
+            NApi::NRpcProxy::NProto::TWriteTableMeta meta;
+            if (!TryDeserializeProto(&meta, metaRef)) {
+                THROW_ERROR_EXCEPTION("Failed to deserialize schema for table writer");
+            }
+
+            FromProto(schema.Get(), meta.schema());
+        }))
+        .Apply(BIND([=] (IAsyncZeroCopyOutputStreamPtr outputStream) {
+            return NRpcProxy::CreateTableWriter(std::move(outputStream), std::move(schema));
+        })).As<ITableWriterPtr>();
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -854,11 +878,12 @@ TFuture<TVersionedLookupRowsResult> TClientBase::VersionedLookupRows(
             MergeRefsToRef<TRpcProxyClientBufferTag>(rsp->Attachments()));
         return TVersionedLookupRowsResult{
             .Rowset = std::move(rowset),
+            .UnavailableKeyIndexes = FromProto<std::vector<int>>(rsp->unavailable_key_indexes()),
         };
     }));
 }
 
-TFuture<std::vector<TUnversionedLookupRowsResult>> TClientBase::MultiLookup(
+TFuture<std::vector<TUnversionedLookupRowsResult>> TClientBase::MultiLookupRows(
     const std::vector<TMultiLookupSubrequest>& subrequests,
     const TMultiLookupOptions& options)
 {
@@ -928,6 +953,7 @@ TFuture<std::vector<TUnversionedLookupRowsResult>> TClientBase::MultiLookup(
                 MergeRefsToRef<TRpcProxyClientBufferTag>(std::move(subresponseAttachments)));
             result.push_back({
                 .Rowset = std::move(rowset),
+                .UnavailableKeyIndexes = FromProto<std::vector<int>>(subresponse.unavailable_key_indexes()),
             });
 
             beginAttachmentIndex = endAttachmentIndex;
@@ -950,6 +976,7 @@ void FillRequestBySelectRowsOptionsBase(
     } else if (defaultUdfRegistryPath) {
         request->set_udf_registry_path(*defaultUdfRegistryPath);
     }
+    request->set_syntax_version(options.SyntaxVersion);
 }
 
 TFuture<TSelectRowsResult> TClientBase::SelectRows(
@@ -998,13 +1025,16 @@ TFuture<TSelectRowsResult> TClientBase::SelectRows(
     req->set_fail_on_incomplete_result(options.FailOnIncompleteResult);
     req->set_verbose_logging(options.VerboseLogging);
     req->set_new_range_inference(options.NewRangeInference);
+    if (options.ExecutionBackend) {
+        req->set_execution_backend(static_cast<int>(*options.ExecutionBackend));
+    }
     req->set_enable_code_cache(options.EnableCodeCache);
     req->set_memory_limit_per_node(options.MemoryLimitPerNode);
     ToProto(req->mutable_suppressable_access_tracking_options(), options);
     req->set_replica_consistency(static_cast<NProto::EReplicaConsistency>(options.ReplicaConsistency));
-    if (options.UseCanonicalNullRelations) {
-        req->set_use_canonical_null_relations(options.UseCanonicalNullRelations);
-    }
+    req->set_use_canonical_null_relations(options.UseCanonicalNullRelations);
+    req->set_merge_versioned_rows(options.MergeVersionedRows);
+    ToProto(req->mutable_versioned_read_options(), options.VersionedReadOptions);
 
     return req->Invoke().Apply(BIND([] (const TApiServiceProxy::TRspSelectRowsPtr& rsp) {
         TSelectRowsResult result;
@@ -1048,7 +1078,7 @@ TFuture<TPullRowsResult> TClientBase::PullRows(
         req->set_upper_timestamp(options.UpperTimestamp);
     }
     for (auto [tabletId, rowIndex] : options.StartReplicationRowIndexes) {
-        auto *protoReplicationRowIndex = req->add_start_replication_row_indexes();
+        auto* protoReplicationRowIndex = req->add_start_replication_row_indexes();
         ToProto(protoReplicationRowIndex->mutable_tablet_id(), tabletId);
         protoReplicationRowIndex->set_row_index(rowIndex);
     }
@@ -1067,7 +1097,7 @@ TFuture<TPullRowsResult> TClientBase::PullRows(
                 THROW_ERROR_EXCEPTION("Duplicate tablet id in end replication row indexes")
                     << TErrorAttribute("tablet_id", tabletId);
             }
-            InsertOrCrash(result.EndReplicationRowIndexes, std::make_pair(tabletId, rowIndex));
+            InsertOrCrash(result.EndReplicationRowIndexes, std::pair(tabletId, rowIndex));
         }
 
         result.Rowset = DeserializeRowset(

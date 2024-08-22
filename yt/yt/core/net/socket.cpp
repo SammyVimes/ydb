@@ -113,8 +113,8 @@ SOCKET CreateTcpServerSocket()
             auto lastError = LastSystemError();
             SafeClose(serverSocket, false);
             THROW_ERROR_EXCEPTION(
-               NRpc::EErrorCode::TransportError,
-               "Failed to configure IPv6 protocol")
+                NRpc::EErrorCode::TransportError,
+                "Failed to configure IPv6 protocol")
                 << TError::FromSystem(lastError);
         }
     }
@@ -356,7 +356,8 @@ int AcceptSocket(SOCKET serverSocket, TNetworkAddress* clientAddress)
 #endif
 
     if (clientSocket == INVALID_SOCKET) {
-        if (LastSystemError() != EAGAIN && LastSystemError() != EWOULDBLOCK && LastSystemError() != ECONNABORTED) {
+        auto error = LastSystemError();
+        if (error != EAGAIN && error != EWOULDBLOCK && error != ECONNABORTED && error != EMFILE) {
             // ECONNABORTED means, that a socket on the listen
             // queue was closed before we Accept()ed it; ignore it.
             THROW_ERROR_EXCEPTION(

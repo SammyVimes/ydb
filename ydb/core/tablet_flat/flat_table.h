@@ -13,6 +13,7 @@
 #include "flat_table_stats.h"
 #include "flat_table_subset.h"
 #include "flat_table_misc.h"
+#include "flat_table_observer.h"
 #include "flat_sausage_solid.h"
 #include "util_basics.h"
 
@@ -30,6 +31,7 @@ namespace NTable {
 
 class TTableEpochs;
 class TKeyRangeCache;
+class TKeyRangeCacheNeedGCList;
 
 class TTable: public TAtomicRefCount<TTable> {
 public:
@@ -63,7 +65,7 @@ public:
         TIteratorStats Stats;
     };
 
-    explicit TTable(TEpoch);
+    explicit TTable(TEpoch, const TIntrusivePtr<TKeyRangeCacheNeedGCList>& gcList = nullptr);
     ~TTable();
 
     void PrepareRollback();
@@ -135,16 +137,16 @@ public:
 
     TVector<TIntrusiveConstPtr<TMemTable>> GetMemTables() const noexcept;
 
-    TAutoPtr<TTableIt> Iterate(TRawVals key, TTagsRef tags, IPages* env, ESeek,
+    TAutoPtr<TTableIter> Iterate(TRawVals key, TTagsRef tags, IPages* env, ESeek,
             TRowVersion snapshot,
             const ITransactionMapPtr& visible = nullptr,
             const ITransactionObserverPtr& observer = nullptr) const noexcept;
-    TAutoPtr<TTableReverseIt> IterateReverse(TRawVals key, TTagsRef tags, IPages* env, ESeek,
+    TAutoPtr<TTableReverseIter> IterateReverse(TRawVals key, TTagsRef tags, IPages* env, ESeek,
             TRowVersion snapshot,
             const ITransactionMapPtr& visible = nullptr,
             const ITransactionObserverPtr& observer = nullptr) const noexcept;
     EReady Select(TRawVals key, TTagsRef tags, IPages* env, TRowState& row,
-                  ui64 flg, TRowVersion snapshot, TDeque<TPartSimpleIt>& tempIterators,
+                  ui64 flg, TRowVersion snapshot, TDeque<TPartIter>& tempIterators,
                   TSelectStats& stats,
                   const ITransactionMapPtr& visible = nullptr,
                   const ITransactionObserverPtr& observer = nullptr) const noexcept;
@@ -322,7 +324,7 @@ public:
 
     TCompactionStats GetCompactionStats() const;
 
-    void FillTxStatusCache(THashMap<TLogoBlobID, TSharedData>& cache) const noexcept;
+    void SetTableObserver(TIntrusivePtr<ITableObserver> ptr) noexcept;
 
 private:
     TMemTable& MemTable();
@@ -350,6 +352,7 @@ private:
 
     bool EraseCacheEnabled = false;
     TKeyRangeCacheConfig EraseCacheConfig;
+    const TIntrusivePtr<TKeyRangeCacheNeedGCList> EraseCacheGCList;
 
     TRowVersionRanges RemovedRowVersions;
 
@@ -358,6 +361,8 @@ private:
     absl::flat_hash_set<ui64> CheckTransactions;
     TTransactionMap CommittedTransactions;
     TTransactionSet RemovedTransactions;
+    TTransactionSet DecidedTransactions;
+    TIntrusivePtr<ITableObserver> TableObserver;
 
 private:
     struct TRollbackRemoveTxRef {
@@ -398,6 +403,13 @@ private:
         TRollbackAddOpenTx,
         TRollbackRemoveOpenTx>;
 
+    struct TCommitAddDecidedTx {
+        ui64 TxId;
+    };
+
+    using TCommitOp = std::variant<
+        TCommitAddDecidedTx>;
+
     struct TRollbackState {
         TEpoch Epoch;
         TIntrusiveConstPtr<TRowScheme> Scheme;
@@ -406,6 +418,7 @@ private:
         bool EraseCacheEnabled;
         bool MutableExisted;
         bool MutableUpdated;
+        bool DisableEraseCache;
 
         TRollbackState(TEpoch epoch)
             : Epoch(epoch)
@@ -413,6 +426,7 @@ private:
     };
 
     std::optional<TRollbackState> RollbackState;
+    std::vector<TCommitOp> CommitOps;
     std::vector<TRollbackOp> RollbackOps;
     TIntrusivePtr<TMemTable> MutableBackup;
 };

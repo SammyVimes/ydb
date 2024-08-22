@@ -364,9 +364,9 @@ TString GetJobStderrWithRetriesAndIgnoreErrors(
             options);
     } catch (const TErrorResponse& e) {
         YT_LOG_ERROR("Cannot get job stderr (OperationId: %v, JobId: %v, Error: %v)",
-                  operationId,
-                  jobId,
-                  e.what());
+            operationId,
+            jobId,
+            e.what());
     }
     if (jobStderr.size() > stderrTailSize) {
         jobStderr = jobStderr.substr(jobStderr.size() - stderrTailSize, stderrTailSize);
@@ -753,10 +753,11 @@ void BuildUserJobFluently(
         })
         .Item("profilers")
             .BeginList()
-            .DoFor(userJobSpec.JobProfilers_, [&] (TFluentList list, const auto& jobProfiler) {
-                list.Item().Value(BuildJobProfilerSpec(jobProfiler));
-            })
-            .EndList();
+                .DoFor(userJobSpec.JobProfilers_, [&] (TFluentList list, const auto& jobProfiler) {
+                    list.Item().Value(BuildJobProfilerSpec(jobProfiler));
+                })
+            .EndList()
+        .Item("redirect_stdout_to_stderr").Value(preparer.ShouldRedirectStdoutToStderr());
 }
 
 template <typename T>
@@ -1605,12 +1606,12 @@ void ExecuteMapReduce(
         auto nodeReaderFormat = NodeReaderFormatFromHintAndGlobalConfig(spec.MapperFormatHints_);
 
         auto [inputFormat, inputFormatConfig] = formatBuilder.CreateFormat(
-           *mapper,
-           EIODirection::Input,
-           structuredInputs,
-           hints.InputFormatHints_,
-           nodeReaderFormat,
-           /* allowFormatFromTableAttribute */ true);
+            *mapper,
+            EIODirection::Input,
+            structuredInputs,
+            hints.InputFormatHints_,
+            nodeReaderFormat,
+            /* allowFormatFromTableAttribute */ true);
 
         auto [outputFormat, outputFormatConfig] = formatBuilder.CreateFormat(
             *mapper,

@@ -3,6 +3,8 @@
 #include "common.h"
 #include "error_code.h"
 
+#include <library/cpp/yt/misc/concepts.h>
+
 // Google Protobuf forward declarations.
 namespace google::protobuf {
 
@@ -43,6 +45,11 @@ class TDataStatistics;
 class TExtensionSet;
 
 } // namespace NProto
+
+struct TExponentialBackoffOptions;
+struct TConstantBackoffOptions;
+
+class TBackoffStrategy;
 
 struct TGuid;
 
@@ -95,8 +102,6 @@ DECLARE_REFCOUNTED_CLASS(TAsyncExpiringCacheConfig)
 DECLARE_REFCOUNTED_CLASS(TLogDigestConfig)
 DECLARE_REFCOUNTED_CLASS(THistogramDigestConfig)
 
-DECLARE_REFCOUNTED_CLASS(THistoricUsageConfig)
-
 class TSignalRegistry;
 
 class TBloomFilterBuilder;
@@ -135,7 +140,13 @@ using TInternedObjectDataPtr = TIntrusivePtr<TInternedObjectData<T>>;
 template <class T>
 class TInternedObject;
 
-DECLARE_REFCOUNTED_STRUCT(IMemoryUsageTracker)
+namespace NStatisticPath {
+
+class TStatisticPathLiteral;
+class TStatisticPath;
+struct TStatisticPathSerializer;
+
+} // namespace NStatisticPath
 
 class TStatistics;
 class TSummary;
@@ -164,19 +175,13 @@ DEFINE_ENUM(EProcessErrorCode,
     ((NonZeroExitCode)    (10000))
     ((Signal)             (10001))
     ((CannotResolveBinary)(10002))
+    ((CannotStartProcess) (10003))
 );
 
 ////////////////////////////////////////////////////////////////////////////////
 
-DECLARE_REFCOUNTED_STRUCT(IMemoryReferenceTracker)
-
-////////////////////////////////////////////////////////////////////////////////
-
-template <class TObject, class TScalar>
-concept CScalable = requires (TObject object, TScalar scalar)
-{
-    { object * scalar } -> std::same_as<TObject>;
-};
+DECLARE_REFCOUNTED_STRUCT(IMemoryUsageTracker)
+DECLARE_REFCOUNTED_STRUCT(IReservingMemoryUsageTracker)
 
 ////////////////////////////////////////////////////////////////////////////////
 

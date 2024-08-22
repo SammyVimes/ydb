@@ -23,21 +23,6 @@ using namespace NApi::NRpcProxy;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-bool TProxyDiscoveryRequest::operator==(const TProxyDiscoveryRequest& other) const
-{
-    return
-        Type == other.Type &&
-        Role == other.Role &&
-        AddressType == other.AddressType &&
-        NetworkName == other.NetworkName &&
-        IgnoreBalancers == other.IgnoreBalancers;
-}
-
-bool TProxyDiscoveryRequest::operator!=(const TProxyDiscoveryRequest& other) const
-{
-    return !(*this == other);
-}
-
 TProxyDiscoveryRequest::operator size_t() const
 {
     return MultiHash(
@@ -60,11 +45,6 @@ void FormatValue(TStringBuilderBase* builder, const TProxyDiscoveryRequest& requ
         request.IgnoreBalancers);
 }
 
-TString ToString(const TProxyDiscoveryRequest& request)
-{
-    return ToStringViaBuilder(request);
-}
-
 ////////////////////////////////////////////////////////////////////////////////
 
 class TProxyDiscoveryCache
@@ -77,7 +57,7 @@ public:
         IClientPtr client)
         : TAsyncExpiringCache(
             std::move(config),
-            DriverLogger.WithTag("Cache: ProxyDiscovery"))
+            DriverLogger().WithTag("Cache: ProxyDiscovery"))
         , Client_(std::move(client))
     { }
 

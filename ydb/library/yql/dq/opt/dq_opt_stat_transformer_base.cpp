@@ -7,8 +7,8 @@ namespace NYql::NDq {
 
 using namespace NNodes;
 
-TDqStatisticsTransformerBase::TDqStatisticsTransformerBase(TTypeAnnotationContext* typeCtx)
-    : TypeCtx(typeCtx)
+TDqStatisticsTransformerBase::TDqStatisticsTransformerBase(TTypeAnnotationContext* typeCtx, const IProviderContext& ctx, TCardinalityHints hints)
+    : TypeCtx(typeCtx), Pctx(ctx), CardinalityHints(hints)
 { }
 
 IGraphTransformer::TStatus TDqStatisticsTransformerBase::DoTransform(TExprNode::TPtr input, TExprNode::TPtr& output, TExprContext& ctx) {
@@ -52,13 +52,18 @@ bool TDqStatisticsTransformerBase::BeforeLambdas(const TExprNode::TPtr& input, T
     else if(TCoAggregateMergeFinalize::Match(input.Get())){
         InferStatisticsForAggregateMergeFinalize(input, TypeCtx);
     }
+    else if (TCoAsList::Match(input.Get())){
+        InferStatisticsForAsList(input, TypeCtx);
+    }
+    else if (TCoParameter::Match(input.Get()) && InferStatisticsForListParam(input, TypeCtx)) {
+    }
 
     // Join matchers
     else if(TCoMapJoinCore::Match(input.Get())) {
-        InferStatisticsForMapJoin(input, TypeCtx);
+        InferStatisticsForMapJoin(input, TypeCtx, Pctx, CardinalityHints);
     }
     else if(TCoGraceJoinCore::Match(input.Get())) {
-        InferStatisticsForGraceJoin(input, TypeCtx);
+        InferStatisticsForGraceJoin(input, TypeCtx, Pctx, CardinalityHints);
     }
 
     // Do nothing in case of EquiJoin, otherwise the EquiJoin rule won't fire

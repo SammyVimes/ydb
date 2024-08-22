@@ -137,13 +137,13 @@ public:
         const NQueueClient::TQueueRowBatchReadOptions& rowBatchReadOptions,
         const TPullQueueOptions& options = {}) override;
 
-    TFuture<NQueueClient::IQueueRowsetPtr> PullConsumer(
+    TFuture<NQueueClient::IQueueRowsetPtr> PullQueueConsumer(
         const NYPath::TRichYPath& consumerPath,
         const NYPath::TRichYPath& queuePath,
-        i64 offset,
+        std::optional<i64> offset,
         int partitionIndex,
         const NQueueClient::TQueueRowBatchReadOptions& rowBatchReadOptions,
-        const TPullConsumerOptions& options = {}) override;
+        const TPullQueueConsumerOptions& options = {}) override;
 
     TFuture<void> RegisterQueueConsumer(
         const NYPath::TRichYPath& queuePath,
@@ -160,6 +160,18 @@ public:
         const std::optional<NYPath::TRichYPath>& queuePath,
         const std::optional<NYPath::TRichYPath>& consumerPath,
         const TListQueueConsumerRegistrationsOptions& options = {}) override;
+
+    TFuture<TCreateQueueProducerSessionResult> CreateQueueProducerSession(
+        const NYPath::TRichYPath& producerPath,
+        const NYPath::TRichYPath& queuePath,
+        const NQueueClient::TQueueProducerSessionId& sessionId,
+        const TCreateQueueProducerSessionOptions& options = {}) override;
+
+    TFuture<void> RemoveQueueProducerSession(
+        const NYPath::TRichYPath& producerPath,
+        const NYPath::TRichYPath& queuePath,
+        const NQueueClient::TQueueProducerSessionId& sessionId,
+        const TRemoveQueueProducerSessionOptions& options = {}) override;
 
     // Files.
     TFuture<NApi::TGetFileFromCacheResult> GetFileFromCache(
@@ -292,6 +304,12 @@ public:
         NJobTrackerClient::TJobId jobId,
         const NApi::TAbortJobOptions& options) override;
 
+    TFuture<void> DumpJobProxyLog(
+        NJobTrackerClient::TJobId jobId,
+        NJobTrackerClient::TOperationId operationId,
+        const NYPath::TYPath& path,
+        const NApi::TDumpJobProxyLogOptions& options) override;
+
     // Metadata.
     TFuture<NApi::TClusterMeta> GetClusterMeta(
         const NApi::TGetClusterMetaOptions&) override;
@@ -322,6 +340,9 @@ public:
 
     TFuture<TCellIdToSnapshotIdMap> BuildMasterSnapshots(
         const TBuildMasterSnapshotsOptions& options) override;
+
+    TFuture<TCellIdToConsistentStateMap> GetMasterConsistentState(
+        const TGetMasterConsistentStateOptions& options) override;
 
     TFuture<void> ExitReadOnly(
         NHydra::TCellId cellId,
@@ -394,14 +415,14 @@ public:
         const std::vector<NObjectClient::TCellId>& cellIds,
         const TResumeTabletCellsOptions& options) override;
 
-    TFuture<TMaintenanceId> AddMaintenance(
+    TFuture<TMaintenanceIdPerTarget> AddMaintenance(
         EMaintenanceComponent component,
         const TString& address,
         EMaintenanceType type,
         const TString& comment,
         const TAddMaintenanceOptions& options) override;
 
-    TFuture<TMaintenanceCounts> RemoveMaintenance(
+    TFuture<TMaintenanceCountsPerTarget> RemoveMaintenance(
         EMaintenanceComponent component,
         const TString& address,
         const TMaintenanceFilter& filter,
@@ -414,6 +435,7 @@ public:
 
     TFuture<TDestroyChunkLocationsResult> DestroyChunkLocations(
         const TString& nodeAddress,
+        bool recoverUnlinkedDisks,
         const std::vector<TGuid>& locationUuids,
         const TDestroyChunkLocationsOptions& options) override;
 
@@ -458,6 +480,9 @@ public:
         NQueryTrackerClient::TQueryId queryId,
         const TAlterQueryOptions& options = {}) override;
 
+    TFuture<TGetQueryTrackerInfoResult> GetQueryTrackerInfo(
+        const TGetQueryTrackerInfoOptions& options = {}) override;
+
     // Authentication
 
     virtual TFuture<void> SetUserPassword(
@@ -482,9 +507,57 @@ public:
         const TString& passwordSha256,
         const TListUserTokensOptions& options) override;
 
-    TFuture<TBundleConfigDescriptor> GetBundleConfig(
+    // Bundle Controller
+
+    TFuture<NBundleControllerClient::TBundleConfigDescriptorPtr> GetBundleConfig(
         const TString& bundleName,
-        const TGetBundleConfigOptions& options = {}) override;
+        const NBundleControllerClient::TGetBundleConfigOptions& options = {}) override;
+
+    TFuture<void> SetBundleConfig(
+        const TString& bundleName,
+        const NBundleControllerClient::TBundleTargetConfigPtr& bundleConfig,
+        const NBundleControllerClient::TSetBundleConfigOptions& options = {}) override;
+
+    // Flow
+
+    TFuture<TGetPipelineSpecResult> GetPipelineSpec(
+        const NYPath::TYPath& pipelinePath,
+        const TGetPipelineSpecOptions& options = {}) override;
+
+    TFuture<TSetPipelineSpecResult> SetPipelineSpec(
+        const NYPath::TYPath& pipelinePath,
+        const NYson::TYsonString& spec,
+        const TSetPipelineSpecOptions& options = {}) override;
+
+    TFuture<TGetPipelineDynamicSpecResult> GetPipelineDynamicSpec(
+        const NYPath::TYPath& pipelinePath,
+        const TGetPipelineDynamicSpecOptions& options = {}) override;
+
+    TFuture<TSetPipelineDynamicSpecResult> SetPipelineDynamicSpec(
+        const NYPath::TYPath& pipelinePath,
+        const NYson::TYsonString& spec,
+        const TSetPipelineDynamicSpecOptions& options = {}) override;
+
+    TFuture<void> StartPipeline(
+        const NYPath::TYPath& pipelinePath,
+        const TStartPipelineOptions& options = {}) override;
+
+    TFuture<void> StopPipeline(
+        const NYPath::TYPath& pipelinePath,
+        const TStopPipelineOptions& options = {}) override;
+
+    TFuture<void> PausePipeline(
+        const NYPath::TYPath& pipelinePath,
+        const TPausePipelineOptions& options = {}) override;
+
+    TFuture<TPipelineState> GetPipelineState(
+        const NYPath::TYPath& pipelinePath,
+        const TGetPipelineStateOptions& options) override;
+
+    TFuture<TGetFlowViewResult> GetFlowView(
+        const NYPath::TYPath& pipelinePath,
+        const NYPath::TYPath& viewPath,
+        const TGetFlowViewOptions& options) override;
 
 private:
     const TConnectionPtr Connection_;
@@ -498,7 +571,7 @@ private:
 
     NTransactionClient::ITimestampProviderPtr CreateTimestampProvider() const;
 
-    NRpc::IChannelPtr MaybeCreateRetryingChannel(NRpc::IChannelPtr channel, bool retryProxyBanned) const;
+    NRpc::IChannelPtr CreateSequoiaAwareRetryingChannel(NRpc::IChannelPtr channel, bool retryProxyBanned) const;
     // Returns an RPC channel to use for API calls to the particular address (e.g.: AttachTransaction).
     // The channel is non-retrying, so should be wrapped into retrying channel on demand.
     NRpc::IChannelPtr CreateNonRetryingChannelByAddress(const TString& address) const;

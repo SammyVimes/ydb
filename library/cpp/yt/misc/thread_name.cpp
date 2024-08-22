@@ -1,5 +1,7 @@
 #include "thread_name.h"
 
+#include <library/cpp/yt/misc/tls.h>
+
 #include <util/generic/string.h>
 #include <util/system/thread.h>
 
@@ -27,17 +29,18 @@ TThreadName::TThreadName(const TString& name)
 ////////////////////////////////////////////////////////////////////////////////
 
 // This function uses cached TThread::CurrentThreadName() result
-TThreadName GetCurrentThreadName()
+YT_PREVENT_TLS_CACHING TThreadName GetCurrentThreadName()
 {
-    static thread_local TThreadName threadName;
-    if (threadName.Length == 0) {
+    static thread_local TThreadName ThreadName;
+
+    if (ThreadName.Length == 0) {
         if (auto name = TThread::CurrentThreadName()) {
             auto length = std::min<int>(TThreadName::BufferCapacity - 1, name.length());
-            threadName.Length = length;
-            ::memcpy(threadName.Buffer.data(), name.data(), length);
+            ThreadName.Length = length;
+            ::memcpy(ThreadName.Buffer.data(), name.data(), length);
         }
     }
-    return threadName;
+    return ThreadName;
 }
 
 ////////////////////////////////////////////////////////////////////////////////

@@ -80,6 +80,35 @@ INSERT INTO BOOLTBL2 (f1)
 -- BOOLTBL2 should be full of false's at this point
 SELECT BOOLTBL2.* FROM BOOLTBL2;
 --
+-- SQL syntax
+-- Try all combinations to ensure that we get nothing when we expect nothing
+-- - thomas 2000-01-04
+--
+SELECT f1
+   FROM BOOLTBL1
+   WHERE f1 IS TRUE;
+SELECT f1
+   FROM BOOLTBL1
+   WHERE f1 IS NOT FALSE;
+SELECT f1
+   FROM BOOLTBL1
+   WHERE f1 IS FALSE;
+SELECT f1
+   FROM BOOLTBL1
+   WHERE f1 IS NOT TRUE;
+SELECT f1
+   FROM BOOLTBL2
+   WHERE f1 IS TRUE;
+SELECT f1
+   FROM BOOLTBL2
+   WHERE f1 IS NOT FALSE;
+SELECT f1
+   FROM BOOLTBL2
+   WHERE f1 IS FALSE;
+SELECT f1
+   FROM BOOLTBL2
+   WHERE f1 IS NOT TRUE;
+--
 -- Tests for BooleanTest
 --
 CREATE TABLE BOOLTBL3 (d text, b bool, o int);
@@ -92,3 +121,28 @@ INSERT INTO BOOLTBL3 (d, b, o) VALUES ('null', null, 3);
 CREATE TABLE booltbl4(isfalse bool, istrue bool, isnul bool);
 INSERT INTO booltbl4 VALUES (false, true, null);
 \pset null '(null)'
+-- AND expression need to return null if there's any nulls and not all
+-- of the value are true
+SELECT istrue AND isnul AND istrue FROM booltbl4;
+SELECT istrue AND istrue AND isnul FROM booltbl4;
+SELECT isnul AND istrue AND istrue FROM booltbl4;
+SELECT isfalse AND isnul AND istrue FROM booltbl4;
+SELECT istrue AND isfalse AND isnul FROM booltbl4;
+SELECT isnul AND istrue AND isfalse FROM booltbl4;
+-- OR expression need to return null if there's any nulls and none
+-- of the value is true
+SELECT isfalse OR isnul OR isfalse FROM booltbl4;
+SELECT isfalse OR isfalse OR isnul FROM booltbl4;
+SELECT isnul OR isfalse OR isfalse FROM booltbl4;
+SELECT isfalse OR isnul OR istrue FROM booltbl4;
+SELECT istrue OR isfalse OR isnul FROM booltbl4;
+SELECT isnul OR istrue OR isfalse FROM booltbl4;
+--
+-- Clean up
+-- Many tables are retained by the regression test, but these do not seem
+--  particularly useful so just get rid of them for now.
+--  - thomas 1997-11-30
+--
+DROP TABLE  BOOLTBL1;
+DROP TABLE  BOOLTBL2;
+DROP TABLE  BOOLTBL3;

@@ -1,6 +1,7 @@
 """
 Filters that accept a `Application` as argument.
 """
+
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, cast
@@ -50,7 +51,7 @@ __all__ = [
 
 
 # NOTE: `has_focus` below should *not* be `memoized`. It can reference any user
-#       control. For instance, if we would contiously create new
+#       control. For instance, if we would continuously create new
 #       `PromptSession` instances, then previous instances won't be released,
 #       because this memoize (which caches results in the global scope) will
 #       still refer to each instance.

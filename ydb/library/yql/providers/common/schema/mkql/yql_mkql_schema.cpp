@@ -68,7 +68,7 @@ class TRuntimeTypeSaver: public TSaver<TRuntimeTypeSaver<TSaver>> {
 
 public:
     TRuntimeTypeSaver(typename TBase::TConsumer& consumer)
-        : TBase(consumer)
+        : TBase(consumer, false)
     {
     }
 
@@ -189,21 +189,21 @@ struct TRuntimeTypeLoader {
         return Builder.NewVoid().GetStaticType();
     }
     TMaybe<TType> LoadGenericType(ui32 /*level*/) {
-        return Builder.GetTypeEnvironment().GetTypeOfType();
+        return Builder.GetTypeEnvironment().GetTypeOfTypeLazy();
     }
     TMaybe<TType> LoadEmptyListType(ui32 /*level*/) {
         if (NKikimr::NMiniKQL::RuntimeVersion < 11) {
             return Builder.NewListType(Builder.NewVoid().GetStaticType());
         }
 
-        return Builder.GetTypeEnvironment().GetTypeOfEmptyList();
+        return Builder.GetTypeEnvironment().GetTypeOfEmptyListLazy();
     }
     TMaybe<TType> LoadEmptyDictType(ui32 /*level*/) {
         if (NKikimr::NMiniKQL::RuntimeVersion < 11) {
             return Builder.NewDictType(Builder.NewVoid().GetStaticType(), Builder.NewVoid().GetStaticType(), false);
         }
 
-        return Builder.GetTypeEnvironment().GetTypeOfEmptyDict();
+        return Builder.GetTypeEnvironment().GetTypeOfEmptyDictLazy();
     }
     TMaybe<TType> LoadDataType(const TString& dataType, ui32 /*level*/) {
         const auto slot = NUdf::FindDataSlot(dataType);
@@ -221,7 +221,7 @@ struct TRuntimeTypeLoader {
     }
 
     TMaybe<TType> LoadPgType(const TString& pgType, ui32 /*level*/) {
-        auto typeId = NYql::NPg::LookupType(pgType).TypeId;
+        auto typeId = NYql::NPg::HasType(pgType) ? NYql::NPg::LookupType(pgType).TypeId : Max<ui32>();
         return Builder.NewPgType(typeId);
     }
 

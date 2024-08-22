@@ -12,8 +12,6 @@ namespace NYT {
 
 ////////////////////////////////////////////////////////////////////////////////
 
-extern const NLogging::TLogger LockFreePtrLogger;
-
 void ReclaimHazardPointers(bool flush = true);
 
 using THazardPtrReclaimer = void(*)(TPackedPtr packedPtr);
@@ -82,6 +80,11 @@ private:
     T* Ptr_ = nullptr;
     std::atomic<void*>* HazardPtr_ = nullptr;
 };
+
+////////////////////////////////////////////////////////////////////////////////
+
+template <class T>
+bool operator==(const THazardPtr<T>& lhs, const T* rhs);
 
 ////////////////////////////////////////////////////////////////////////////////
 

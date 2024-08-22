@@ -103,7 +103,7 @@ class ConsumeTests(TestCase):
         self.assertEqual(0, next(r))
 
     def test_negative_consume(self):
-        """Check that negative consumsion throws an error"""
+        """Check that negative consumption throws an error"""
         r = (x for x in range(10))
         self.assertRaises(ValueError, lambda: mi.consume(r, -1))
 
@@ -134,32 +134,29 @@ class NthTests(TestCase):
 
 
 class AllEqualTests(TestCase):
-    """Tests for ``all_equal()``"""
-
     def test_true(self):
-        """Everything is equal"""
         self.assertTrue(mi.all_equal('aaaaaa'))
         self.assertTrue(mi.all_equal([0, 0, 0, 0]))
 
     def test_false(self):
-        """Not everything is equal"""
         self.assertFalse(mi.all_equal('aaaaab'))
         self.assertFalse(mi.all_equal([0, 0, 0, 1]))
 
     def test_tricky(self):
-        """Not everything is identical, but everything is equal"""
         items = [1, complex(1, 0), 1.0]
         self.assertTrue(mi.all_equal(items))
 
     def test_empty(self):
-        """Return True if the iterable is empty"""
         self.assertTrue(mi.all_equal(''))
         self.assertTrue(mi.all_equal([]))
 
     def test_one(self):
-        """Return True if the iterable is singular"""
         self.assertTrue(mi.all_equal('0'))
         self.assertTrue(mi.all_equal([0]))
+
+    def test_key(self):
+        self.assertTrue(mi.all_equal('4٤໔４৪', key=int))
+        self.assertFalse(mi.all_equal('Abc', key=str.casefold))
 
 
 class QuantifyTests(TestCase):
@@ -203,7 +200,7 @@ class NcyclesTests(TestCase):
         n = mi.ncycles(range(100), 0)
         self.assertRaises(StopIteration, lambda: next(n))
 
-    def test_pathalogical_case(self):
+    def test_pathological_case(self):
         """asking for negative cycles should return an empty iterator"""
         n = mi.ncycles(range(100), -10)
         self.assertRaises(StopIteration, lambda: next(n))
@@ -267,6 +264,12 @@ class PairwiseTests(TestCase):
         """ensure an empty iterator if there's not enough values to pair"""
         p = mi.pairwise("a")
         self.assertRaises(StopIteration, lambda: next(p))
+
+    def test_coverage(self):
+        from more_itertools import recipes
+
+        p = recipes._pairwise([1, 2, 3])
+        self.assertEqual([(1, 2), (2, 3)], list(p))
 
 
 class GrouperTests(TestCase):
@@ -392,43 +395,53 @@ class PowersetTests(TestCase):
 
 
 class UniqueEverseenTests(TestCase):
-    """Tests for ``unique_everseen()``"""
-
     def test_everseen(self):
-        """ensure duplicate elements are ignored"""
         u = mi.unique_everseen('AAAABBBBCCDAABBB')
         self.assertEqual(['A', 'B', 'C', 'D'], list(u))
 
     def test_custom_key(self):
-        """ensure the custom key comparison works"""
         u = mi.unique_everseen('aAbACCc', key=str.lower)
         self.assertEqual(list('abC'), list(u))
 
     def test_unhashable(self):
-        """ensure things work for unhashable items"""
         iterable = ['a', [1, 2, 3], [1, 2, 3], 'a']
         u = mi.unique_everseen(iterable)
         self.assertEqual(list(u), ['a', [1, 2, 3]])
 
     def test_unhashable_key(self):
-        """ensure things work for unhashable items with a custom key"""
         iterable = ['a', [1, 2, 3], [1, 2, 3], 'a']
         u = mi.unique_everseen(iterable, key=lambda x: x)
         self.assertEqual(list(u), ['a', [1, 2, 3]])
 
 
 class UniqueJustseenTests(TestCase):
-    """Tests for ``unique_justseen()``"""
-
     def test_justseen(self):
-        """ensure only last item is remembered"""
         u = mi.unique_justseen('AAAABBBCCDABB')
         self.assertEqual(list('ABCDAB'), list(u))
 
     def test_custom_key(self):
-        """ensure the custom key comparison works"""
         u = mi.unique_justseen('AABCcAD', str.lower)
         self.assertEqual(list('ABCAD'), list(u))
+
+
+class UniqueTests(TestCase):
+    def test_basic(self):
+        iterable = [0, 1, 1, 8, 9, 9, 9, 8, 8, 1, 9, 9]
+        actual = list(mi.unique(iterable))
+        expected = [0, 1, 8, 9]
+        self.assertEqual(actual, expected)
+
+    def test_key(self):
+        iterable = ['1', '1', '10', '10', '2', '2', '20', '20']
+        actual = list(mi.unique(iterable, key=int))
+        expected = ['1', '2', '10', '20']
+        self.assertEqual(actual, expected)
+
+    def test_reverse(self):
+        iterable = ['1', '1', '10', '10', '2', '2', '20', '20']
+        actual = list(mi.unique(iterable, key=int, reverse=True))
+        expected = ['20', '10', '2', '1']
+        self.assertEqual(actual, expected)
 
 
 class IterExceptTests(TestCase):
@@ -698,7 +711,7 @@ class NthPermutationTests(TestCase):
         n = factorial(len(iterable)) // factorial(len(iterable) - r)
         for index in [-1 - n, n + 1]:
             with self.assertRaises(IndexError):
-                mi.nth_combination(iterable, r, index)
+                mi.nth_permutation(iterable, r, index)
 
     def test_invalid_r(self):
         iterable = 'abcde'
@@ -706,7 +719,7 @@ class NthPermutationTests(TestCase):
         n = factorial(len(iterable)) // factorial(len(iterable) - r)
         for r in [-1, n + 1]:
             with self.assertRaises(ValueError):
-                mi.nth_combination(iterable, r, 0)
+                mi.nth_permutation(iterable, r, 0)
 
 
 class PrependTests(TestCase):
@@ -931,6 +944,11 @@ class IterIndexTests(TestCase):
                 expected = [0, 1, 4, 7]
                 self.assertEqual(actual, expected)
 
+    def test_stop(self):
+        actual = list(mi.iter_index('AABCADEAF', 'A', stop=7))
+        expected = [0, 1, 4]
+        self.assertEqual(actual, expected)
+
 
 class SieveTests(TestCase):
     def test_basic(self):
@@ -994,6 +1012,15 @@ class BatchedTests(TestCase):
                 actual = list(mi.batched(iterable, n))
                 self.assertEqual(actual, expected)
 
+    def test_strict(self):
+        with self.assertRaises(ValueError):
+            list(mi.batched('ABCDEFG', 3, strict=True))
+
+        self.assertEqual(
+            list(mi.batched('ABCDEF', 3, strict=True)),
+            [('A', 'B', 'C'), ('D', 'E', 'F')],
+        )
+
 
 class TransposeTests(TestCase):
     def test_empty(self):
@@ -1020,6 +1047,47 @@ class TransposeTests(TestCase):
         actual = list(mi.transpose(it))
         expected = [(10, 20, 30), (11, 21, 31), (12, 22, 32)]
         self.assertEqual(actual, expected)
+
+
+class ReshapeTests(TestCase):
+    def test_empty(self):
+        actual = list(mi.reshape([], 3))
+        self.assertEqual(actual, [])
+
+    def test_zero(self):
+        matrix = [(0, 1, 2, 3), (4, 5, 6, 7), (8, 9, 10, 11)]
+        with self.assertRaises(ValueError):
+            list(mi.reshape(matrix, 0))
+
+    def test_basic(self):
+        matrix = [(0, 1, 2, 3), (4, 5, 6, 7), (8, 9, 10, 11)]
+        for cols, expected in (
+            (
+                1,
+                [
+                    (0,),
+                    (1,),
+                    (2,),
+                    (3,),
+                    (4,),
+                    (5,),
+                    (6,),
+                    (7,),
+                    (8,),
+                    (9,),
+                    (10,),
+                    (11,),
+                ],
+            ),
+            (2, [(0, 1), (2, 3), (4, 5), (6, 7), (8, 9), (10, 11)]),
+            (3, [(0, 1, 2), (3, 4, 5), (6, 7, 8), (9, 10, 11)]),
+            (4, [(0, 1, 2, 3), (4, 5, 6, 7), (8, 9, 10, 11)]),
+            (6, [(0, 1, 2, 3, 4, 5), (6, 7, 8, 9, 10, 11)]),
+            (12, [(0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11)]),
+        ):
+            with self.subTest(cols=cols):
+                actual = list(mi.reshape(matrix, cols))
+                self.assertEqual(actual, expected)
 
 
 class MatMulTests(TestCase):
@@ -1096,3 +1164,20 @@ class PolynomialDerivativeTests(TestCase):
             with self.subTest(coefficients=coefficients):
                 actual = mi.polynomial_derivative(coefficients)
                 self.assertEqual(actual, expected)
+
+
+class TotientTests(TestCase):
+    def test_basic(self):
+        for n, expected in (
+            (1, 1),
+            (2, 1),
+            (3, 2),
+            (4, 2),
+            (9, 6),
+            (12, 4),
+            (128_884_753_939, 128_884_753_938),
+            (999953 * 999983, 999952 * 999982),
+            (6**20, 1 * 2**19 * 2 * 3**19),
+        ):
+            with self.subTest(n=n):
+                self.assertEqual(mi.totient(n), expected)

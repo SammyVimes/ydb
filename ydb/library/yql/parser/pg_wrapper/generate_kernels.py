@@ -1,4 +1,4 @@
-#!/usr/bin/env python
+#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 
 import os
@@ -31,6 +31,8 @@ def is_result_fixed(oid_per_name, catalog_by_oid, name):
 def get_fixed_args(oid_per_name, catalog_by_oid, name):
     found = None
     for oid in oid_per_name[name]:
+        if "var_type" in catalog_by_oid[oid]:
+            return None
         fixed = [x["arg_type_fixed"] for x in catalog_by_oid[oid]["args"]]
         if found is None:
             found = fixed
@@ -45,7 +47,7 @@ def main():
     with open("pg_sources.inc") as f:
         for line in f:
             pg_sources.append(line.rstrip())
-    with open("../../../../../yql/tools/pg_catalog_dump/dump.json") as f:
+    with open("../../tools/pg_catalog_dump/dump.json") as f:
         catalog = json.load(f)
     catalog_by_oid = {}
     catalog_funcs = set()
@@ -56,7 +58,7 @@ def main():
     for agg in catalog["aggregation"]:
         if not agg["combine_func_id"]:
             continue
-        catalog_aggs_by_id[agg["internal_id"]] = agg
+        catalog_aggs_by_id[agg["agg_id"]] = agg
         assert len(agg["args"]) <= 2
 
     funcs={}
@@ -128,6 +130,27 @@ def main():
                 elif srcline.startswith("PSEUDOTYPE_DUMMY_RECEIVE_FUNC(") and "\\" not in srcline:
                     pos=srcline.find(")")
                     names=[srcline[30:pos]+"_recv"]
+                elif srcline.startswith("PG_STAT_GET_DBENTRY_FLOAT8_MS("):
+                    pos=srcline.find(")")
+                    names=["pg_stat_get_db_" + srcline[30:pos]]
+                elif srcline.startswith("PG_STAT_GET_DBENTRY_INT64("):
+                    pos=srcline.find(")")
+                    names=["pg_stat_get_db_" + srcline[26:pos]]
+                elif srcline.startswith("PG_STAT_GET_RELENTRY_INT64("):
+                    pos=srcline.find(")")
+                    names=["pg_stat_get_" + srcline[27:pos]]
+                elif srcline.startswith("PG_STAT_GET_RELENTRY_TIMESTAMPTZ("):
+                    pos=srcline.find(")")
+                    names=["pg_stat_get_" + srcline[33:pos]]
+                elif srcline.startswith("PG_STAT_GET_XACT_RELENTRY_INT64("):
+                    pos=srcline.find(")")
+                    names=["pg_stat_get_xact_" + srcline[32:pos]]
+                elif srcline.startswith("PG_STAT_GET_FUNCENTRY_FLOAT8_MS("):
+                    pos=srcline.find(")")
+                    names=["pg_stat_get_function_" + srcline[32:pos]]
+                elif srcline.startswith("PG_STAT_GET_XACT_FUNCENTRY_FLOAT8_MS("):
+                    pos=srcline.find(")")
+                    names=["pg_stat_get_xact_function_" + srcline[37:pos]]
                 else:
                     continue
                 for name in names:
@@ -290,9 +313,9 @@ def main():
                 "    const std::vector<ui32>& argsColumns,\n" \
                 "    const TTypeEnvironment& env) const final {\n" \
                 "    const auto& aggDesc = ResolveAggregation(\"NAME\", tupleType, argsColumns, nullptr);\n" \
-                "    switch (aggDesc.InternalId) {\n" +
+                "    switch (aggDesc.AggId) {\n" +
                 "".join(["    case " + str(agg_id) + ": return MakePgAgg_NAME_" + str(agg_id) + "().PrepareCombineAll(filterColumn, argsColumns, aggDesc);\n" for agg_id in agg_names[name]]) +
-                "    default: throw yexception() << \"Unsupported agg id: \" << aggDesc.InternalId;\n" \
+                "    default: throw yexception() << \"Unsupported agg id: \" << aggDesc.AggId;\n" \
                 "    }\n" \
                 "}\n" \
                 "\n" \
@@ -301,9 +324,9 @@ def main():
                 "    const std::vector<ui32>& argsColumns,\n" \
                 "    const TTypeEnvironment& env) const final {\n" \
                 "    const auto& aggDesc = ResolveAggregation(\"NAME\", tupleType, argsColumns, nullptr);\n"                
-                "    switch (aggDesc.InternalId) {\n" +
+                "    switch (aggDesc.AggId) {\n" +
                 "".join(["    case " + str(agg_id) + ": return MakePgAgg_NAME_" + str(agg_id) + "().PrepareCombineKeys(argsColumns, aggDesc);\n" for agg_id in agg_names[name]]) +
-                "    default: throw yexception() << \"Unsupported agg id: \" << aggDesc.InternalId;\n" \
+                "    default: throw yexception() << \"Unsupported agg id: \" << aggDesc.AggId;\n" \
                 "    }\n" \
                 "}\n" \
                 "\n" \
@@ -313,9 +336,9 @@ def main():
                 "    const TTypeEnvironment& env,\n" \
                 "    TType* returnType) const final {\n" \
                 "    const auto& aggDesc = ResolveAggregation(\"NAME\", tupleType, argsColumns, returnType);\n"
-                "    switch (aggDesc.InternalId) {\n" +
+                "    switch (aggDesc.AggId) {\n" +
                 "".join(["    case " + str(agg_id) + ": return MakePgAgg_NAME_" + str(agg_id) + "().PrepareFinalizeKeys(argsColumns.front(), aggDesc);\n" for agg_id in agg_names[name]]) +
-                "    default: throw yexception() << \"Unsupported agg id: \" << aggDesc.InternalId;\n" \
+                "    default: throw yexception() << \"Unsupported agg id: \" << aggDesc.AggId;\n" \
                 "    }\n" \
                 "}\n" \
                 "};\n").replace("NAME", name))
@@ -347,6 +370,7 @@ def main():
                 '#undef fopen\n'
                 '#undef bind\n'
                 '#undef locale_t\n'
+                '#undef strtou64\n'
                 '}\n'
                 '\n'
                 '#include "arrow.h"\n'
@@ -355,12 +379,15 @@ def main():
                 '\n'
                 'extern "C" {\n'
                 '\n'
+                'Y_PRAGMA_DIAGNOSTIC_PUSH\n'
+                'Y_PRAGMA("GCC diagnostic ignored \\"-Wreturn-type-c-linkage\\"")\n'
                 '#ifdef USE_SLOW_PG_KERNELS\n'
                 '#include "pg_kernels.slow.INDEX.inc"\n'
                 '#else\n'
                 '#include "pg_proc_policies.INDEX.inc"\n'
                 '#include "pg_kernels.INDEX.inc"\n'
                 '#endif\n'
+                'Y_PRAGMA_DIAGNOSTIC_POP\n'
                 '\n'
                 '}\n'
                 '\n'

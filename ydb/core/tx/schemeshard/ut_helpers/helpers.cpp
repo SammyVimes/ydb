@@ -2,7 +2,10 @@
 
 #include <ydb/core/engine/mkql_proto.h>
 #include <ydb/core/engine/minikql/flat_local_tx_factory.h>
+#include <ydb/core/tx/data_events/events.h>
+#include <ydb/core/tx/data_events/payload_helper.h>
 #include <ydb/core/tx/schemeshard/schemeshard.h>
+#include <ydb/core/tx/sequenceproxy/sequenceproxy.h>
 #include <ydb/core/tx/tx_proxy/proxy.h>
 #include <ydb/core/persqueue/events/global.h>
 #include <ydb/core/persqueue/ut/common/pq_ut_common.h>
@@ -12,6 +15,7 @@
 #include <ydb/library/yql/public/issue/yql_issue_message.h>
 
 #include <ydb/core/util/pb.h>
+#include <ydb/public/api/protos/ydb_export.pb.h>
 
 #include <library/cpp/testing/unittest/registar.h>
 
@@ -832,6 +836,11 @@ namespace NSchemeShardUT_Private {
     GENERIC_HELPERS(AlterCdcStream, NKikimrSchemeOp::EOperationType::ESchemeOpAlterCdcStream, &NKikimrSchemeOp::TModifyScheme::MutableAlterCdcStream)
     GENERIC_HELPERS(DropCdcStream, NKikimrSchemeOp::EOperationType::ESchemeOpDropCdcStream, &NKikimrSchemeOp::TModifyScheme::MutableDropCdcStream)
 
+    // continuous backup
+    GENERIC_HELPERS(CreateContinuousBackup, NKikimrSchemeOp::EOperationType::ESchemeOpCreateContinuousBackup, &NKikimrSchemeOp::TModifyScheme::MutableCreateContinuousBackup)
+    GENERIC_HELPERS(AlterContinuousBackup, NKikimrSchemeOp::EOperationType::ESchemeOpAlterContinuousBackup, &NKikimrSchemeOp::TModifyScheme::MutableAlterContinuousBackup)
+    GENERIC_HELPERS(DropContinuousBackup, NKikimrSchemeOp::EOperationType::ESchemeOpDropContinuousBackup, &NKikimrSchemeOp::TModifyScheme::MutableDropContinuousBackup)
+
     // olap store
     GENERIC_HELPERS(CreateOlapStore, NKikimrSchemeOp::EOperationType::ESchemeOpCreateColumnStore, &NKikimrSchemeOp::TModifyScheme::MutableCreateColumnStore)
     GENERIC_HELPERS(AlterOlapStore, NKikimrSchemeOp::EOperationType::ESchemeOpAlterColumnStore, &NKikimrSchemeOp::TModifyScheme::MutableAlterColumnStore)
@@ -847,20 +856,22 @@ namespace NSchemeShardUT_Private {
     // sequence
     GENERIC_HELPERS(CreateSequence, NKikimrSchemeOp::EOperationType::ESchemeOpCreateSequence, &NKikimrSchemeOp::TModifyScheme::MutableSequence)
     GENERIC_HELPERS(DropSequence, NKikimrSchemeOp::EOperationType::ESchemeOpDropSequence, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
+    GENERIC_HELPERS(AlterSequence, NKikimrSchemeOp::EOperationType::ESchemeOpAlterSequence, &NKikimrSchemeOp::TModifyScheme::MutableSequence)
     DROP_BY_PATH_ID_HELPERS(DropSequence, NKikimrSchemeOp::EOperationType::ESchemeOpDropSequence)
 
     // replication
     GENERIC_HELPERS(CreateReplication, NKikimrSchemeOp::EOperationType::ESchemeOpCreateReplication, &NKikimrSchemeOp::TModifyScheme::MutableReplication)
+    GENERIC_HELPERS(AlterReplication, NKikimrSchemeOp::EOperationType::ESchemeOpAlterReplication, &NKikimrSchemeOp::TModifyScheme::MutableAlterReplication)
     GENERIC_HELPERS(DropReplication, NKikimrSchemeOp::EOperationType::ESchemeOpDropReplication, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
     DROP_BY_PATH_ID_HELPERS(DropReplication, NKikimrSchemeOp::EOperationType::ESchemeOpDropReplication)
+    GENERIC_HELPERS(DropReplicationCascade, NKikimrSchemeOp::EOperationType::ESchemeOpDropReplicationCascade, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
+    DROP_BY_PATH_ID_HELPERS(DropReplicationCascade, NKikimrSchemeOp::EOperationType::ESchemeOpDropReplicationCascade)
 
     // pq
     GENERIC_HELPERS(CreatePQGroup, NKikimrSchemeOp::EOperationType::ESchemeOpCreatePersQueueGroup, &NKikimrSchemeOp::TModifyScheme::MutableCreatePersQueueGroup)
     GENERIC_HELPERS(AlterPQGroup, NKikimrSchemeOp::EOperationType::ESchemeOpAlterPersQueueGroup, &NKikimrSchemeOp::TModifyScheme::MutableAlterPersQueueGroup)
     GENERIC_HELPERS(DropPQGroup, NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
     DROP_BY_PATH_ID_HELPERS(DropPQGroup, NKikimrSchemeOp::EOperationType::ESchemeOpDropPersQueueGroup)
-    GENERIC_HELPERS(AllocatePQ, NKikimrSchemeOp::EOperationType::ESchemeOpAllocatePersQueueGroup, &NKikimrSchemeOp::TModifyScheme::MutableAllocatePersQueueGroup)
-    GENERIC_HELPERS(DeallocatePQ, NKikimrSchemeOp::EOperationType::ESchemeOpDeallocatePersQueueGroup, &NKikimrSchemeOp::TModifyScheme::MutableDeallocatePersQueueGroup)
 
     // rtmr
     GENERIC_HELPERS(CreateRtmrVolume, NKikimrSchemeOp::EOperationType::ESchemeOpCreateRtmrVolume, &NKikimrSchemeOp::TModifyScheme::MutableCreateRtmrVolume)
@@ -896,6 +907,17 @@ namespace NSchemeShardUT_Private {
     GENERIC_HELPERS(CreateExternalDataSource, NKikimrSchemeOp::EOperationType::ESchemeOpCreateExternalDataSource, &NKikimrSchemeOp::TModifyScheme::MutableCreateExternalDataSource)
     GENERIC_HELPERS(DropExternalDataSource, NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalDataSource, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
     DROP_BY_PATH_ID_HELPERS(DropExternalDataSource, NKikimrSchemeOp::EOperationType::ESchemeOpDropExternalDataSource)
+
+    // view
+    GENERIC_HELPERS(CreateView, NKikimrSchemeOp::EOperationType::ESchemeOpCreateView, &NKikimrSchemeOp::TModifyScheme::MutableCreateView)
+    GENERIC_HELPERS(DropView, NKikimrSchemeOp::EOperationType::ESchemeOpDropView, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
+    DROP_BY_PATH_ID_HELPERS(DropView, NKikimrSchemeOp::EOperationType::ESchemeOpDropView)
+
+    // resource pool
+    GENERIC_HELPERS(CreateResourcePool, NKikimrSchemeOp::EOperationType::ESchemeOpCreateResourcePool, &NKikimrSchemeOp::TModifyScheme::MutableCreateResourcePool)
+    GENERIC_HELPERS(AlterResourcePool, NKikimrSchemeOp::EOperationType::ESchemeOpAlterResourcePool, &NKikimrSchemeOp::TModifyScheme::MutableCreateResourcePool)
+    GENERIC_HELPERS(DropResourcePool, NKikimrSchemeOp::EOperationType::ESchemeOpDropResourcePool, &NKikimrSchemeOp::TModifyScheme::MutableDrop)
+    DROP_BY_PATH_ID_HELPERS(DropResourcePool, NKikimrSchemeOp::EOperationType::ESchemeOpDropResourcePool)
 
     #undef DROP_BY_PATH_ID_HELPERS
     #undef GENERIC_WITH_ATTRS_HELPERS
@@ -1699,7 +1721,7 @@ namespace NSchemeShardUT_Private {
     }
 
     void TestBuildColumn(TTestActorRuntime& runtime, ui64 id, ui64 schemeShard, const TString &dbName,
-        const TString &src, const TString& columnName, const Ydb::TypedValue& literal, Ydb::StatusIds::StatusCode expectedStatus) 
+        const TString &src, const TString& columnName, const Ydb::TypedValue& literal, Ydb::StatusIds::StatusCode expectedStatus)
     {
         AsyncBuildColumn(runtime, id, schemeShard, dbName, src, columnName, literal);
 
@@ -2174,8 +2196,21 @@ namespace NSchemeShardUT_Private {
         return combination;
     }
 
-    void AsyncSend(TTestActorRuntime &runtime, ui64 targetTabletId, IEventBase *ev) {
-        ForwardToTablet(runtime, targetTabletId, runtime.AllocateEdgeActor(), ev);
+    void AsyncSend(TTestActorRuntime &runtime, ui64 targetTabletId, IEventBase *ev,
+            ui32 nodeIndex, TActorId sender) {
+        if (sender == TActorId()) {
+            ForwardToTablet(runtime, targetTabletId, runtime.AllocateEdgeActor(nodeIndex), ev);
+        } else {
+            ForwardToTablet(runtime, targetTabletId, sender, ev, nodeIndex);
+        }
+    }
+
+    TEvTx* InternalTransaction(TEvTx* tx) {
+        for (auto& x : *tx->Record.MutableTransaction()) {
+            x.SetInternal(true);
+        }
+
+        return tx;
     }
 
     TTestActorRuntimeBase::TEventObserver SetSuppressObserver(TTestActorRuntime &runtime, TVector<THolder<IEventHandle> > &suppressed, ui32 type) {
@@ -2251,41 +2286,42 @@ namespace NSchemeShardUT_Private {
         NKikimr::NPQ::CmdWrite(&runtime, tabletId, edge, partitionId, "sourceid0", msgSeqNo, data, false, {}, true, cookie, 0);
     }
 
-    void WriteRow(TTestActorRuntime& runtime, const TString& key, const TString& value, ui64 tabletId) {
+    void UpdateRow(TTestActorRuntime& runtime, const TString& table, const ui32 key, const TString& value, ui64 tabletId) {
         NKikimrMiniKQL::TResult result;
         TString error;
         NKikimrProto::EReplyStatus status = LocalMiniKQL(runtime, tabletId, Sprintf(R"(
             (
-                (let key '( '('key (Utf8 '%s) ) ) )
+                (let key '( '('key (Uint32 '%d) ) ) )
                 (let row '( '('value (Utf8 '%s) ) ) )
-                (return (AsList (UpdateRow '__user__Table key row) ))
+                (return (AsList (UpdateRow '__user__%s key row) ))
             )
-        )", key.c_str(), value.c_str()), result, error);
+        )", key, value.c_str(), table.c_str()), result, error);
 
         UNIT_ASSERT_VALUES_EQUAL_C(status, NKikimrProto::EReplyStatus::OK, error);
         UNIT_ASSERT_VALUES_EQUAL(error, "");
     }
 
-    void WriteRowPg(TTestActorRuntime& runtime, const TString& key, ui32 value, ui64 tabletId) {
+    void UpdateRowPg(TTestActorRuntime& runtime, const TString& table, const ui32 key, ui32 value, ui64 tabletId) {
         NKikimrMiniKQL::TResult result;
         TString error;
         NKikimrProto::EReplyStatus status = LocalMiniKQL(runtime, tabletId, Sprintf(R"(
             (
-                (let key '( '('key (Utf8 '%s) ) ) )
+                (let key '( '('key (Utf8 '%d) ) ) )
                 (let row '( '('value (PgConst '%u (PgType 'int4)) ) ) )
-                (return (AsList (UpdateRow '__user__Table key row) ))
+                (return (AsList (UpdateRow '__user__%s key row) ))
             )
-        )", key.c_str(), value), result, error);
+        )", key, value, table.c_str()), result, error);
 
         UNIT_ASSERT_VALUES_EQUAL_C(status, NKikimrProto::EReplyStatus::OK, error);
         UNIT_ASSERT_VALUES_EQUAL(error, "");
     }
 
-    void UploadRows(TTestActorRuntime& runtime, const TString& tablePath, int partitionIdx, const TVector<ui32>& keyTags, const TVector<ui32>& valueTags, const TVector<ui32>& recordIds)
+    void UploadRow(TTestActorRuntime& runtime, const TString& tablePath, int partitionIdx, const TVector<ui32>& keyTags, const TVector<ui32>& valueTags, const TVector<TCell>& keys, const TVector<TCell>& values)
     {
         auto tableDesc = DescribePath(runtime, tablePath, true, true);
         const auto& tablePartitions = tableDesc.GetPathDescription().GetTablePartitions();
         UNIT_ASSERT(partitionIdx < tablePartitions.size());
+        const ui64 datashardTabletId = tablePartitions[partitionIdx].GetDatashardId();
 
         auto ev = MakeHolder<TEvDataShard::TEvUploadRowsRequest>();
         ev->Record.SetTableId(tableDesc.GetPathId());
@@ -2298,18 +2334,60 @@ namespace NSchemeShardUT_Private {
             scheme.AddValueColumnIds(tag);
         }
 
-        for (ui32 i : recordIds) {
-            auto key = TVector<TCell>{TCell::Make(i)};
-            auto value = TVector<TCell>{TCell::Make(i)};
-            Cerr << value[0].AsBuf().Size() << Endl;
-
-            auto& row = *ev->Record.AddRows();
-            row.SetKeyColumns(TSerializedCellVec::Serialize(key));
-            row.SetValueColumns(TSerializedCellVec::Serialize(value));
-        }
+        auto& row = *ev->Record.AddRows();
+        row.SetKeyColumns(TSerializedCellVec::Serialize(keys));
+        row.SetValueColumns(TSerializedCellVec::Serialize(values));
 
         const auto& sender = runtime.AllocateEdgeActor();
-        ForwardToTablet(runtime, tablePartitions[partitionIdx].GetDatashardId(), sender, ev.Release());
+        ForwardToTablet(runtime, datashardTabletId, sender, ev.Release());
         runtime.GrabEdgeEvent<TEvDataShard::TEvUploadRowsResponse>(sender);
+    }
+
+    void WriteRow(TTestActorRuntime& runtime, const ui64 txId, const TString& tablePath, int partitionIdx, const ui32 key, const TString& value, bool successIsExpected) {
+        auto tableDesc = DescribePath(runtime, tablePath, true, true);
+        const auto& pathDesc = tableDesc.GetPathDescription();
+        TTableId tableId(pathDesc.GetSelf().GetSchemeshardId(), pathDesc.GetSelf().GetPathId(), pathDesc.GetTable().GetTableSchemaVersion());
+
+        const auto& tablePartitions = pathDesc.GetTablePartitions();
+        UNIT_ASSERT(partitionIdx < tablePartitions.size());
+        const ui64 datashardTabletId = tablePartitions[partitionIdx].GetDatashardId();
+
+        const auto& sender = runtime.AllocateEdgeActor();
+
+        std::vector<ui32> columnIds{1, 2};
+
+        TVector<TCell> cells{TCell((const char*)&key, sizeof(ui32)), TCell(value.c_str(), value.size())};
+
+        TSerializedCellMatrix matrix(cells, 1, 2);
+
+        auto evWrite = std::make_unique<NKikimr::NEvents::TDataEvents::TEvWrite>(txId, NKikimrDataEvents::TEvWrite::MODE_IMMEDIATE);
+        ui64 payloadIndex = NKikimr::NEvWrite::TPayloadWriter<NKikimr::NEvents::TDataEvents::TEvWrite>(*evWrite).AddDataToPayload(std::move(matrix.ReleaseBuffer()));
+        evWrite->AddOperation(NKikimrDataEvents::TEvWrite::TOperation::OPERATION_UPSERT, tableId, columnIds, payloadIndex, NKikimrDataEvents::FORMAT_CELLVEC);
+
+        ForwardToTablet(runtime, datashardTabletId, sender, evWrite.release());
+
+        auto ev = runtime.GrabEdgeEventRethrow<NEvents::TDataEvents::TEvWriteResult>(sender);
+        auto status = ev->Get()->Record.GetStatus();
+
+        UNIT_ASSERT_C(successIsExpected == (status == NKikimrDataEvents::TEvWriteResult::STATUS_COMPLETED), "Status: " << ev->Get()->Record.GetStatus() << " Issues: " << ev->Get()->Record.GetIssues());
+    }
+
+    void SendNextValRequest(TTestActorRuntime& runtime, const TActorId& sender, const TString& path) {
+        auto request = MakeHolder<NSequenceProxy::TEvSequenceProxy::TEvNextVal>(path);
+        runtime.Send(new IEventHandle(NSequenceProxy::MakeSequenceProxyServiceID(), sender, request.Release()));
+    }
+
+    i64 WaitNextValResult(
+            TTestActorRuntime& runtime, const TActorId& sender, Ydb::StatusIds::StatusCode expectedStatus) {
+        auto ev = runtime.GrabEdgeEventRethrow<NSequenceProxy::TEvSequenceProxy::TEvNextValResult>(sender);
+        auto* msg = ev->Get();
+        UNIT_ASSERT_VALUES_EQUAL(msg->Status, expectedStatus);
+        return msg->Value;
+    }
+
+    i64 DoNextVal(TTestActorRuntime& runtime, const TString& path, Ydb::StatusIds::StatusCode expectedStatus) {
+        auto sender = runtime.AllocateEdgeActor(0);
+        SendNextValRequest(runtime, sender, path);
+        return WaitNextValResult(runtime, sender, expectedStatus);
     }
 }

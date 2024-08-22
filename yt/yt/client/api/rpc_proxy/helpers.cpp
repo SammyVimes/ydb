@@ -1,6 +1,9 @@
 #include "helpers.h"
 
 #include <yt/yt/client/api/rowset.h>
+#include <yt/yt/client/api/table_client.h>
+
+#include <yt/yt/client/sequoia_client/public.h>
 
 #include <yt/yt/client/table_client/columnar_statistics.h>
 #include <yt/yt/client/table_client/column_sort_schema.h>
@@ -34,6 +37,9 @@ void ThrowUnimplemented(const TString& method)
 ////////////////////////////////////////////////////////////////////////////////
 
 namespace NProto {
+
+using NYT::ToProto;
+using NYT::FromProto;
 
 ////////////////////////////////////////////////////////////////////////////////
 // OPTIONS
@@ -73,9 +79,9 @@ void ToProto(
 {
     proto->set_read_from(static_cast<NProto::EMasterReadKind>(options.ReadFrom));
     proto->set_disable_per_user_cache(options.DisablePerUserCache);
-    proto->set_expire_after_successful_update_time(NYT::ToProto<i64>(options.ExpireAfterSuccessfulUpdateTime));
-    proto->set_expire_after_failed_update_time(NYT::ToProto<i64>(options.ExpireAfterFailedUpdateTime));
-    proto->set_success_staleness_bound(NYT::ToProto<i64>(options.SuccessStalenessBound));
+    proto->set_expire_after_successful_update_time(ToProto<i64>(options.ExpireAfterSuccessfulUpdateTime));
+    proto->set_expire_after_failed_update_time(ToProto<i64>(options.ExpireAfterFailedUpdateTime));
+    proto->set_success_staleness_bound(ToProto<i64>(options.SuccessStalenessBound));
     if (options.CacheStickyGroupSize) {
         proto->set_cache_sticky_group_size(*options.CacheStickyGroupSize);
     }
@@ -116,7 +122,7 @@ void ToProto(
 {
     protoOptions->set_read_from(static_cast<NProto::ETabletReadKind>(options.ReadFrom));
     if (options.CachedSyncReplicasTimeout) {
-        protoOptions->set_cached_sync_replicas_timeout(NYT::ToProto<i64>(*options.CachedSyncReplicasTimeout));
+        protoOptions->set_cached_sync_replicas_timeout(ToProto<i64>(*options.CachedSyncReplicasTimeout));
     }
 }
 
@@ -231,7 +237,7 @@ void ToProto(
         proto->set_subject_name(*result.SubjectName);
     }
 
-    NYT::ToProto(proto->mutable_missing_subjects(), result.MissingSubjects);
+    ToProto(proto->mutable_missing_subjects(), result.MissingSubjects);
 }
 
 void FromProto(
@@ -247,7 +253,7 @@ void FromProto(
         result->SubjectName.reset();
     }
 
-    NYT::FromProto(&result->MissingSubjects, proto.missing_subjects());
+    FromProto(&result->MissingSubjects, proto.missing_subjects());
 }
 
 void ToProto(
@@ -255,7 +261,7 @@ void ToProto(
     const NApi::TListOperationsResult& result)
 {
     proto->Clear();
-    NYT::ToProto(proto->mutable_operations(), result.Operations);
+    ToProto(proto->mutable_operations(), result.Operations);
 
     if (result.PoolTreeCounts) {
         auto* poolTreeCounts = proto->mutable_pool_tree_counts()->mutable_entries();
@@ -307,7 +313,7 @@ void FromProto(
     NApi::TListOperationsResult* result,
     const NProto::TListOperationsResult& proto)
 {
-    NYT::FromProto(&result->Operations, proto.operations());
+    FromProto(&result->Operations, proto.operations());
 
     if (proto.has_pool_tree_counts()) {
         result->PoolTreeCounts.emplace();
@@ -345,7 +351,7 @@ void FromProto(
         std::fill(result->StateCounts->begin(), result->StateCounts->end(), 0);
         for (const auto& stateCount: proto.state_counts().entries()) {
             auto state = ConvertOperationStateFromProto(stateCount.state());
-            YT_VERIFY(result->StateCounts->IsDomainValue(state));
+            YT_VERIFY(result->StateCounts->IsValidIndex(state));
             YT_VERIFY((*result->StateCounts)[state] == 0);
             (*result->StateCounts)[state] = stateCount.count();
         }
@@ -357,7 +363,7 @@ void FromProto(
         std::fill(result->TypeCounts->begin(), result->TypeCounts->end(), 0);
         for (const auto& typeCount: proto.type_counts().entries()) {
             auto type = ConvertOperationTypeFromProto(typeCount.type());
-            YT_VERIFY(result->TypeCounts->IsDomainValue(type));
+            YT_VERIFY(result->TypeCounts->IsValidIndex(type));
             YT_VERIFY((*result->TypeCounts)[type] == 0);
             (*result->TypeCounts)[type] = typeCount.count();
         }
@@ -378,7 +384,7 @@ void ToProto(
     const NApi::TListJobsResult& result)
 {
     proto->Clear();
-    NYT::ToProto(proto->mutable_jobs(), result.Jobs);
+    ToProto(proto->mutable_jobs(), result.Jobs);
 
     if (result.CypressJobCount) {
         proto->set_cypress_job_count(*result.CypressJobCount);
@@ -391,14 +397,14 @@ void ToProto(
     }
 
     ToProto(proto->mutable_statistics(), result.Statistics);
-    NYT::ToProto(proto->mutable_errors(), result.Errors);
+    ToProto(proto->mutable_errors(), result.Errors);
 }
 
 void FromProto(
     NApi::TListJobsResult* result,
     const NProto::TListJobsResult& proto)
 {
-    NYT::FromProto(&result->Jobs, proto.jobs());
+    FromProto(&result->Jobs, proto.jobs());
 
     if (proto.has_cypress_job_count()) {
         result->CypressJobCount = proto.cypress_job_count();
@@ -417,7 +423,7 @@ void FromProto(
     }
 
     FromProto(&result->Statistics, proto.statistics());
-    NYT::FromProto(&result->Errors, proto.errors());
+    FromProto(&result->Errors, proto.errors());
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -426,9 +432,9 @@ void FromProto(
 
 void ToProto(NProto::TColumnSchema* protoSchema, const NTableClient::TColumnSchema& schema)
 {
-    protoSchema->set_stable_name(schema.StableName().Get());
+    protoSchema->set_stable_name(schema.StableName().Underlying());
     protoSchema->set_name(schema.Name());
-    protoSchema->set_type(NYT::ToProto<int>(GetPhysicalType(schema.CastToV1Type())));
+    protoSchema->set_type(ToProto<int>(GetPhysicalType(schema.CastToV1Type())));
     auto typeV3Yson = ConvertToYsonString(TTypeV3LogicalTypeWrapper{schema.LogicalType()});
     protoSchema->set_type_v3(typeV3Yson.ToString());
     if (schema.Lock()) {
@@ -447,7 +453,7 @@ void ToProto(NProto::TColumnSchema* protoSchema, const NTableClient::TColumnSche
         protoSchema->clear_aggregate();
     }
     if (schema.SortOrder()) {
-        protoSchema->set_sort_order(NYT::ToProto<int>(*schema.SortOrder()));
+        protoSchema->set_sort_order(ToProto<int>(*schema.SortOrder()));
     } else {
         protoSchema->clear_sort_order();
     }
@@ -473,8 +479,8 @@ void FromProto(NTableClient::TColumnSchema* schema, const NProto::TColumnSchema&
     schema->SetName(protoSchema.name());
     schema->SetStableName(
         protoSchema.has_stable_name()
-        ? TStableName(protoSchema.stable_name())
-        : TStableName(protoSchema.name()));
+        ? TColumnStableName(protoSchema.stable_name())
+        : TColumnStableName(protoSchema.name()));
 
     auto physicalType = CheckedEnumCast<EValueType>(protoSchema.type());
 
@@ -487,10 +493,10 @@ void FromProto(NTableClient::TColumnSchema* schema, const NProto::TColumnSchema&
                 << TErrorAttribute("type_v3", ToString(*columnType))
                 << TErrorAttribute("required", protoSchema.required());
         }
-        if (protoSchema.has_logical_type() && v1Type != NYT::FromProto<ESimpleLogicalValueType>(protoSchema.logical_type())) {
+        if (protoSchema.has_logical_type() && v1Type != FromProto<ESimpleLogicalValueType>(protoSchema.logical_type())) {
             THROW_ERROR_EXCEPTION("Fields \"type_v3\" and \"logical_type\" do not match")
                 << TErrorAttribute("type_v3", ToString(*columnType))
-                << TErrorAttribute("logical_type", NYT::FromProto<ESimpleLogicalValueType>(protoSchema.logical_type()));
+                << TErrorAttribute("logical_type", FromProto<ESimpleLogicalValueType>(protoSchema.logical_type()));
         }
         if (protoSchema.has_type() && GetPhysicalType(v1Type) != physicalType) {
             THROW_ERROR_EXCEPTION("Fields \"type_v3\" and \"logical_type\" do not match")
@@ -524,8 +530,6 @@ void FromProto(NTableClient::TColumnSchema* schema, const NProto::TColumnSchema&
 
 void ToProto(NProto::TTableSchema* protoSchema, const NTableClient::TTableSchema& schema)
 {
-    using NYT::ToProto;
-
     ToProto(protoSchema->mutable_columns(), schema.Columns());
     protoSchema->set_strict(schema.GetStrict());
     protoSchema->set_unique_keys(schema.GetUniqueKeys());
@@ -533,8 +537,6 @@ void ToProto(NProto::TTableSchema* protoSchema, const NTableClient::TTableSchema
 
 void FromProto(NTableClient::TTableSchema* schema, const NProto::TTableSchema& protoSchema)
 {
-    using NYT::FromProto;
-
     *schema = NTableClient::TTableSchema(
         FromProto<std::vector<NTableClient::TColumnSchema>>(protoSchema.columns()),
         protoSchema.strict(),
@@ -565,8 +567,6 @@ void ToProto(NProto::TTabletInfo* protoTabletInfo, const NTabletClient::TTabletI
 
 void FromProto(NTabletClient::TTabletInfo* tabletInfo, const NProto::TTabletInfo& protoTabletInfo)
 {
-    using NYT::FromProto;
-
     tabletInfo->TabletId =
         FromProto<TTabletId>(protoTabletInfo.tablet_id());
     tabletInfo->MountRevision = protoTabletInfo.mount_revision();
@@ -595,7 +595,7 @@ void ToProto(
     protoStatistics->set_incomplete_output(statistics.IncompleteOutput);
     protoStatistics->set_memory_usage(statistics.MemoryUsage);
 
-    NYT::ToProto(protoStatistics->mutable_inner_statistics(), statistics.InnerStatistics);
+    ToProto(protoStatistics->mutable_inner_statistics(), statistics.InnerStatistics);
 }
 
 void FromProto(
@@ -616,7 +616,23 @@ void FromProto(
     statistics->IncompleteOutput = protoStatistics.incomplete_output();
     statistics->MemoryUsage = protoStatistics.memory_usage();
 
-    NYT::FromProto(&statistics->InnerStatistics, protoStatistics.inner_statistics());
+    FromProto(&statistics->InnerStatistics, protoStatistics.inner_statistics());
+}
+
+void ToProto(
+    NProto::TVersionedReadOptions* protoOptions,
+    const NTableClient::TVersionedReadOptions& options)
+{
+    protoOptions->set_read_mode(static_cast<i32>(options.ReadMode));
+}
+
+void FromProto(
+    NTableClient::TVersionedReadOptions* options,
+    const NProto::TVersionedReadOptions& protoOptions)
+{
+    if (protoOptions.has_read_mode()) {
+        options->ReadMode = CheckedEnumCast<EVersionedIOMode>(protoOptions.read_mode());
+    }
 }
 
 void ToProto(NProto::TOperation* protoOperation, const NApi::TOperation& operation)
@@ -634,10 +650,10 @@ void ToProto(NProto::TOperation* protoOperation, const NApi::TOperation& operati
     }
 
     if (operation.StartTime) {
-        protoOperation->set_start_time(NYT::ToProto<i64>(*operation.StartTime));
+        protoOperation->set_start_time(ToProto<i64>(*operation.StartTime));
     }
     if (operation.FinishTime) {
-        protoOperation->set_finish_time(NYT::ToProto<i64>(*operation.FinishTime));
+        protoOperation->set_finish_time(ToProto<i64>(*operation.FinishTime));
     }
 
     if (operation.AuthenticatedUser) {
@@ -692,6 +708,10 @@ void ToProto(NProto::TOperation* protoOperation, const NApi::TOperation& operati
         protoOperation->set_slot_index_per_pool_tree(operation.SlotIndexPerPoolTree.ToString());
     }
 
+    if (operation.SchedulingAttributesPerPoolTree) {
+        protoOperation->set_scheduling_attributes_per_pool_tree(operation.SchedulingAttributesPerPoolTree.ToString());
+    }
+
     if (operation.TaskNames) {
         protoOperation->set_task_names(operation.TaskNames.ToString());
     }
@@ -715,7 +735,7 @@ void ToProto(NProto::TOperation* protoOperation, const NApi::TOperation& operati
 void FromProto(NApi::TOperation* operation, const NProto::TOperation& protoOperation)
 {
     if (protoOperation.has_id()) {
-        operation->Id = NYT::FromProto<NScheduler::TOperationId>(protoOperation.id());
+        operation->Id = FromProto<NScheduler::TOperationId>(protoOperation.id());
     } else {
         operation->Id.reset();
     }
@@ -824,6 +844,12 @@ void FromProto(NApi::TOperation* operation, const NProto::TOperation& protoOpera
         operation->SlotIndexPerPoolTree = TYsonString();
     }
 
+    if (protoOperation.has_scheduling_attributes_per_pool_tree()) {
+        operation->SchedulingAttributesPerPoolTree = TYsonString(protoOperation.scheduling_attributes_per_pool_tree());
+    } else {
+        operation->SchedulingAttributesPerPoolTree = TYsonString();
+    }
+
     if (protoOperation.has_task_names()) {
         operation->TaskNames = TYsonString(protoOperation.task_names());
     } else {
@@ -879,10 +905,10 @@ void ToProto(NProto::TJob* protoJob, const NApi::TJob& job)
     }
 
     if (job.StartTime) {
-        protoJob->set_start_time(NYT::ToProto<i64>(*job.StartTime));
+        protoJob->set_start_time(ToProto<i64>(*job.StartTime));
     }
     if (job.FinishTime) {
-        protoJob->set_finish_time(NYT::ToProto<i64>(*job.FinishTime));
+        protoJob->set_finish_time(ToProto<i64>(*job.FinishTime));
     }
 
     if (job.Address) {
@@ -904,6 +930,10 @@ void ToProto(NProto::TJob* protoJob, const NApi::TJob& job)
     if (job.Error) {
         protoJob->set_error(job.Error.ToString());
     }
+    if (job.InterruptionInfo) {
+        protoJob->set_interruption_info(job.InterruptionInfo.ToString());
+    }
+
     if (job.BriefStatistics) {
         protoJob->set_brief_statistics(job.BriefStatistics.ToString());
     }
@@ -942,6 +972,12 @@ void ToProto(NProto::TJob* protoJob, const NApi::TJob& job)
     }
     if (job.JobCookie) {
         protoJob->set_job_cookie(*job.JobCookie);
+    }
+    if (job.ArchiveFeatures) {
+        protoJob->set_archive_features(job.ArchiveFeatures.ToString());
+    }
+    if (job.MonitoringDescriptor) {
+        protoJob->set_monitoring_descriptor(*job.MonitoringDescriptor);
     }
 }
 
@@ -1012,6 +1048,11 @@ void FromProto(NApi::TJob* job, const NProto::TJob& protoJob)
     } else {
         job->Error = TYsonString();
     }
+    if (protoJob.has_interruption_info()) {
+        job->InterruptionInfo = TYsonString(protoJob.interruption_info());
+    } else {
+        job->InterruptionInfo = TYsonString();
+    }
     if (protoJob.has_brief_statistics()) {
         job->BriefStatistics = TYsonString(protoJob.brief_statistics());
     } else {
@@ -1077,6 +1118,16 @@ void FromProto(NApi::TJob* job, const NProto::TJob& protoJob)
     } else {
         job->JobCookie.reset();
     }
+    if (protoJob.has_archive_features()) {
+        job->ArchiveFeatures = TYsonString(protoJob.archive_features());
+    } else {
+        job->ArchiveFeatures = TYsonString();
+    }
+    if (protoJob.has_monitoring_descriptor()) {
+        job->MonitoringDescriptor = protoJob.monitoring_descriptor();
+    } else {
+        job->MonitoringDescriptor.reset();
+    }
 }
 
 void ToProto(
@@ -1109,7 +1160,7 @@ void FromProto(
     std::fill(statistics->StateCounts.begin(), statistics->StateCounts.end(), 0);
     for (const auto& stateCount: protoStatistics.state_counts().entries()) {
         auto state = ConvertJobStateFromProto(stateCount.state());
-        YT_VERIFY(statistics->StateCounts.IsDomainValue(state));
+        YT_VERIFY(statistics->StateCounts.IsValidIndex(state));
         YT_VERIFY(statistics->StateCounts[state] == 0);
         statistics->StateCounts[state] = stateCount.count();
     }
@@ -1117,7 +1168,7 @@ void FromProto(
     std::fill(statistics->TypeCounts.begin(), statistics->TypeCounts.end(), 0);
     for (const auto& typeCount: protoStatistics.type_counts().entries()) {
         auto type = ConvertJobTypeFromProto(typeCount.type());
-        YT_VERIFY(statistics->TypeCounts.IsDomainValue(type));
+        YT_VERIFY(statistics->TypeCounts.IsValidIndex(type));
         YT_VERIFY(statistics->TypeCounts[type] == 0);
         statistics->TypeCounts[type] = typeCount.count();
     }
@@ -1137,10 +1188,10 @@ void FromProto(
     const NChunkClient::TFetchChunkSpecConfigPtr& fetchChunkSpecConfig,
     const NProto::TFetchChunkSpecConfig& protoFetchChunkSpecConfig)
 {
-    NYT::FromProto(
+    FromProto(
         &fetchChunkSpecConfig->MaxChunksPerFetch,
         protoFetchChunkSpecConfig.max_chunk_per_fetch());
-    NYT::FromProto(
+    FromProto(
         &fetchChunkSpecConfig->MaxChunksPerLocateRequest,
         protoFetchChunkSpecConfig.max_chunk_per_locate_request());
 }
@@ -1150,7 +1201,7 @@ void ToProto(
     const NChunkClient::TFetcherConfigPtr& fetcherConfig)
 {
     protoFetcherConfig->set_node_rpc_timeout(
-        NYT::ToProto<i64>(fetcherConfig->NodeRpcTimeout));
+        ToProto<i64>(fetcherConfig->NodeRpcTimeout));
 }
 
 void FromProto(
@@ -1166,7 +1217,7 @@ void ToProto(
 {
     protoStatistics->Clear();
 
-    NYT::ToProto(protoStatistics->mutable_column_data_weights(), statistics.ColumnDataWeights);
+    ToProto(protoStatistics->mutable_column_data_weights(), statistics.ColumnDataWeights);
     if (statistics.TimestampTotalWeight) {
         protoStatistics->set_timestamp_total_weight(*statistics.TimestampTotalWeight);
     }
@@ -1174,7 +1225,7 @@ void ToProto(
 
     NYT::NTableClient::ToProto(protoStatistics->mutable_column_min_values(), statistics.ColumnMinValues);
     NYT::NTableClient::ToProto(protoStatistics->mutable_column_max_values(), statistics.ColumnMaxValues);
-    NYT::ToProto(protoStatistics->mutable_column_non_null_value_counts(), statistics.ColumnNonNullValueCounts);
+    ToProto(protoStatistics->mutable_column_non_null_value_counts(), statistics.ColumnNonNullValueCounts);
 
     if (statistics.ChunkRowCount) {
         protoStatistics->set_chunk_row_count(*statistics.ChunkRowCount);
@@ -1182,13 +1233,15 @@ void ToProto(
     if (statistics.LegacyChunkRowCount) {
         protoStatistics->set_legacy_chunk_row_count(*statistics.LegacyChunkRowCount);
     }
+
+    ToProto(protoStatistics->mutable_column_hyperloglog_digests(), statistics.LargeStatistics.ColumnHyperLogLogDigests);
 }
 
 void FromProto(
     NTableClient::TColumnarStatistics* statistics,
     const NProto::TColumnarStatistics& protoStatistics)
 {
-    NYT::FromProto(&statistics->ColumnDataWeights, protoStatistics.column_data_weights());
+    FromProto(&statistics->ColumnDataWeights, protoStatistics.column_data_weights());
     if (protoStatistics.has_timestamp_total_weight()) {
         statistics->TimestampTotalWeight = protoStatistics.timestamp_total_weight();
     } else {
@@ -1198,7 +1251,7 @@ void FromProto(
 
     NYT::NTableClient::FromProto(&statistics->ColumnMinValues, protoStatistics.column_min_values());
     NYT::NTableClient::FromProto(&statistics->ColumnMaxValues, protoStatistics.column_max_values());
-    NYT::FromProto(&statistics->ColumnNonNullValueCounts, protoStatistics.column_non_null_value_counts());
+    FromProto(&statistics->ColumnNonNullValueCounts, protoStatistics.column_non_null_value_counts());
 
     if (protoStatistics.has_chunk_row_count()) {
         statistics->ChunkRowCount = protoStatistics.chunk_row_count();
@@ -1210,6 +1263,8 @@ void FromProto(
     } else {
         statistics->LegacyChunkRowCount.reset();
     }
+
+    FromProto(&statistics->LargeStatistics.ColumnHyperLogLogDigests, protoStatistics.column_hyperloglog_digests());
 }
 
 void ToProto(
@@ -1248,7 +1303,7 @@ void FromProto(
     NApi::TMultiTablePartitions* multiTablePartitions,
     const NProto::TRspPartitionTables& protoRspPartitionTables)
 {
-    NYT::FromProto(
+    FromProto(
         &multiTablePartitions->Partitions,
         protoRspPartitionTables.partitions());
 }
@@ -1272,6 +1327,193 @@ void FromProto(
     result->MaxDataWeight = proto.max_data_weight();
     if (proto.has_data_weight_per_row_hint()) {
         result->DataWeightPerRowHint = proto.data_weight_per_row_hint();
+    }
+}
+
+void ToProto(
+    NProto::TTableBackupManifest* protoManifest,
+    const NApi::TTableBackupManifestPtr& manifest)
+{
+    protoManifest->set_source_path(manifest->SourcePath);
+    protoManifest->set_destination_path(manifest->DestinationPath);
+    protoManifest->set_ordered_mode(ToProto<i32>(manifest->OrderedMode));
+}
+
+void FromProto(
+    NApi::TTableBackupManifestPtr* manifest,
+    const NProto::TTableBackupManifest& protoManifest)
+{
+    *manifest = New<NApi::TTableBackupManifest>();
+
+    (*manifest)->SourcePath = protoManifest.source_path();
+    (*manifest)->DestinationPath = protoManifest.destination_path();
+    (*manifest)->OrderedMode = CheckedEnumCast<EOrderedTableBackupMode>(protoManifest.ordered_mode());
+}
+
+void ToProto(
+    NProto::TBackupManifest::TClusterManifest* protoEntry,
+    const std::pair<TString, std::vector<NApi::TTableBackupManifestPtr>>& entry)
+{
+    protoEntry->set_cluster(entry.first);
+    ToProto(protoEntry->mutable_table_manifests(), entry.second);
+}
+
+void FromProto(
+    std::pair<TString, std::vector<NApi::TTableBackupManifestPtr>>* entry,
+    const NProto::TBackupManifest::TClusterManifest& protoEntry)
+{
+    entry->first = protoEntry.cluster();
+    FromProto(&entry->second, protoEntry.table_manifests());
+}
+
+void ToProto(
+    NProto::TBackupManifest* protoManifest,
+    const NApi::TBackupManifest& manifest)
+{
+    ToProto(protoManifest->mutable_clusters(), manifest.Clusters);
+}
+
+void FromProto(
+    NApi::TBackupManifest* manifest,
+    const NProto::TBackupManifest& protoManifest)
+{
+    FromProto(&manifest->Clusters, protoManifest.clusters());
+}
+
+void ToProto(
+    NProto::TQuery* protoQuery,
+    const NApi::TQuery& query)
+{
+    protoQuery->Clear();
+
+    ToProto(protoQuery->mutable_id(), query.Id);
+
+    if (query.Engine) {
+        protoQuery->set_engine(ConvertQueryEngineToProto(*query.Engine));
+    }
+    if (query.Query) {
+        protoQuery->set_query(*query.Query);
+    }
+    if (query.Files) {
+        protoQuery->set_files(query.Files->ToString());
+    }
+    if (query.StartTime) {
+        protoQuery->set_start_time(NYT::ToProto<i64>(*query.StartTime));
+    }
+    if (query.FinishTime) {
+        protoQuery->set_finish_time(NYT::ToProto<i64>(*query.FinishTime));
+    }
+    if (query.Settings) {
+        protoQuery->set_settings(query.Settings.ToString());
+    }
+    if (query.User) {
+        protoQuery->set_user(*query.User);
+    }
+    if (query.AccessControlObject) {
+        protoQuery->set_access_control_object(*query.AccessControlObject);
+    }
+    protoQuery->set_access_control_objects(query.AccessControlObjects->ToString());
+
+    if (query.State) {
+        protoQuery->set_state(ConvertQueryStateToProto(*query.State));
+    }
+    if (query.ResultCount) {
+        protoQuery->set_result_count(*query.ResultCount);
+    }
+    if (query.Progress) {
+        protoQuery->set_progress(query.Progress.ToString());
+    }
+    if (query.Error) {
+        ToProto(protoQuery->mutable_error(), *query.Error);
+    }
+    if (query.Annotations) {
+        protoQuery->set_annotations(query.Annotations.ToString());
+    }
+    if (query.OtherAttributes) {
+        ToProto(protoQuery->mutable_other_attributes(), *query.OtherAttributes);
+    }
+}
+
+void FromProto(
+    NApi::TQuery* query,
+    const NProto::TQuery& protoQuery)
+{
+    FromProto(&query->Id, protoQuery.id());
+
+    if (protoQuery.has_engine()) {
+        query->Engine = ConvertQueryEngineFromProto(protoQuery.engine());
+    } else {
+        query->Engine.reset();
+    }
+    if (protoQuery.has_query()) {
+        query->Query = protoQuery.query();
+    } else {
+        query->Query.reset();
+    }
+    if (protoQuery.has_files()) {
+        query->Files = TYsonString(protoQuery.files());
+    } else {
+        query->Files.reset();
+    }
+    if (protoQuery.has_start_time()) {
+        query->StartTime = TInstant::FromValue(protoQuery.start_time());
+    } else {
+        query->StartTime.reset();
+    }
+    if (protoQuery.has_finish_time()) {
+        query->FinishTime = TInstant::FromValue(protoQuery.finish_time());
+    } else {
+        query->FinishTime.reset();
+    }
+    if (protoQuery.has_settings()) {
+        query->Settings = TYsonString(protoQuery.settings());
+    } else {
+        query->Settings = TYsonString{};
+    }
+    if (protoQuery.has_user()) {
+        query->User = protoQuery.user();
+    } else {
+        query->User.reset();
+    }
+    if (protoQuery.has_access_control_object()) {
+        query->AccessControlObject = protoQuery.access_control_object();
+    } else {
+        query->AccessControlObject.reset();
+    }
+    if (protoQuery.has_access_control_objects()) {
+        query->AccessControlObjects = TYsonString(protoQuery.access_control_objects());
+    } else {
+        query->AccessControlObjects.reset();
+    }
+    if (protoQuery.has_state()) {
+        query->State = ConvertQueryStateFromProto(protoQuery.state());
+    } else {
+        query->State.reset();
+    }
+    if (protoQuery.has_result_count()) {
+        query->ResultCount = protoQuery.result_count();
+    } else {
+        query->ResultCount.reset();
+    }
+    if (protoQuery.has_progress()) {
+        query->Progress = TYsonString(protoQuery.progress());
+    } else {
+        query->Progress = TYsonString{};
+    }
+    if (protoQuery.has_error()) {
+        query->Error = FromProto<TError>(protoQuery.error());
+    } else {
+        query->Error.reset();
+    }
+    if (protoQuery.has_annotations()) {
+        query->Annotations = TYsonString(protoQuery.annotations());
+    } else {
+        query->Annotations = TYsonString{};
+    }
+    if (protoQuery.has_other_attributes()) {
+        query->OtherAttributes = NYTree::FromProto(protoQuery.other_attributes());
+    } else if (query->OtherAttributes) {
+        query->OtherAttributes->Clear();
     }
 }
 
@@ -1591,27 +1833,144 @@ NJobTrackerClient::EJobState ConvertJobStateFromProto(
     YT_ABORT();
 }
 
+NProto::EQueryEngine ConvertQueryEngineToProto(
+    NQueryTrackerClient::EQueryEngine queryEngine)
+{
+    switch (queryEngine) {
+        case NQueryTrackerClient::EQueryEngine::Ql:
+            return NProto::EQueryEngine::QE_QL;
+        case NQueryTrackerClient::EQueryEngine::Yql:
+            return NProto::EQueryEngine::QE_YQL;
+        case NQueryTrackerClient::EQueryEngine::Chyt:
+            return NProto::EQueryEngine::QE_CHYT;
+        case NQueryTrackerClient::EQueryEngine::Mock:
+            return NProto::EQueryEngine::QE_MOCK;
+        case NQueryTrackerClient::EQueryEngine::Spyt:
+            return NProto::EQueryEngine::QE_SPYT;
+    }
+    YT_ABORT();
+}
+
+NQueryTrackerClient::EQueryEngine ConvertQueryEngineFromProto(
+    NProto::EQueryEngine proto)
+{
+    switch (proto) {
+        case NProto::EQueryEngine::QE_QL:
+            return NQueryTrackerClient::EQueryEngine::Ql;
+        case NProto::EQueryEngine::QE_YQL:
+            return NQueryTrackerClient::EQueryEngine::Yql;
+        case NProto::EQueryEngine::QE_CHYT:
+            return NQueryTrackerClient::EQueryEngine::Chyt;
+        case NProto::EQueryEngine::QE_MOCK:
+            return NQueryTrackerClient::EQueryEngine::Mock;
+        case NProto::EQueryEngine::QE_SPYT:
+            return NQueryTrackerClient::EQueryEngine::Spyt;
+        case NProto::EQueryEngine::QE_UNKNOWN:
+            THROW_ERROR_EXCEPTION("Protobuf contains unknown value for query engine");
+    }
+    YT_ABORT();
+}
+
+NProto::EQueryState ConvertQueryStateToProto(
+    NQueryTrackerClient::EQueryState queryState)
+{
+    switch (queryState) {
+        case NQueryTrackerClient::EQueryState::Draft:
+            return NProto::EQueryState::QS_DRAFT;
+        case NQueryTrackerClient::EQueryState::Pending:
+            return NProto::EQueryState::QS_PENDING;
+        case NQueryTrackerClient::EQueryState::Running:
+            return NProto::EQueryState::QS_RUNNING;
+        case NQueryTrackerClient::EQueryState::Aborting:
+            return NProto::EQueryState::QS_ABORTING;
+        case NQueryTrackerClient::EQueryState::Aborted:
+            return NProto::EQueryState::QS_ABORTED;
+        case NQueryTrackerClient::EQueryState::Completing:
+            return NProto::EQueryState::QS_COMPLETING;
+        case NQueryTrackerClient::EQueryState::Completed:
+            return NProto::EQueryState::QS_COMPLETED;
+        case NQueryTrackerClient::EQueryState::Failing:
+            return NProto::EQueryState::QS_FAILING;
+        case NQueryTrackerClient::EQueryState::Failed:
+            return NProto::EQueryState::QS_FAILED;
+    }
+    YT_ABORT();
+}
+
+NQueryTrackerClient::EQueryState ConvertQueryStateFromProto(
+    NProto::EQueryState proto)
+{
+    switch (proto) {
+        case NProto::EQueryState::QS_DRAFT:
+            return NQueryTrackerClient::EQueryState::Draft;
+        case NProto::EQueryState::QS_PENDING:
+            return NQueryTrackerClient::EQueryState::Pending;
+        case NProto::EQueryState::QS_RUNNING:
+            return NQueryTrackerClient::EQueryState::Running;
+        case NProto::EQueryState::QS_ABORTING:
+            return NQueryTrackerClient::EQueryState::Aborting;
+        case NProto::EQueryState::QS_ABORTED:
+            return NQueryTrackerClient::EQueryState::Aborted;
+        case NProto::EQueryState::QS_COMPLETING:
+            return NQueryTrackerClient::EQueryState::Completing;
+        case NProto::EQueryState::QS_COMPLETED:
+            return NQueryTrackerClient::EQueryState::Completed;
+        case NProto::EQueryState::QS_FAILING:
+            return NQueryTrackerClient::EQueryState::Failing;
+        case NProto::EQueryState::QS_FAILED:
+            return NQueryTrackerClient::EQueryState::Failed;
+        case NProto::EQueryState::QS_UNKNOWN:
+            THROW_ERROR_EXCEPTION("Protobuf contains unknown value for query state");
+    }
+    YT_ABORT();
+}
+
 ////////////////////////////////////////////////////////////////////////////////
 
 } // namespace NProto
 
 ////////////////////////////////////////////////////////////////////////////////
 
-bool IsRetriableError(const TError& error, bool retryProxyBanned)
+bool IsDynamicTableRetriableError(const TError& error)
 {
+    return
+        error.FindMatching(NTabletClient::EErrorCode::RowIsBlocked) ||
+        error.FindMatching(NTabletClient::EErrorCode::BlockedRowWaitTimeout) ||
+        error.FindMatching(NTabletClient::EErrorCode::NoSuchCell) ||
+        error.FindMatching(NTabletClient::EErrorCode::ChunkIsNotPreloaded) ||
+        error.FindMatching(NTabletClient::EErrorCode::NoInSyncReplicas) ||
+        error.FindMatching(NTabletClient::EErrorCode::TabletNotMounted) ||
+        error.FindMatching(NTabletClient::EErrorCode::NoSuchTablet);
+}
+
+bool IsRetriableError(const TError& error, bool retryProxyBanned, bool retrySequoiaErrorsOnly)
+{
+    // For now transient Sequoia failures are always retriable even if client's
+    // retries are disabled.
+    // TODO(kvk1920): consider to make a separate flag "EnableSequoiaRetries"
+    // for this.
+    if (error.FindMatching(NSequoiaClient::EErrorCode::SequoiaRetriableError)) {
+        return true;
+    }
+
+    if (retrySequoiaErrorsOnly) {
+        return false;
+    }
+
     if (error.FindMatching(NRpcProxy::EErrorCode::ProxyBanned) ||
         error.FindMatching(NRpc::EErrorCode::PeerBanned))
     {
         return retryProxyBanned;
     }
 
-    //! Retriable error codes are based on the ones used in http client.
     return
+        NRpc::IsRetriableError(error) ||
         error.FindMatching(NRpc::EErrorCode::RequestQueueSizeLimitExceeded) ||
         error.FindMatching(NRpc::EErrorCode::TransportError) ||
         error.FindMatching(NRpc::EErrorCode::Unavailable) ||
         error.FindMatching(NRpc::EErrorCode::TransientFailure) ||
-        error.FindMatching(NSecurityClient::EErrorCode::RequestQueueSizeLimitExceeded);
+        error.FindMatching(NSecurityClient::EErrorCode::RequestQueueSizeLimitExceeded) ||
+        IsDynamicTableRetriableError(error);
 }
 
 ////////////////////////////////////////////////////////////////////////////////
@@ -1728,7 +2087,7 @@ TTableSchemaPtr DeserializeRowsetSchema(
     const NProto::TRowsetDescriptor& descriptor)
 {
     if (descriptor.has_schema()) {
-        return NYT::FromProto<TTableSchemaPtr>(descriptor.schema());
+        return FromProto<TTableSchemaPtr>(descriptor.schema());
     }
 
     // COMPAT(babenko)
@@ -1738,7 +2097,7 @@ TTableSchemaPtr DeserializeRowsetSchema(
         const auto& entry = descriptor.name_table_entries(i);
         if (entry.has_name()) {
             columns[i].SetName(entry.name());
-            columns[i].SetStableName(TStableName(entry.name()));
+            columns[i].SetStableName(TColumnStableName(entry.name()));
         }
         if (entry.has_logical_type()) {
             auto simpleLogicalType = CheckedEnumCast<NTableClient::ESimpleLogicalValueType>(entry.logical_type());
@@ -1777,7 +2136,8 @@ auto ReadRows<TVersionedRow>(IWireProtocolReader* reader, const TTableSchema& sc
 template <class TRow>
 TIntrusivePtr<NApi::IRowset<TRow>> DeserializeRowset(
     const NProto::TRowsetDescriptor& descriptor,
-    const TSharedRef& data)
+    const TSharedRef& data,
+    NTableClient::TRowBufferPtr rowBuffer)
 {
     if (descriptor.rowset_format() != NApi::NRpcProxy::NProto::RF_YT_WIRE) {
         THROW_ERROR_EXCEPTION("Unsupported rowset format %Qv",
@@ -1790,8 +2150,12 @@ TIntrusivePtr<NApi::IRowset<TRow>> DeserializeRowset(
         TRowsetTraits<TRow>::Kind,
         NApi::NRpcProxy::NProto::RF_YT_WIRE);
 
-    struct TDeserializedRowsetTag { };
-    auto reader = CreateWireProtocolReader(data, New<TRowBuffer>(TDeserializedRowsetTag()));
+    if (!rowBuffer) {
+        struct TDeserializedRowsetTag { };
+        rowBuffer = New<TRowBuffer>(TDeserializedRowsetTag());
+    }
+
+    auto reader = CreateWireProtocolReader(data, std::move(rowBuffer));
 
     auto schema = DeserializeRowsetSchema(descriptor);
     auto rows = ReadRows<TRow>(reader.get(), *schema);
@@ -1801,10 +2165,13 @@ TIntrusivePtr<NApi::IRowset<TRow>> DeserializeRowset(
 // Instantiate templates.
 template NApi::IUnversionedRowsetPtr DeserializeRowset(
     const NProto::TRowsetDescriptor& descriptor,
-    const TSharedRef& data);
+    const TSharedRef& data,
+    NTableClient::TRowBufferPtr buffer = nullptr);
+
 template NApi::IVersionedRowsetPtr DeserializeRowset(
     const NProto::TRowsetDescriptor& descriptor,
-    const TSharedRef& data);
+    const TSharedRef& data,
+    NTableClient::TRowBufferPtr buffer = nullptr);
 
 ////////////////////////////////////////////////////////////////////////////////
 

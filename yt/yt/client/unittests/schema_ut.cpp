@@ -202,8 +202,7 @@ TEST(TTableSchemaTest, ColumnTypeV3Deserialization)
               required=%true;
             }
         )"),
-        R"("type_v3" does not match "required")"
-    );
+        R"("type_v3" does not match "required")");
 
     EXPECT_THROW_WITH_SUBSTRING(
         ColumnFromYson(R"(
@@ -219,8 +218,7 @@ TEST(TTableSchemaTest, ColumnTypeV3Deserialization)
               type=utf8;
             }
         )"),
-        R"("type_v3" does not match "type")"
-    );
+        R"("type_v3" does not match "type")");
 }
 
 TEST(TTableSchemaTest, MaxInlineHunkSizeSerialization)
@@ -311,7 +309,7 @@ TEST(TTableSchemaTest, ColumnSchemaValidation)
             .SetExpression(TString("SomeExpression")));
 
     // Key columns can't be aggregated.
-     expectBad(
+    expectBad(
         TColumnSchema("Name", EValueType::String)
             .SetSortOrder(ESortOrder::Ascending)
             .SetAggregate(TString("sum")));
@@ -345,49 +343,40 @@ TEST(TTableSchemaTest, ColumnSchemaValidation)
         })));
 
     ValidateColumnSchema(
-        TColumnSchema("Column", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int8)), ESortOrder::Ascending)
-    );
+        TColumnSchema("Column", ListLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Int8)), ESortOrder::Ascending));
 
     expectBad(
-        TColumnSchema("Column", ListLogicalType(OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Any))), ESortOrder::Ascending)
-    );
-
-    expectBad(
-        TColumnSchema("Column", EValueType::String)
-            .SetMaxInlineHunkSize(0)
-    );
+        TColumnSchema("Column", ListLogicalType(OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Any))), ESortOrder::Ascending));
 
     expectBad(
         TColumnSchema("Column", EValueType::String)
-            .SetMaxInlineHunkSize(-1)
-    );
+            .SetMaxInlineHunkSize(0));
+
+    expectBad(
+        TColumnSchema("Column", EValueType::String)
+            .SetMaxInlineHunkSize(-1));
 
     expectBad(
         TColumnSchema("Column", EValueType::Int64)
-            .SetMaxInlineHunkSize(100)
-    );
+            .SetMaxInlineHunkSize(100));
 
     expectBad(
         TColumnSchema("Column", EValueType::String, ESortOrder::Ascending)
-            .SetMaxInlineHunkSize(100)
-    );
+            .SetMaxInlineHunkSize(100));
 
     ValidateColumnSchema(
         TColumnSchema("Column", EValueType::String)
-            .SetMaxInlineHunkSize(100)
-    );
+            .SetMaxInlineHunkSize(100));
 
     ValidateColumnSchema(
         TColumnSchema("Column", EValueType::Any)
-            .SetMaxInlineHunkSize(100)
-    );
+            .SetMaxInlineHunkSize(100));
 
     expectBad(
         TColumnSchema("Column", StructLogicalType({
             {"foo", SimpleLogicalType(ESimpleLogicalValueType::Int64)},
             {"bar", SimpleLogicalType(ESimpleLogicalValueType::String)},
-        }), ESortOrder::Ascending)
-    );
+        }), ESortOrder::Ascending));
 }
 
 TEST(TTableSchemaTest, ValidateTableSchemaTest)
@@ -416,7 +405,7 @@ TEST(TTableSchemaTest, ColumnSchemaProtobufBackwardCompatibility)
     EXPECT_EQ(*columnSchema.LogicalType(), *OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Uint64)));
     EXPECT_EQ(columnSchema.GetWireType(), EValueType::Uint64);
     EXPECT_EQ(columnSchema.Name(), "foo");
-    EXPECT_EQ(columnSchema.StableName().Get(), "foo");
+    EXPECT_EQ(columnSchema.StableName().Underlying(), "foo");
 
     columnSchemaProto.set_simple_logical_type(static_cast<int>(ESimpleLogicalValueType::Uint32));
     columnSchemaProto.set_name("foo");
@@ -426,7 +415,7 @@ TEST(TTableSchemaTest, ColumnSchemaProtobufBackwardCompatibility)
     EXPECT_EQ(*columnSchema.LogicalType(), *OptionalLogicalType(SimpleLogicalType(ESimpleLogicalValueType::Uint32)));
     EXPECT_EQ(columnSchema.GetWireType(), EValueType::Uint64);
     EXPECT_EQ(columnSchema.Name(), "foo");
-    EXPECT_EQ(columnSchema.StableName().Get(), "foo_stable");
+    EXPECT_EQ(columnSchema.StableName().Underlying(), "foo_stable");
 }
 
 TEST(TTableSchemaTest, EqualIgnoringRequiredness)

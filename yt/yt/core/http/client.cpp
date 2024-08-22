@@ -94,6 +94,17 @@ public:
         return StartRequest(EMethod::Put, url, headers);
     }
 
+    TFuture<IResponsePtr> Request(
+        EMethod method,
+        const TString& url,
+        const std::optional<TSharedRef>& body,
+        const THeadersPtr& headers) override
+    {
+        return WrapError(url, BIND([=, this, this_ = MakeStrong(this)] {
+            return DoRequest(method, url, body, headers);
+        }));
+    }
+
 private:
     const TClientConfigPtr Config_;
     const IDialerPtr Dialer_;
@@ -126,11 +137,15 @@ private:
         return TNetworkAddress(address, parsedUrl.Port.value_or(GetDefaultPort(parsedUrl)));
     }
 
-    std::pair<THttpOutputPtr, THttpInputPtr> OpenHttp(const TNetworkAddress& address)
+    std::pair<THttpOutputPtr, THttpInputPtr> OpenHttp(const TUrlRef& urlRef)
     {
+        auto context = New<TDialerContext>();
+        context->Host = urlRef.Host;
+        auto address = GetAddress(urlRef);
+
         // TODO(aleexfi): Enable connection pool by default
         if (Config_->MaxIdleConnections == 0) {
-            auto connection = WaitFor(Dialer_->Dial(address)).ValueOrThrow();
+            auto connection = WaitFor(Dialer_->Dial(address, std::move(context))).ValueOrThrow();
 
             auto input = New<THttpInput>(
                 connection,
@@ -146,7 +161,7 @@ private:
 
             return {std::move(output), std::move(input)};
         } else {
-            auto connection = WaitFor(ConnectionPool_->Connect(address)).ValueOrThrow();
+            auto connection = WaitFor(ConnectionPool_->Connect(address, std::move(context))).ValueOrThrow();
 
             auto reuseSharedState = New<NDetail::TReusableConnectionState>(connection, ConnectionPool_);
 
@@ -192,8 +207,7 @@ private:
             THttpOutputPtr request,
             THttpInputPtr response,
             TIntrusivePtr<TClient> client,
-            TString url
-        )
+            TString url)
             : Request_(std::move(request))
             , Response_(std::move(response))
             , Client_(std::move(client))
@@ -239,8 +253,8 @@ private:
         THttpInputPtr response;
 
         auto urlRef = ParseUrl(url);
-        auto address = GetAddress(urlRef);
-        std::tie(request, response) = OpenHttp(address);
+
+        std::tie(request, response) = OpenHttp(urlRef);
 
         request->SetHost(urlRef.Host, urlRef.PortStr);
         if (headers) {
@@ -266,28 +280,30 @@ private:
         }));
     }
 
-    TFuture<IResponsePtr> Request(
+    IResponsePtr DoRequest(
         EMethod method,
         const TString& url,
         const std::optional<TSharedRef>& body,
-        const THeadersPtr& headers)
+        const THeadersPtr& headers,
+        int redirectCount = 0)
     {
-        return WrapError(url, BIND([=, this, this_ = MakeStrong(this)] {
-            auto [request, response] = StartAndWriteHeaders(method, url, headers);
+        auto [request, response] = StartAndWriteHeaders(method, url, headers);
 
-            if (body) {
-                WaitFor(request->WriteBody(*body))
-                    .ThrowOnError();
-            } else {
-                WaitFor(request->Close())
-                    .ThrowOnError();
-            }
+        if (body) {
+            WaitFor(request->WriteBody(*body))
+                .ThrowOnError();
+        } else {
+            WaitFor(request->Close())
+                .ThrowOnError();
+        }
 
-            // Waits for response headers internally.
-            response->GetStatusCode();
+        // Waits for response headers internally.
+        auto redirectUrl = response->TryGetRedirectUrl();
+        if (redirectUrl && redirectCount < Config_->MaxRedirectCount) {
+            return DoRequest(method, *redirectUrl, body, headers, redirectCount + 1);
+        }
 
-            return IResponsePtr(response);
-        }));
+        return IResponsePtr(response);
     }
 };
 
@@ -307,7 +323,7 @@ IClientPtr CreateClient(
 {
     return CreateClient(
         config,
-        CreateDialer(New<TDialerConfig>(), poller, HttpLogger),
+        CreateDialer(New<TDialerConfig>(), poller, HttpLogger()),
         poller->GetInvoker());
 }
 

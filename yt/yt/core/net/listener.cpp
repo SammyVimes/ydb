@@ -16,7 +16,7 @@ using namespace NConcurrency;
 
 ////////////////////////////////////////////////////////////////////////////////
 
-static const auto& Logger = NetLogger;
+static constexpr auto& Logger = NetLogger;
 
 ////////////////////////////////////////////////////////////////////////////////
 
@@ -98,7 +98,7 @@ public:
         }
 
         for (auto& promise : queue) {
-           promise.Set(Error_);
+            promise.Set(Error_);
         }
     }
 

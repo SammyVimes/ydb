@@ -1,7 +1,7 @@
 #pragma once
 
 #include "datashard.h"
-#include "datashard_locks.h"
+#include <ydb/core/tx/locks/locks.h>
 
 #include <ydb/core/base/row_version.h>
 #include <ydb/core/tablet_flat/flat_row_eggs.h>
@@ -179,7 +179,9 @@ public:
 
     bool Reverse = false;
 
-    std::shared_ptr<TEvDataShard::TEvRead> Request;
+    // The original event handle
+    TEvDataShard::TEvRead::TPtr Ev;
+    TEvDataShard::TEvRead* Request = nullptr;
 
     // parallel to Request->Keys, but real data only in indices,
     // where in Request->Keys we have key prefix (here we have properly extended one).
@@ -203,13 +205,14 @@ public:
     TActorId SessionId;
     TMonotonic StartTs;
     bool IsFinished = false;
+    bool ReadContinuePending = false;
 
     // note that we send SeqNo's starting from 1
     ui64 SeqNo = 0;
     ui64 LastAckSeqNo = 0;
     ui32 FirstUnprocessedQuery = 0;
     TString LastProcessedKey;
-    bool LastProcessedKeyErased = false;
+    bool LastProcessedKeyErasedOrMissing = false;
 
     // Orbit used for tracking progress
     NLWTrace::TOrbit Orbit;

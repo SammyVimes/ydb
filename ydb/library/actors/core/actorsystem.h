@@ -2,7 +2,6 @@
 
 #include "defs.h"
 
-#include "balancer.h"
 #include "config.h"
 #include "event.h"
 #include "executor_pool.h"
@@ -93,8 +92,6 @@ namespace NActors {
         ui32 ExecutorsCount = 0;
         TArrayHolder<TAutoPtr<IExecutorPool>> Executors;
 
-        TAutoPtr<IBalancer> Balancer; // main implementation will be implicitly created if not set
-
         TCpuManagerConfig CpuManager;
 
         TAutoPtr<ISchedulerThread> Scheduler;
@@ -164,6 +161,7 @@ namespace NActors {
         TIntrusivePtr<NLog::TSettings> LoggerSettings0;
         TProxyWrapperFactory ProxyWrapperFactory;
         TMutex ProxyCreationLock;
+        mutable std::vector<TActorId> DynamicProxies;
 
         bool StartExecuted;
         bool StopExecuted;
@@ -289,6 +287,7 @@ namespace NActors {
         }
 
         void GetPoolStats(ui32 poolId, TExecutorPoolStats& poolStats, TVector<TExecutorThreadStats>& statsCopy) const;
+        void GetPoolStats(ui32 poolId, TExecutorPoolStats& poolStats, TVector<TExecutorThreadStats>& statsCopy, TVector<TExecutorThreadStats>& sharedStats) const;
 
         THarmonizerStats GetHarmonizerStats() const;
 
@@ -306,6 +305,9 @@ namespace NActors {
         TVector<IExecutorPool*> GetBasicExecutorPools() const {
             return CpuManager->GetBasicExecutorPools();
         }
+
+        void GetExecutorPoolState(i16 poolId, TExecutorPoolState &state) const;
+        void GetExecutorPoolStates(std::vector<TExecutorPoolState> &states) const;
 
     };
 }

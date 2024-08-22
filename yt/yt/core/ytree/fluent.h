@@ -4,6 +4,7 @@
 #include "tree_visitor.h"
 #include "tree_builder.h"
 #include "convert.h"
+#include "attributes.h"
 #include "attribute_consumer.h"
 #include "helpers.h"
 
@@ -645,7 +646,7 @@ public:
     using TValue = NYson::TYsonString;
 
     TFluentYsonWriterState(NYson::EYsonFormat format, NYson::EYsonType type)
-        : Writer(&Output, format, type, true /* enableRaw */)
+        : Writer(&Output, format, type, true /*enableRaw*/)
         , Type(type)
     { }
 

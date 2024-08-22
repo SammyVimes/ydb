@@ -38,8 +38,7 @@ if TYPE_CHECKING:
         text.
         """
 
-        def __pt_formatted_text__(self) -> StyleAndTextTuples:
-            ...
+        def __pt_formatted_text__(self) -> StyleAndTextTuples: ...
 
 
 AnyFormattedText = Union[
@@ -86,7 +85,7 @@ def to_formatted_text(
     else:
         raise ValueError(
             "No formatted text. Expecting a unicode object, "
-            "HTML, ANSI or a FormattedText instance. Got %r" % (value,)
+            f"HTML, ANSI or a FormattedText instance. Got {value!r}"
         )
 
     # Apply extra style.
@@ -132,7 +131,7 @@ class FormattedText(StyleAndTextTuples):
         return self
 
     def __repr__(self) -> str:
-        return "FormattedText(%s)" % super().__repr__()
+        return f"FormattedText({super().__repr__()})"
 
 
 class Template:

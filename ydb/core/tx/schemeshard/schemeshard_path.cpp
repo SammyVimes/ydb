@@ -391,6 +391,11 @@ const TPath::TChecker& TPath::TChecker::NotAsyncReplicaTable(EStatus status) con
         return *this;
     }
 
+    // do not treat incr backup tables as async replica
+    if (Path->IsIncrementalBackupTable()) {
+        return *this;
+    }
+
     return Fail(status, TStringBuilder() << "path is an async replica table"
         << " (" << BasicPathInfo(Path.Base()) << ")");
 }
@@ -565,6 +570,37 @@ const TPath::TChecker& TPath::TChecker::IsTheSameDomain(const TPath& another, ES
         << ", another path: " << another.PathString());
 }
 
+const TPath::TChecker& TPath::TChecker::FailOnWrongType(const TSet<TPathElement::EPathType>& expectedTypes) const {
+    if (Failed) {
+        return *this;
+    }
+
+    if (!Path.IsResolved()) {
+        return *this;
+    }
+
+    if (Path.IsDeleted()) {
+        return *this;
+    }
+
+    if (!expectedTypes.contains(Path.Base()->PathType)) {
+        return Fail(EStatus::StatusNameConflict, TStringBuilder() << "unexpected path type"
+            << " (" << BasicPathInfo(Path.Base()) << ")"
+            << ", expected types: " << JoinSeq(", ", expectedTypes));
+    }
+
+    if (!Path.Base()->IsCreateFinished()) {
+        return Fail(EStatus::StatusMultipleModifications, TStringBuilder() << "path exists but creating right now"
+            << " (" << BasicPathInfo(Path.Base()) << ")");
+    }
+
+    return *this;
+}
+
+const TPath::TChecker& TPath::TChecker::FailOnWrongType(TPathElement::EPathType expectedType) const {
+    return FailOnWrongType(TSet<TPathElement::EPathType>{expectedType});
+}
+
 const TPath::TChecker& TPath::TChecker::FailOnExist(const TSet<TPathElement::EPathType>& expectedTypes, bool acceptAlreadyExist) const {
     if (Failed) {
         return *this;
@@ -585,7 +621,7 @@ const TPath::TChecker& TPath::TChecker::FailOnExist(const TSet<TPathElement::EPa
     }
 
     if (!Path.Base()->IsCreateFinished()) {
-        return Fail(EStatus::StatusMultipleModifications, TStringBuilder() << "path exist but creating right now"
+        return Fail(EStatus::StatusMultipleModifications, TStringBuilder() << "path exists but creating right now"
             << " (" << BasicPathInfo(Path.Base()) << ")");
     }
 
@@ -805,6 +841,53 @@ const TPath::TChecker& TPath::TChecker::IsExternalDataSource(EStatus status) con
         << " (" << BasicPathInfo(Path.Base()) << ")");
 }
 
+const TPath::TChecker& TPath::TChecker::IsView(EStatus status) const {
+    if (Failed) {
+        return *this;
+    }
+
+    if (Path.Base()->IsView()) {
+        return *this;
+    }
+
+    return Fail(status, TStringBuilder() << "path is not a view"
+        << " (" << BasicPathInfo(Path.Base()) << ")"
+    );
+}
+
+const TPath::TChecker& TPath::TChecker::FailOnRestrictedCreateInTempZone(bool allowCreateInTemporaryDir, EStatus status) const {
+    if (Failed) {
+        return *this;
+    }
+
+    if (allowCreateInTemporaryDir) {
+        return *this;
+    }
+
+    for (const auto& element : Path.Elements) {
+        if (element->IsTemporary()) {
+            return Fail(status, TStringBuilder() << "path is temporary"
+                << " (" << BasicPathInfo(Path.Base()) << ")"
+            );
+        }
+    }
+
+    return *this;
+}
+
+const TPath::TChecker& TPath::TChecker::IsResourcePool(EStatus status) const {
+    if (Failed) {
+        return *this;
+    }
+
+    if (Path.Base()->IsResourcePool()) {
+        return *this;
+    }
+
+    return Fail(status, TStringBuilder() << "path is not a resource pool"
+        << " (" << BasicPathInfo(Path.Base()) << ")");
+}
+
 const TPath::TChecker& TPath::TChecker::PathShardsLimit(ui64 delta, EStatus status) const {
     if (Failed) {
         return *this;
@@ -875,6 +958,23 @@ const TPath::TChecker& TPath::TChecker::NotChildren(EStatus status) const {
 
     return Fail(status, TStringBuilder() << "path has children, request doesn't accept it"
         << ", children: " << childrenCount);
+}
+
+const TPath::TChecker& TPath::TChecker::CanBackupTable(EStatus status) const {
+    if (Failed) {
+        return *this;
+    }
+
+    for (const auto& child: Path.Base()->GetChildren()) {
+        auto name = child.first;
+
+        TPath childPath = Path.Child(name);
+        if (childPath->IsTableIndex()) {
+            return Fail(status, TStringBuilder() << "path has indexes, request doesn't accept it");
+        }
+    }
+
+    return *this;
 }
 
 const TPath::TChecker& TPath::TChecker::NotDeleted(EStatus status) const {
@@ -1501,20 +1601,22 @@ bool TPath::IsInsideCdcStreamPath() const {
         return false;
     }
 
-    ++item;
-    for (; item != Elements.rend(); ++item) {
-        if (!(*item)->IsDirectory() && !(*item)->IsSubDomainRoot()) {
-            return false;
-        }
-    }
-
     return true;
 }
 
-bool TPath::IsTableIndex() const {
+bool TPath::IsTableIndex(const TMaybe<NKikimrSchemeOp::EIndexType>& type) const {
     Y_ABORT_UNLESS(IsResolved());
 
-    return Base()->IsTableIndex();
+    if (!Base()->IsTableIndex()) {
+        return false;
+    }
+
+    if (!type.Defined()) {
+        return true;
+    }
+
+    Y_ABORT_UNLESS(SS->Indexes.contains(Base()->PathId));
+    return SS->Indexes.at(Base()->PathId)->Type == *type;
 }
 
 bool TPath::IsBackupTable() const {

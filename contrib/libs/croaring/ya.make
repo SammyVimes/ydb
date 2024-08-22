@@ -10,9 +10,9 @@ LICENSE(
 
 LICENSE_TEXTS(.yandex_meta/licenses.list.txt)
 
-VERSION(2.0.4)
+VERSION(4.1.1)
 
-ORIGINAL_SOURCE(https://github.com/RoaringBitmap/CRoaring/archive/v2.0.4.tar.gz)
+ORIGINAL_SOURCE(https://github.com/RoaringBitmap/CRoaring/archive/v4.1.1.tar.gz)
 
 ADDINCL(
     GLOBAL contrib/libs/croaring/include
@@ -25,6 +25,7 @@ NO_RUNTIME()
 
 SRCS(
     src/array_util.c
+    src/art/art.c
     src/bitset.c
     src/bitset_util.c
     src/containers/array.c
@@ -42,6 +43,7 @@ SRCS(
     src/isadetection.c
     src/memory.c
     src/roaring.c
+    src/roaring64.c
     src/roaring_array.c
     src/roaring_priority_queue.c
 )

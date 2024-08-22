@@ -8,6 +8,7 @@ PEERDIR(
     ydb/library/actors/core
     ydb/library/actors/interconnect/mock
     ydb/library/actors/protos
+    ydb/library/actors/testlib/common
     library/cpp/random_provider
     library/cpp/time_provider
 )

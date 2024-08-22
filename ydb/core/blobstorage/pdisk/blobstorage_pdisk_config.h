@@ -2,10 +2,14 @@
 #include "defs.h"
 
 #include <ydb/core/base/blobstorage.h>
-#include <ydb/core/base/compile_time_flags.h>
 #include <ydb/core/blobstorage/base/vdisk_priorities.h>
 #include <ydb/core/control/immediate_control_board_wrapper.h>
 #include <ydb/core/protos/blobstorage.pb.h>
+#include <ydb/core/protos/blobstorage_config.pb.h>
+#include <ydb/core/protos/blobstorage_disk.pb.h>
+#include <ydb/core/protos/blobstorage_pdisk_config.pb.h>
+#include <ydb/core/protos/blobstorage_disk_color.pb.h>
+#include <ydb/core/protos/feature_flags.pb.h>
 #include <ydb/core/protos/config.pb.h>
 
 #include <ydb/library/pdisk_io/drivedata.h>
@@ -123,7 +127,6 @@ struct TPDiskConfig : public TThrRefBase {
     ui32 BufferPoolBufferCount = 256;
     ui32 MaxQueuedCompletionActions = 128; // BufferPoolBufferCount / 2;
     bool UseSpdkNvmeDriver;
-    TControlWrapper UseT1ha0HashInFooter;
 
     ui64 ExpectedSlotCount = 0;
 
@@ -145,7 +148,11 @@ struct TPDiskConfig : public TThrRefBase {
     ui64 WarningLogChunksMultiplier = 4;
     ui64 YellowLogChunksMultiplier = 4;
 
+    ui32 MaxMetadataMegabytes = 32; // maximum size of raw metadata (in megabytes)
+
     NKikimrBlobStorage::TPDiskSpaceColor::E SpaceColorBorder = NKikimrBlobStorage::TPDiskSpaceColor::GREEN;
+
+    bool MetadataOnly = false;
 
     TPDiskConfig(ui64 pDiskGuid, ui32 pdiskId, ui64 pDiskCategory)
         : TPDiskConfig({}, pDiskGuid, pdiskId, pDiskCategory)
@@ -156,7 +163,6 @@ struct TPDiskConfig : public TThrRefBase {
         , PDiskGuid(pDiskGuid)
         , PDiskId(pdiskId)
         , PDiskCategory(pDiskCategory)
-        , UseT1ha0HashInFooter(KIKIMR_PDISK_ENABLE_T1HA_HASH_WRITING, 0, 1)
     {
         Initialize();
     }
@@ -197,7 +203,8 @@ struct TPDiskConfig : public TThrRefBase {
         DriveModelBulkWrieBlockSize = choose(64'000, 1 << 20, 2 << 20);
         DriveModelTrimSpeedBps = choose(6ull << 30, 6ull << 30, 0);
         ReorderingMs = choose(1, 7, 50);
-        DeviceInFlight = choose(128, 4, 32);
+        const ui64 hddInFlight = FeatureFlags.GetEnablePDiskHighHDDInFlight() ? 32 : 4;
+        DeviceInFlight = choose(128, 4, hddInFlight);
         CostLimitNs = choose(500'000ull, 20'000'000ull, 50'000'000ull);
 
         UseSpdkNvmeDriver = Path.StartsWith("PCIe:");
@@ -251,6 +258,7 @@ struct TPDiskConfig : public TThrRefBase {
         str << " PDiskGuid# " << PDiskGuid << x;
         str << " PDiskId# " << PDiskId << x;
         str << " PDiskCategory# " << PDiskCategory.ToString() << x;
+        str << " MetadataOnly# " << MetadataOnly << x;
         for (ui32 i = 0; i < HashedMainKey.size(); ++i) {
             str << " HashedMainKey[" << i << "]# " << HashedMainKey[i] << x;
         }

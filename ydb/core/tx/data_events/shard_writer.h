@@ -1,11 +1,11 @@
 #pragma once
 
 #include "shards_splitter.h"
+#include "common/modification_type.h"
 
 #include <ydb/library/accessor/accessor.h>
 #include <ydb/core/base/tablet_pipecache.h>
 #include <ydb/core/tx/long_tx_service/public/events.h>
-#include <ydb/public/api/grpc/draft/ydb_long_tx_v1.pb.h>
 #include <ydb/library/actors/core/actor_bootstrapped.h>
 #include <ydb/library/actors/wilson/wilson_profile_span.h>
 
@@ -80,6 +80,7 @@ private:
     TWritersController::TPtr ExternalController;
     const TActorId LeaderPipeCache;
     NWilson::TProfileSpan ActorSpan;
+    EModificationType ModificationType;
 
     static TDuration OverloadTimeout() {
         return TDuration::MilliSeconds(OverloadedDelayMs);
@@ -98,7 +99,7 @@ public:
     }
 
     TShardWriter(const ui64 shardId, const ui64 tableId, const TString& dedupId, const IShardInfo::TPtr& data,
-        const NWilson::TProfileSpan& parentSpan, TWritersController::TPtr externalController, const ui32 writePartIdx);
+        const NWilson::TProfileSpan& parentSpan, TWritersController::TPtr externalController, const ui32 writePartIdx, const EModificationType mType);
 
     STFUNC(StateMain) {
         switch (ev->GetTypeRewrite()) {

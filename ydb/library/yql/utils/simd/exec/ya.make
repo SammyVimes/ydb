@@ -25,7 +25,8 @@ PEERDIR(
 END()
 
 RECURSE(
+    add_columns
     pack_tuple
-    tuples_to_bucket
     stream_store
+    tuples_to_bucket
 )

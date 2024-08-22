@@ -1,15 +1,39 @@
 #include "columnshard.h"
-#include <ydb/core/formats/arrow/serializer/full.h>
 #include <ydb/core/testlib/cs_helper.h>
+#include <ydb/core/base/tablet_pipecache.h>
+
+extern "C" {
+#include <ydb/library/yql/parser/pg_wrapper/postgresql/src/include/catalog/pg_type_d.h>
+}
 
 namespace NKikimr {
 namespace NKqp {
+
+    TString GetConfigProtoWithName(const TString & tierName) {
+        return TStringBuilder() << "Name : \"" << tierName << "\"\n" <<
+        R"(
+            ObjectStorage : {
+                Endpoint: "fake"
+                Bucket: "fake"
+                SecretableAccessKey: {
+                    Value: {
+                        Data: "secretAccessKey"
+                    }
+                }
+                SecretableSecretKey: {
+                    Value: {
+                        Data: "fakeSecret"
+                    }
+                }
+            }
+        )";
+    }
+
     using namespace NYdb;
 
     TTestHelper::TTestHelper(const TKikimrSettings& settings)
         : Kikimr(settings)
         , TableClient(Kikimr.GetTableClient())
-        , LongTxClient(Kikimr.GetDriver())
         , Session(TableClient.CreateSession().GetValueSync().GetSession())
     {}
 
@@ -17,34 +41,55 @@ namespace NKqp {
         return Kikimr;
     }
 
+    TTestActorRuntime& TTestHelper::GetRuntime() {
+        return *Kikimr.GetTestServer().GetRuntime();
+    }
+
     NYdb::NTable::TSession& TTestHelper::GetSession() {
         return Session;
     }
 
-    void TTestHelper::CreateTable(const TColumnTableBase& table) {
+    void TTestHelper::CreateTable(const TColumnTableBase& table, const EStatus expectedStatus) {
         std::cerr << (table.BuildQuery()) << std::endl;
         auto result = Session.ExecuteSchemeQuery(table.BuildQuery()).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), expectedStatus, result.GetIssues().ToString());
+    }
+
+    void TTestHelper::CreateTier(const TString& tierName) {
+        auto result = Session.ExecuteSchemeQuery("CREATE OBJECT " + tierName + " (TYPE TIER) WITH tierConfig = `" + GetConfigProtoWithName(tierName) + "`").GetValueSync();
         UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
     }
 
-    void TTestHelper::InsertData(const TColumnTable& table, TTestHelper::TUpdatesBuilder& updates, const std::function<void()> onBeforeCommit /*= {}*/, const EStatus opStatus /*= EStatus::SUCCESS*/) {
-        NLongTx::TLongTxBeginResult resBeginTx = LongTxClient.BeginWriteTx().GetValueSync();
-        UNIT_ASSERT_VALUES_EQUAL_C(resBeginTx.Status().GetStatus(), EStatus::SUCCESS, resBeginTx.Status().GetIssues().ToString());
+    TString TTestHelper::CreateTieringRule(const TString& tierName, const TString& columnName) {
+        const TString ruleName = tierName + "_" + columnName;
+        const TString configTieringStr = TStringBuilder() <<  R"({
+            "rules" : [
+                {
+                    "tierName" : ")" << tierName << R"(",
+                    "durationForEvict" : "10d"
+                }
+            ]
+        })";
+        auto result = Session.ExecuteSchemeQuery("CREATE OBJECT IF NOT EXISTS " + ruleName + " (TYPE TIERING_RULE) WITH (defaultColumn = " + columnName + ", description = `" + configTieringStr + "`)").GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+        return ruleName;
+    }
 
-        auto txId = resBeginTx.GetResult().tx_id();
-        auto batch = updates.BuildArrow();
-        TString data = NArrow::NSerialization::TFullDataSerializer(arrow::ipc::IpcWriteOptions::Defaults()).Serialize(batch);
+    void TTestHelper::SetTiering(const TString& tableName, const TString& ruleName) {
+        auto alterQuery = TStringBuilder() << "ALTER TABLE `" << tableName <<  "` SET (TIERING = '" << ruleName << "')";
+        auto result = Session.ExecuteSchemeQuery(alterQuery).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+    }
 
-        NLongTx::TLongTxWriteResult resWrite =
-            LongTxClient.Write(txId, table.GetName(), txId, data, Ydb::LongTx::Data::APACHE_ARROW).GetValueSync();
-        UNIT_ASSERT_VALUES_EQUAL_C(resWrite.Status().GetStatus(), opStatus, resWrite.Status().GetIssues().ToString());
+    void TTestHelper::ResetTiering(const TString& tableName) {
+        auto alterQuery = TStringBuilder() << "ALTER TABLE `" << tableName <<  "` RESET (TIERING)";
+        auto result = Session.ExecuteSchemeQuery(alterQuery).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
+    }
 
-        if (onBeforeCommit) {
-            onBeforeCommit();
-        }
-
-        NLongTx::TLongTxCommitResult resCommitTx = LongTxClient.CommitTx(txId).GetValueSync();
-        UNIT_ASSERT_VALUES_EQUAL_C(resCommitTx.Status().GetStatus(), EStatus::SUCCESS, resCommitTx.Status().GetIssues().ToString());
+    void TTestHelper::DropTable(const TString& tableName) {
+        auto result = Session.DropTable(tableName).GetValueSync();
+        UNIT_ASSERT_VALUES_EQUAL_C(result.GetStatus(), EStatus::SUCCESS, result.GetIssues().ToString());
     }
 
     void TTestHelper::BulkUpsert(const TColumnTable& table, TTestHelper::TUpdatesBuilder& updates, const Ydb::StatusIds_StatusCode& opStatus /*= Ydb::StatusIds::SUCCESS*/) {
@@ -80,19 +125,40 @@ namespace NKqp {
             }
         }
         for (auto shard : shards) {
-            RebootTablet(*runtime, shard, sender);
+            Kikimr.GetTestServer().GetRuntime()->Send(MakePipePerNodeCacheID(false), NActors::TActorId(), new TEvPipeCache::TEvForward(
+                    new TEvents::TEvPoisonPill(), shard, false));
         }
     }
 
+    void TTestHelper::WaitTabletDeletionInHive(ui64 tabletId, TDuration duration) {
+        auto deadline = TInstant::Now() + duration;
+        while (GetKikimr().GetTestClient().TabletExistsInHive(&GetRuntime(), tabletId) && TInstant::Now() <= deadline) {
+            Cerr << "WaitTabletDeletionInHive: wait until " << tabletId << " is deleted" << Endl;
+            Sleep(TDuration::Seconds(1));
+        }
+    }
 
     TString TTestHelper::TColumnSchema::BuildQuery() const {
-        auto str = TStringBuilder() << Name << " " << NScheme::GetTypeName(Type);
+        TStringBuilder str;
+        str << Name << ' ';
+        switch (Type) {
+        case NScheme::NTypeIds::Pg:
+            str << NPg::PgTypeNameFromTypeDesc(TypeDesc);
+            break;
+        case NScheme::NTypeIds::Decimal: {
+            TTypeBuilder builder;
+            builder.Decimal(TDecimalType(22, 9));
+            str << builder.Build();
+            break;
+        }
+        default:
+            str << NScheme::GetTypeName(Type);
+        }
         if (!NullableFlag) {
             str << " NOT NULL";
         }
         return str;
     }
-
 
     TString TTestHelper::TColumnTableBase::BuildQuery() const {
         auto str = TStringBuilder() << "CREATE " << GetObjectType() << " `" << Name << "`";
@@ -100,7 +166,12 @@ namespace NKqp {
         if (!Sharding.empty()) {
             str << " PARTITION BY HASH(" << JoinStrings(Sharding, ", ") << ")";
         }
-        str << " WITH (STORE = COLUMN, AUTO_PARTITIONING_MIN_PARTITIONS_COUNT =" << MinPartitionsCount << ");";
+        str << " WITH (STORE = COLUMN";
+        str << ", AUTO_PARTITIONING_MIN_PARTITIONS_COUNT =" << MinPartitionsCount;
+        if (TTLConf) {
+            str << ", TTL = " << TTLConf->second << " ON " << TTLConf->first;
+        }
+        str << ");";
         return str;
     }
 
@@ -108,7 +179,7 @@ namespace NKqp {
     std::shared_ptr<arrow::Schema> TTestHelper::TColumnTableBase::GetArrowSchema(const TVector<TColumnSchema>& columns) {
         std::vector<std::shared_ptr<arrow::Field>> result;
         for (auto&& col : columns) {
-            result.push_back(BuildField(col.GetName(), col.GetType(), col.IsNullable()));
+            result.push_back(BuildField(col.GetName(), col.GetType(), col.GetTypeDesc(), col.IsNullable()));
         }
         return std::make_shared<arrow::Schema>(result);
     }
@@ -122,8 +193,7 @@ namespace NKqp {
         return JoinStrings(columnStr, ", ");
     }
 
-
-    std::shared_ptr<arrow::Field> TTestHelper::TColumnTableBase::BuildField(const TString name, const NScheme::TTypeId& typeId, bool nullable) const {
+    std::shared_ptr<arrow::Field> TTestHelper::TColumnTableBase::BuildField(const TString name, const NScheme::TTypeId typeId, void*const typeDesc, bool nullable) const {
         switch (typeId) {
         case NScheme::NTypeIds::Bool:
             return arrow::field(name, arrow::boolean(), nullable);
@@ -163,12 +233,36 @@ namespace NKqp {
             return arrow::field(name, arrow::timestamp(arrow::TimeUnit::TimeUnit::MICRO), nullable);
         case NScheme::NTypeIds::Interval:
             return arrow::field(name, arrow::duration(arrow::TimeUnit::TimeUnit::MICRO), nullable);
+        case NScheme::NTypeIds::Date32:
+            return arrow::field(name, arrow::int32(), nullable);
+        case NScheme::NTypeIds::Datetime64:
+        case NScheme::NTypeIds::Timestamp64:
+        case NScheme::NTypeIds::Interval64:
+            return arrow::field(name, arrow::int64(), nullable);
         case NScheme::NTypeIds::JsonDocument:
             return arrow::field(name, arrow::binary(), nullable);
+        case NScheme::NTypeIds::Pg:
+            switch (NPg::PgTypeIdFromTypeDesc(typeDesc)) {
+                case INT2OID:
+                    return arrow::field(name, arrow::int16(), true);
+                case INT4OID:
+                    return arrow::field(name, arrow::int32(), true);
+                case INT8OID:
+                    return arrow::field(name, arrow::int64(), true);
+                case FLOAT4OID:
+                    return arrow::field(name, arrow::float32(), true);
+                case FLOAT8OID:
+                    return arrow::field(name, arrow::float64(), true);
+                case BYTEAOID:
+                    return arrow::field(name, arrow::binary(), true);
+                case TEXTOID:
+                    return arrow::field(name, arrow::utf8(), true);
+                default:
+                    Y_FAIL("TODO: support pg");
+            }
         }
         return nullptr;
     }
-
 
     TString TTestHelper::TColumnTable::GetObjectType() const {
         return "TABLE";

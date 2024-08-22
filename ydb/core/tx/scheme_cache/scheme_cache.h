@@ -3,12 +3,13 @@
 #include <ydb/core/base/events.h>
 #include <ydb/core/scheme/scheme_pathid.h>
 #include <ydb/core/base/tx_processing.h>
+#include <ydb/core/base/subdomain.h>
 #include <ydb/core/protos/flat_scheme_op.pb.h>
 #include <ydb/core/protos/flat_tx_scheme.pb.h>
 #include <ydb/core/protos/subdomains.pb.h>
 #include <ydb/core/scheme/scheme_tabledefs.h>
 #include <ydb/core/scheme_types/scheme_type_registry.h>
-#include <ydb/core/tx/datashard/sys_tables.h>
+#include <ydb/core/tx/locks/sys_tables.h>
 #include <ydb/library/aclib/aclib.h>
 
 #include <util/datetime/base.h>
@@ -55,12 +56,15 @@ struct TDomainInfo : public TAtomicRefCount<TDomainInfo> {
         : DomainKey(GetDomainKey(descr.GetDomainKey()))
         , Params(descr.GetProcessingParams())
         , Coordinators(descr.GetProcessingParams())
-        , ServerlessComputeResourcesMode(descr.GetServerlessComputeResourcesMode())
     {
         if (descr.HasResourcesDomainKey()) {
             ResourcesDomainKey = GetDomainKey(descr.GetResourcesDomainKey());
         } else {
             ResourcesDomainKey = DomainKey;
+        }
+
+        if (descr.HasServerlessComputeResourcesMode()) {
+            ServerlessComputeResourcesMode = descr.GetServerlessComputeResourcesMode();
         }
     }
 
@@ -84,8 +88,7 @@ struct TDomainInfo : public TAtomicRefCount<TDomainInfo> {
     TPathId ResourcesDomainKey;
     NKikimrSubDomains::TProcessingParams Params;
     TCoordinators Coordinators;
-    NKikimrSubDomains::EServerlessComputeResourcesMode ServerlessComputeResourcesMode =
-        NKikimrSubDomains::SERVERLESS_COMPUTE_RESOURCES_MODE_UNSPECIFIED;
+    TMaybeServerlessComputeResourcesMode ServerlessComputeResourcesMode;
 
     TString ToString() const;
 
@@ -139,6 +142,8 @@ struct TSchemeCacheNavigate {
         KindExternalDataSource = 18,
         KindBlockStoreVolume = 19,
         KindFileStore = 20,
+        KindView = 21,
+        KindResourcePool = 22,
     };
 
     struct TListNodeEntry : public TAtomicRefCount<TListNodeEntry> {
@@ -241,6 +246,16 @@ struct TSchemeCacheNavigate {
         NKikimrSchemeOp::TFileStoreDescription Description;
     };
 
+    struct TViewInfo : public TAtomicRefCount<TViewInfo> {
+        EKind Kind = KindUnknown;
+        NKikimrSchemeOp::TViewDescription Description;
+    };
+
+    struct TResourcePoolInfo : public TAtomicRefCount<TResourcePoolInfo> {
+        EKind Kind = KindUnknown;
+        NKikimrSchemeOp::TResourcePoolDescription Description;
+    };
+
     struct TEntry {
         enum class ERequestType : ui8 {
             ByPath,
@@ -249,6 +264,7 @@ struct TSchemeCacheNavigate {
 
         // in
         TVector<TString> Path;
+        ui32 Access = NACLib::DescribeSchema;
         TTableId TableId;
         ERequestType RequestType = ERequestType::ByPath;
         EOp Operation = OpUnknown;
@@ -290,6 +306,8 @@ struct TSchemeCacheNavigate {
         TIntrusiveConstPtr<TExternalDataSourceInfo> ExternalDataSourceInfo;
         TIntrusiveConstPtr<TBlockStoreVolumeInfo> BlockStoreVolumeInfo;
         TIntrusiveConstPtr<TFileStoreInfo> FileStoreInfo;
+        TIntrusiveConstPtr<TViewInfo> ViewInfo;
+        TIntrusiveConstPtr<TResourcePoolInfo> ResourcePoolInfo;
 
         TString ToString() const;
         TString ToString(const NScheme::TTypeRegistry& typeRegistry) const;
@@ -341,7 +359,8 @@ struct TSchemeCacheRequest {
         KindUnknown = 0,
         KindRegularTable = 1,
         KindSyncIndexTable = 2,
-        KindAsyncIndexTable= 3,
+        KindAsyncIndexTable = 3,
+        KindVectorIndexTable = 4,
     };
 
     struct TEntry {

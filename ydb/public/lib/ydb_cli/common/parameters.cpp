@@ -23,7 +23,11 @@ void TCommandWithParameters::ParseParameters(TClientCommand::TConfig& config) {
 
     switch (StdinFormat) {
         case EOutputFormat::Csv:
+            Delimiter = ',';
+            break;
         case EOutputFormat::Tsv:
+            Delimiter = '\t';
+            break;
         case EOutputFormat::Raw:
             break;
         case EOutputFormat::Default:
@@ -160,9 +164,11 @@ void TCommandWithParameters::AddParametersStdinOption(TClientCommand::TConfig& c
         "or the waiting time reaches batch-max-delay."
         "\nDefault: " << colors.CyanColor() << "\"iterative\"" << colors.OldColor() << ".";
     config.Opts->AddLongOption("columns", "String with column names that replaces header. "
+            "Relevant when passing parameters in CSV/TSV format only. "
             "It is assumed that there is no header in the file")
             .RequiredArgument("STR").StoreResult(&Columns);
-    config.Opts->AddLongOption("skip-rows", "Number of header rows to skip (not including the row of column names, if any)")
+    config.Opts->AddLongOption("skip-rows", "Number of header rows to skip (not including the row of column names, if any). "
+            "Relevant when passing parameters in CSV/TSV format only.")
             .RequiredArgument("NUM").StoreResult(&SkipRows).DefaultValue(0);
     config.Opts->AddLongOption("stdin-par", "Parameter name on stdin, required/applicable when stdin-format implies values only.")
             .RequiredArgument("STRING").AppendTo(&StdinParameters);
@@ -223,11 +229,7 @@ bool TCommandWithParameters::GetNextParams(THolder<TParamsBuilder>& paramBuilder
                 }
                 --SkipRows;
             }
-            if (StdinFormat == EOutputFormat::Csv) {
-                CsvParser = MakeHolder<TCsvParser>(std::move(headerRow), ',', ParamTypes, ParameterSources);
-            } else {
-                CsvParser = MakeHolder<TCsvParser>(std::move(headerRow), '\t', ParamTypes, ParameterSources);
-            }
+            CsvParser = TCsvParser(std::move(headerRow), Delimiter, "", &ParamTypes, &ParameterSources);
         } else {
             Input = MakeHolder<TSimpleParamStream>();
         }
@@ -257,7 +259,7 @@ bool TCommandWithParameters::GetNextParams(THolder<TParamsBuilder>& paramBuilder
                 }
                 case EOutputFormat::Csv:
                 case EOutputFormat::Tsv: {
-                    CsvParser->GetParams(std::move(*data), *paramBuilder);
+                    CsvParser.GetParams(std::move(*data), *paramBuilder);
                     break;
                 }
                 default:
@@ -300,7 +302,7 @@ bool TCommandWithParameters::GetNextParams(THolder<TParamsBuilder>& paramBuilder
                     case EOutputFormat::Csv:
                     case EOutputFormat::Tsv: {
                         TValueBuilder valueBuilder;
-                        CsvParser->GetValue(std::move(*data), type, valueBuilder);
+                        CsvParser.GetValue(std::move(*data), valueBuilder, type);
                         paramBuilder->AddParam(fullname, valueBuilder.Build());
                         break;
                     }
@@ -379,7 +381,7 @@ bool TCommandWithParameters::GetNextParams(THolder<TParamsBuilder>& paramBuilder
                 case EOutputFormat::Csv:
                 case EOutputFormat::Tsv: {
                     valueBuilder.AddListItem();
-                    CsvParser->GetValue(std::move(*data), type.GetProto().list_type().item(), valueBuilder);
+                    CsvParser.GetValue(std::move(*data), valueBuilder, type.GetProto().list_type().item());
                     break;
                 }
                 default:

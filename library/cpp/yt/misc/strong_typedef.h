@@ -32,13 +32,20 @@ public:
     constexpr explicit operator const T&() const;
     constexpr explicit operator T&();
 
-    constexpr bool operator==(const TStrongTypedef& rhs) const
-        noexcept(noexcept(Underlying_ == rhs.Underlying_))
-            requires std::equality_comparable<T>;
+    #define XX(op) \
+        constexpr auto operator op(const TStrongTypedef& rhs) const \
+            noexcept(noexcept(Underlying_ op rhs.Underlying_)) \
+                requires requires(T lhs, T rhs) {lhs op rhs; };
 
-    constexpr auto operator<=>(const TStrongTypedef& rhs) const
-        noexcept(noexcept(Underlying_ <=> rhs.Underlying_))
-            requires std::three_way_comparable<T>;
+    XX(<)
+    XX(>)
+    XX(<=)
+    XX(>=)
+    XX(==)
+    XX(!=)
+    XX(<=>)
+
+    #undef XX
 
     explicit operator bool() const
         noexcept(noexcept(static_cast<bool>(Underlying_)));
@@ -49,13 +56,6 @@ public:
 
 private:
     T Underlying_;
-
-    //! NB: Hidden friend definition to make this name accessible only via ADL.
-    friend TString ToString(const TStrongTypedef& value)
-        requires requires (T value) { { ToString(value) } -> std::same_as<TString>; }
-    {
-        return ToString(value.Underlying_);
-    }
 };
 
 #define YT_DEFINE_STRONG_TYPEDEF(T, TUnderlying) \

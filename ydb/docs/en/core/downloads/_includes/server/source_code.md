@@ -1,6 +1,13 @@
 | Version | Release date | Link | Changelog |
 :--- | :--- | :--- | :---
+**v24.2**
+v.24.2.7 | 20/08/24 | [https://github.com/ydb-platform/ydb/tree/24.2.7](https://github.com/ydb-platform/ydb/tree/24.2.7)
+**v24.1**
+v.24.1.18 | 31/07/2024 | [https://github.com/ydb-platform/ydb/tree/24.1.18](https://github.com/ydb-platform/ydb/tree/24.1.18)
+**v23.4**
+v.23.4.11 | 14/05/2024 | [https://github.com/ydb-platform/ydb/tree/23.4.11](https://github.com/ydb-platform/ydb/tree/23.4.11)
 **v23.3**
+v.23.3.17 | 14/12/2023 | [https://github.com/ydb-platform/ydb/tree/23.3.17](https://github.com/ydb-platform/ydb/tree/23.3.17)
 v.23.3.13 | 12/10/2023 | [https://github.com/ydb-platform/ydb/tree/23.3.13](https://github.com/ydb-platform/ydb/tree/23.3.13) | [See the changelog](../../../changelog-server.md#23-3)
 **v23.2**
 v.23.2.12 | 14/08/2023 | [https://github.com/ydb-platform/ydb/tree/23.2.12](https://github.com/ydb-platform/ydb/tree/23.2.12) | [See the changelog](../../../changelog-server.md#23-2)

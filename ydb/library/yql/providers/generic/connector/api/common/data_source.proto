@@ -13,24 +13,36 @@ message TCredentials {
         string password = 2;
     }
 
+    message TToken {
+        string type = 1;
+        string value = 2;
+    }
+
     oneof payload {
         TBasic basic = 1;
+        TToken token = 2;
     }
 }
 
 // EDataSourceKind enumerates the external data sources
-// supported in the federated query system
+// supported by the federated query system
 enum EDataSourceKind {
     DATA_SOURCE_KIND_UNSPECIFIED = 0;
     CLICKHOUSE = 1;
     POSTGRESQL = 2;
+    S3 = 3;
+    YDB = 4;
+    MYSQL = 5;
+    MS_SQL_SERVER = 6;
+    GREENPLUM = 7;
+    ORACLE = 8;
 }
 
 // EProtocol generalizes various kinds of network protocols supported by different databases.
 enum EProtocol {
     PROTOCOL_UNSPECIFIED = 0;
     NATIVE = 1; // CLICKHOUSE, POSTGRESQL
-    HTTP = 2;   // CLICKHOUSE
+    HTTP = 2;   // CLICKHOUSE, S3
 }
 
 // TPostgreSQLDataSourceOptions represents settings specific to PostgreSQL
@@ -41,6 +53,28 @@ message TPostgreSQLDataSourceOptions {
 
 // TClickhouseDataSourceOptions represents settings specific to Clickhouse
 message TClickhouseDataSourceOptions {
+}
+
+// TS3DataSourceOptions represents settings specific to S3 (Simple Storage Service)
+message TS3DataSourceOptions {
+    // the region where data is stored
+    string region = 1;
+    // the bucket the object belongs to
+    string bucket = 2;
+}
+
+// TGreenplumDataSourceOptions represents settings specific to Greenplum
+message TGreenplumDataSourceOptions {
+    // Greenplum schema
+    string schema = 1;
+}
+
+// TOracleDataSourceOptions represents settings specific to Oracle
+message TOracleDataSourceOptions {
+    // Oracle service_name - alias to SID of oracle INSTANCE, or SID, or PDB.
+    //  More about connection options in Oracle docs:
+    //  https://docs.oracle.com/en/database/other-databases/essbase/21/essoa/connection-string-formats.html
+    string service_name = 1;
 }
 
 // TDataSourceInstance helps to identify the instance of a data source to redirect request to.
@@ -63,5 +97,8 @@ message TDataSourceInstance {
     oneof options {
         TPostgreSQLDataSourceOptions pg_options = 7;
         TClickhouseDataSourceOptions ch_options = 8;
+        TS3DataSourceOptions s3_options = 9;
+        TGreenplumDataSourceOptions gp_options = 10;
+        TOracleDataSourceOptions oracle_options = 11;
     }
 }

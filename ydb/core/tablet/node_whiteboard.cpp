@@ -1,15 +1,13 @@
 #include <cmath>
 #include <library/cpp/svnversion/svnversion.h>
 #include <util/system/info.h>
+#include <util/system/hostname.h>
 #include <ydb/core/base/appdata.h>
-#include <ydb/core/mon_alloc/stats.h>
 #include <ydb/library/actors/core/actor.h>
 #include <ydb/library/actors/core/actor_bootstrapped.h>
 #include <ydb/library/actors/core/hfunc.h>
-#include <ydb/library/actors/core/process_stats.h>
 #include <ydb/core/node_whiteboard/node_whiteboard.h>
 #include <ydb/core/base/nameservice.h>
-#include "tablet_counters.h"
 #include <ydb/core/base/counters.h>
 #include <ydb/core/util/tuples.h>
 
@@ -45,6 +43,10 @@ public:
         TIntrusivePtr<::NMonitoring::TDynamicCounters> introspectionGroup = tabletsGroup->GetSubgroup("type", "introspection");
         TabletIntrospectionData.Reset(NTracing::CreateTraceCollection(introspectionGroup));
 
+        SystemStateInfo.SetHost(FQDNHostName());
+        if (const TString& nodeName = AppData(ctx)->NodeName; !nodeName.Empty()) {
+            SystemStateInfo.SetNodeName(nodeName);
+        }
         SystemStateInfo.SetNumberOfCpus(NSystemInfo::NumberOfCpus());
         auto version = GetProgramRevision();
         if (!version.empty()) {
@@ -53,18 +55,14 @@ public:
             *versionCounter->GetCounter("version", false) = 1;
         }
 
-        // TODO(t1mursadykov): Add role for static nodes with sys tablets only
-        if (AppData(ctx)->DynamicNameserviceConfig) {
-            if (SelfId().NodeId() <= AppData(ctx)->DynamicNameserviceConfig->MaxStaticNodeId)
-                ctx.Send(ctx.SelfID, new TEvWhiteboard::TEvSystemStateAddRole("Storage"));
-        }
-
         SystemStateInfo.SetStartTime(ctx.Now().MilliSeconds());
-        ProcessStats.Fill(getpid());
-        if (ProcessStats.CGroupMemLim != 0) {
-            SystemStateInfo.SetMemoryLimit(ProcessStats.CGroupMemLim);
-        }
         ctx.Send(ctx.SelfID, new TEvPrivate::TEvUpdateRuntimeStats());
+
+        auto group = NKikimr::GetServiceCounters(NKikimr::AppData()->Counters, "utils")
+            ->GetSubgroup("subsystem", "whiteboard");
+        MaxClockSkewWithPeerUsCounter = group->GetCounter("MaxClockSkewWithPeerUs");
+        MaxClockSkewPeerIdCounter = group->GetCounter("MaxClockSkewPeerId");
+
         ctx.Schedule(TDuration::Seconds(60), new TEvPrivate::TEvCleanupDeadTablets());
         ctx.Schedule(TDuration::Seconds(15), new TEvPrivate::TEvUpdateClockSkew());
         Become(&TNodeWhiteboardService::StateFunc);
@@ -79,8 +77,11 @@ protected:
     i64 MaxClockSkewWithPeerUs;
     ui32 MaxClockSkewPeerId;
     NKikimrWhiteboard::TSystemStateInfo SystemStateInfo;
+    NKikimrMemory::TMemoryStats MemoryStats;
     THolder<NTracing::ITraceCollection> TabletIntrospectionData;
-    TProcStat ProcessStats;
+
+    ::NMonitoring::TDynamicCounters::TCounterPtr MaxClockSkewWithPeerUsCounter;
+    ::NMonitoring::TDynamicCounters::TCounterPtr MaxClockSkewPeerIdCounter;
 
     template <typename PropertyType>
     static ui64 GetDifference(PropertyType a, PropertyType b) {
@@ -385,6 +386,16 @@ protected:
         return modified;
     }
 
+    void SetRole(TStringBuf roleName) {
+        for (const auto& role : SystemStateInfo.GetRoles()) {
+            if (role == roleName) {
+                return;
+            }
+        }
+        SystemStateInfo.AddRoles(TString(roleName));
+        SystemStateInfo.SetChangeTime(TActivationContext::Now().MilliSeconds());
+    }
+
     STRICT_STFUNC(StateFunc,
         HFunc(TEvWhiteboard::TEvTabletStateUpdate, Handle);
         HFunc(TEvWhiteboard::TEvTabletStateRequest, Handle);
@@ -404,6 +415,7 @@ protected:
         HFunc(TEvWhiteboard::TEvBSGroupStateDelete, Handle);
         HFunc(TEvWhiteboard::TEvBSGroupStateRequest, Handle);
         HFunc(TEvWhiteboard::TEvSystemStateUpdate, Handle);
+        HFunc(TEvWhiteboard::TEvMemoryStatsUpdate, Handle);
         HFunc(TEvWhiteboard::TEvSystemStateAddEndpoint, Handle);
         HFunc(TEvWhiteboard::TEvSystemStateAddRole, Handle);
         HFunc(TEvWhiteboard::TEvSystemStateSetTenant, Handle);
@@ -458,6 +470,7 @@ protected:
         if (CheckedMerge(pDiskStateInfo, ev->Get()->Record) >= 100) {
             pDiskStateInfo.SetChangeTime(ctx.Now().MilliSeconds());
         }
+        SetRole("Storage");
     }
 
     void Handle(TEvWhiteboard::TEvVDiskStateUpdate::TPtr &ev, const TActorContext &ctx) {
@@ -522,9 +535,17 @@ protected:
     }
 
     void Handle(TEvWhiteboard::TEvBSGroupStateUpdate::TPtr &ev, const TActorContext &ctx) {
-        auto& bSGroupStateInfo = BSGroupStateInfo[ev->Get()->Record.GetGroupID()];
-        if (CheckedMerge(bSGroupStateInfo, ev->Get()->Record) >= 100) {
-            bSGroupStateInfo.SetChangeTime(ctx.Now().MilliSeconds());
+        const auto& from = ev->Get()->Record;
+        auto& to = BSGroupStateInfo[from.GetGroupID()];
+        int modified = 0;
+        if (from.GetNoVDisksInGroup() && to.GetGroupGeneration() <= from.GetGroupGeneration()) {
+            modified += 100 * (2 - to.GetVDiskIds().empty() - to.GetVDiskNodeIds().empty());
+            to.ClearVDiskIds();
+            to.ClearVDiskNodeIds();
+        }
+        modified += CheckedMerge(to, from);
+        if (modified >= 100) {
+            to.SetChangeTime(ctx.Now().MilliSeconds());
         }
     }
 
@@ -535,6 +556,34 @@ protected:
 
     void Handle(TEvWhiteboard::TEvSystemStateUpdate::TPtr &ev, const TActorContext &ctx) {
         if (CheckedMerge(SystemStateInfo, ev->Get()->Record)) {
+            SystemStateInfo.SetChangeTime(ctx.Now().MilliSeconds());
+        }
+    }
+
+    void Handle(TEvWhiteboard::TEvMemoryStatsUpdate::TPtr &ev, const TActorContext &ctx) {
+        MemoryStats.Swap(&ev->Get()->Record);
+
+        // Note: copy stats to sys info fields for backward compatibility
+        NKikimrWhiteboard::TSystemStateInfo systemStateUpdate;
+        if (MemoryStats.HasAnonRss()) {
+            systemStateUpdate.SetMemoryUsed(MemoryStats.GetAnonRss());
+        }
+        if (MemoryStats.HasHardLimit()) {
+            systemStateUpdate.SetMemoryLimit(MemoryStats.GetHardLimit());
+        }
+        if (MemoryStats.HasAllocatedMemory()) {
+            systemStateUpdate.SetMemoryUsedInAlloc(MemoryStats.GetAllocatedMemory());
+        }
+
+        // Note: is rendered in UI as 'Caches', so let's pass aggregated caches stats (not only Shared Cache stats)
+        if (MemoryStats.HasConsumersConsumption()) {
+            systemStateUpdate.MutableSharedCacheStats()->SetUsedBytes(MemoryStats.GetConsumersConsumption());
+        }
+        if (MemoryStats.HasConsumersLimit()) {
+            systemStateUpdate.MutableSharedCacheStats()->SetLimitBytes(MemoryStats.GetConsumersLimit());
+        }
+
+        if (CheckedMerge(SystemStateInfo, systemStateUpdate)) {
             SystemStateInfo.SetChangeTime(ctx.Now().MilliSeconds());
         }
     }
@@ -560,6 +609,7 @@ protected:
             SystemStateInfo.ClearTenants();
             SystemStateInfo.AddTenants(ev->Get()->Tenant);
             SystemStateInfo.SetChangeTime(ctx.Now().MilliSeconds());
+            SetRole("Tenant");
         }
     }
 
@@ -916,14 +966,6 @@ protected:
         for (double d : loadAverage) {
             systemStatsUpdate->Record.AddLoadAverage(d);
         }
-        ProcessStats.Fill(getpid());
-        if (ProcessStats.AnonRss != 0) {
-            systemStatsUpdate->Record.SetMemoryUsed(ProcessStats.AnonRss);
-        }
-        if (ProcessStats.CGroupMemLim != 0) {
-            systemStatsUpdate->Record.SetMemoryLimit(ProcessStats.CGroupMemLim);
-        }
-        systemStatsUpdate->Record.SetMemoryUsedInAlloc(TAllocState::GetAllocatedMemoryEstimate());
         if (CheckedMerge(SystemStateInfo, systemStatsUpdate->Record)) {
             SystemStateInfo.SetChangeTime(ctx.Now().MilliSeconds());
         }
@@ -962,6 +1004,9 @@ protected:
     }
 
     void Handle(TEvPrivate::TEvUpdateClockSkew::TPtr &, const TActorContext &ctx) {
+        MaxClockSkewWithPeerUsCounter->Set(abs(MaxClockSkewWithPeerUs));
+        MaxClockSkewPeerIdCounter->Set(MaxClockSkewPeerId);
+
         SystemStateInfo.SetMaxClockSkewWithPeerUs(MaxClockSkewWithPeerUs);
         SystemStateInfo.SetMaxClockSkewPeerId(MaxClockSkewPeerId);
         MaxClockSkewWithPeerUs = 0;

@@ -91,6 +91,8 @@ NKqpProto::EStreamLookupStrategy GetStreamLookupStrategy(const std::string_view 
         lookupStrategy = NKqpProto::EStreamLookupStrategy::LOOKUP;
     } else if (strategy == "LookupJoinRows"sv) {
         lookupStrategy = NKqpProto::EStreamLookupStrategy::JOIN;
+    } else if (strategy == "LookupSemiJoinRows"sv) {
+        lookupStrategy = NKqpProto::EStreamLookupStrategy::SEMI_JOIN;
     }
 
     YQL_ENSURE(lookupStrategy != NKqpProto::EStreamLookupStrategy::UNSPECIFIED,
@@ -174,6 +176,7 @@ void FillTable(const TKikimrTableMetadata& tableMeta, THashSet<TStringBuf>&& col
         phyColumn.MutableId()->SetId(column->Id);
         phyColumn.MutableId()->SetName(column->Name);
         phyColumn.SetTypeId(column->TypeInfo.GetTypeId());
+        phyColumn.SetIsBuildInProgress(column->IsBuildInProgress);
         if (column->IsDefaultFromSequence()) {
             phyColumn.SetDefaultFromSequence(column->DefaultFromSequence);
         } else if (column->IsDefaultFromLiteral()) {
@@ -366,7 +369,7 @@ void FillEffectRows(const TEffectCallable& callable, TEffectProto& proto, bool i
     }
 }
 
-void FillLookup(const TKqpLookupTable& lookup, NKqpProto::TKqpPhyOpLookup& lookupProto) {
+void FillLookup(const TKqpLookupTable& lookup, NKqpProto::TKqpPhyOpLookup& lookupProto, TExprContext& ctx) {
     auto maybeList = lookup.LookupKeys().Maybe<TCoIterator>().List();
     YQL_ENSURE(maybeList, "Expected iterator as lookup input, got: " << lookup.LookupKeys().Ref().Content());
 
@@ -398,7 +401,9 @@ void FillLookup(const TKqpLookupTable& lookup, NKqpProto::TKqpPhyOpLookup& looku
             }
         }
     } else {
-        YQL_ENSURE(false, "Unexpected lookup input: " << maybeList.Cast().Ref().Content());
+        auto brokenLookup =  KqpExprToPrettyString(lookup, ctx);
+        YQL_ENSURE(false, "Unexpected lookup input: " << maybeList.Cast().Ref().Content()
+            << "lookup: " << brokenLookup);
     }
 }
 
@@ -433,6 +438,29 @@ void FillOlapProgram(const T& node, const NKikimr::NMiniKQL::TType* miniKqlResul
     }
     auto resultColNames = GetResultColumnNames(miniKqlResultType);
     CompileOlapProgram(node.Process(), tableMeta, readProto, resultColNames, ctx);
+}
+
+THashMap<TString, TString> FindSecureParams(const TExprNode::TPtr& node, const TTypeAnnotationContext& typesCtx, TSet<TString>& SecretNames) {
+    THashMap<TString, TString> secureParams;
+    NYql::NCommon::FillSecureParams(node, typesCtx, secureParams);
+
+    for (auto& [secretName, structuredToken] : secureParams) {
+        const auto& tokenParser = CreateStructuredTokenParser(structuredToken);
+        tokenParser.ListReferences(SecretNames);
+        structuredToken = tokenParser.ToBuilder().RemoveSecrets().ToJson();
+    }
+
+    return secureParams;
+}
+
+std::optional<std::pair<TString, TString>> FindOneSecureParam(const TExprNode::TPtr& node, const TTypeAnnotationContext& typesCtx, const TString& nodeName, TSet<TString>& SecretNames) {
+    const auto& secureParams = FindSecureParams(node, typesCtx, SecretNames);
+    if (secureParams.empty()) {
+        return std::nullopt;
+    }
+
+    YQL_ENSURE(secureParams.size() == 1, "Only one SecureParams per " << nodeName << " allowed");
+    return *secureParams.begin();
 }
 
 class TKqpQueryCompiler : public IKqpQueryCompiler {
@@ -487,6 +515,33 @@ public:
             CompileTransaction(tx, *queryProto.AddTransactions(), ctx);
         }
 
+        auto overridePlanner = Config->OverridePlanner.Get();
+        if (overridePlanner) {
+            NJson::TJsonReaderConfig jsonConfig;
+            NJson::TJsonValue jsonNode;
+            if (NJson::ReadJsonTree(*overridePlanner, &jsonConfig, &jsonNode)) {
+                for (auto& stageOverride : jsonNode.GetArray()) {
+                    ui32 txId = 0;
+                    if (auto* txNode = stageOverride.GetValueByPath("tx")) {
+                        txId = txNode->GetIntegerSafe();
+                    }
+                    if (txId < static_cast<ui32>(queryProto.GetTransactions().size())) {
+                        auto& tx = *queryProto.MutableTransactions(txId);
+                        ui32 stageId = 0;
+                        if (auto* stageNode = stageOverride.GetValueByPath("stage")) {
+                            stageId = stageNode->GetIntegerSafe();
+                        }
+                        if (stageId < static_cast<ui32>(tx.GetStages().size())) {
+                            auto& stage = *tx.MutableStages(stageId);
+                            if (auto* tasksNode = stageOverride.GetValueByPath("tasks")) {
+                                stage.SetTaskCount(tasksNode->GetIntegerSafe());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
         for (ui32 i = 0; i < query.Results().Size(); ++i) {
             const auto& result = query.Results().Item(i);
 
@@ -517,12 +572,27 @@ public:
                 return false;
             }
 
-            auto resultMeta = queryBindingProto.MutableResultSetMeta();
+            auto resultMetaColumns = queryBindingProto.MutableResultSetMeta()->Mutablecolumns();
+            for (size_t i = 0; i < kikimrProto.GetStruct().MemberSize(); i++) {
+                resultMetaColumns->Add();
+            }
 
+            THashMap<TString, int> columnOrder;
+            columnOrder.reserve(kikimrProto.GetStruct().MemberSize());
+            if (!txResult.GetColumnHints().empty()) {
+                YQL_ENSURE(txResult.GetColumnHints().size() == (int)kikimrProto.GetStruct().MemberSize());
+                for (int i = 0; i < txResult.GetColumnHints().size(); i++) {
+                    const auto& hint = txResult.GetColumnHints().at(i);
+                    columnOrder[TString(hint)] = i;
+                }
+            }
+
+            int id = 0;
             for (const auto& column : kikimrProto.GetStruct().GetMember()) {
-                auto columnMeta = resultMeta->add_columns();
-                columnMeta->set_name(column.GetName());
-                ConvertMiniKQLTypeToYdbType(column.GetType(), *columnMeta->mutable_type());
+                int bindingColumnId = columnOrder.count(column.GetName()) ? columnOrder.at(column.GetName()) : id++;
+                auto& columnMeta = resultMetaColumns->at(bindingColumnId);
+                columnMeta.Setname(column.GetName());
+                ConvertMiniKQLTypeToYdbType(column.GetType(), *columnMeta.mutable_type());
             }
         }
 
@@ -578,7 +648,7 @@ private:
     void CompileStage(const TDqPhyStage& stage, NKqpProto::TKqpPhyStage& stageProto, TExprContext& ctx,
         const TMap<ui64, ui32>& stagesMap, TRequestPredictor& rPredictor, THashMap<TStringBuf, THashSet<TStringBuf>>& tablesMap)
     {
-        stageProto.SetIsEffectsStage(NOpt::IsKqpEffectsStage(stage));
+        const bool hasEffects = NOpt::IsKqpEffectsStage(stage);
 
         TStagePredictor& stagePredictor = rPredictor.BuildForStage(stage, ctx);
         stagePredictor.Scan(stage.Program().Ptr());
@@ -621,12 +691,12 @@ private:
                 FillTablesMap(lookupTable.Table(), lookupTable.Columns(), tablesMap);
                 FillTableId(lookupTable.Table(), *tableOp.MutableTable());
                 FillColumns(lookupTable.Columns(), *tableMeta, tableOp, true);
-                FillLookup(lookupTable, *tableOp.MutableLookup());
+                FillLookup(lookupTable, *tableOp.MutableLookup(), ctx);
             } else if (auto maybeUpsertRows = node.Maybe<TKqpUpsertRows>()) {
                 auto upsertRows = maybeUpsertRows.Cast();
                 auto tableMeta = TablesData->ExistingTable(Cluster, upsertRows.Table().Path()).Metadata;
                 YQL_ENSURE(tableMeta);
-                YQL_ENSURE(stageProto.GetIsEffectsStage());
+                YQL_ENSURE(hasEffects);
 
                 auto settings = TKqpUpsertRowsSettings::Parse(upsertRows);
 
@@ -639,8 +709,7 @@ private:
                 auto deleteRows = maybeDeleteRows.Cast();
                 auto tableMeta = TablesData->ExistingTable(Cluster, deleteRows.Table().Path()).Metadata;
                 YQL_ENSURE(tableMeta);
-
-                YQL_ENSURE(stageProto.GetIsEffectsStage());
+                YQL_ENSURE(hasEffects);
 
                 auto& tableOp = *stageProto.AddTableOps();
                 FillTablesMap(deleteRows.Table(), tablesMap);
@@ -689,6 +758,9 @@ private:
             return true;
         });
 
+        const auto& secureParams = FindSecureParams(stage.Program().Ptr(), TypesCtx, SecretNames);
+        stageProto.MutableSecureParams()->insert(secureParams.begin(), secureParams.end());
+
         auto result = stage.Program().Body();
         auto resultType = result.Ref().GetTypeAnn();
         ui32 outputsCount = 0;
@@ -709,6 +781,7 @@ private:
         stageProto.SetOutputsCount(outputsCount);
 
         // Dq sinks
+        bool hasTxTableSink = false;
         if (auto maybeOutputsNode = stage.Outputs()) {
             auto outputsNode = maybeOutputsNode.Cast();
             for (size_t i = 0; i < outputsNode.Size(); ++i) {
@@ -717,14 +790,25 @@ private:
                 YQL_ENSURE(maybeSinkNode);
                 auto sinkNode = maybeSinkNode.Cast();
                 auto* sinkProto = stageProto.AddSinks();
-                FillSink(sinkNode, sinkProto, ctx);
+                FillSink(sinkNode, sinkProto, tablesMap, ctx);
                 sinkProto->SetOutputIndex(FromString(TStringBuf(sinkNode.Index())));
+
+                if (IsTableSink(sinkNode.DataSink().Cast<TCoDataSink>().Category())) {
+                    // Only sinks with transactions to ydb tables can be considered as effects.
+                    // Inconsistent internal sinks and external sinks (like S3) aren't effects.
+                    auto settings = sinkNode.Settings().Maybe<TKqpTableSinkSettings>();
+                    YQL_ENSURE(settings);
+                    hasTxTableSink |= settings.InconsistentWrite().Cast().StringValue() != "true";
+                }
             }
         }
 
+        stageProto.SetIsEffectsStage(hasEffects || hasTxTableSink);
+
         auto paramsType = CollectParameters(stage, ctx);
+        NDq::TSpillingSettings spillingSettings{Config->GetEnabledSpillingNodes()};
         auto programBytecode = NDq::BuildProgram(stage.Program(), *paramsType, *KqlCompiler, TypeEnv, FuncRegistry,
-            ctx, {});
+            ctx, {}, spillingSettings);
 
         auto& programProto = *stageProto.MutableProgram();
         programProto.SetRuntimeVersion(NYql::NDqProto::ERuntimeVersion::RUNTIME_VERSION_YQL_1_0);
@@ -742,6 +826,7 @@ private:
         auto stageSettings = NDq::TDqStageSettings::Parse(stage);
         stageProto.SetStageGuid(stageSettings.Id);
         stageProto.SetIsSinglePartition(NDq::TDqStageSettings::EPartitionMode::Single == stageSettings.PartitionMode);
+        stageProto.SetAllowWithSpilling(Config->EnableSpillingGenericQuery);
     }
 
     void CompileTransaction(const TKqpPhysicalTx& tx, NKqpProto::TKqpPhyTx& txProto, TExprContext& ctx) {
@@ -944,11 +1029,6 @@ private:
             NYql::IDqIntegration* dqIntegration = provider->second->GetDqIntegration();
             YQL_ENSURE(dqIntegration, "Unsupported dq source for provider: \"" << dataSourceCategory << "\"");
             auto& externalSource = *protoSource->MutableExternalSource();
-            google::protobuf::Any& settings = *externalSource.MutableSettings();
-            TString& sourceType = *externalSource.MutableType();
-            dqIntegration->FillSourceSettings(source.Ref(), settings, sourceType);
-            YQL_ENSURE(!settings.type_url().empty(), "Data source provider \"" << dataSourceCategory << "\" did't fill dq source settings for its dq source node");
-            YQL_ENSURE(sourceType, "Data source provider \"" << dataSourceCategory << "\" did't fill dq source settings type for its dq source node");
 
             // Partitioning
             TVector<TString> partitionParams;
@@ -963,43 +1043,114 @@ private:
                 externalSource.AddPartitionedTaskParams(partitionParam);
             }
 
-            THashMap<TString, TString> secureParams;
-            NYql::NCommon::FillSecureParams(source.Ptr(), TypesCtx, secureParams);
-            if (!secureParams.empty()) {
-                YQL_ENSURE(secureParams.size() == 1, "Only one SecureParams per source allowed");
-                auto it = secureParams.begin();
-                externalSource.SetSourceName(it->first);
-                auto token = it->second;
-                externalSource.SetAuthInfo(CreateStructuredTokenParser(token).ToBuilder().RemoveSecrets().ToJson());
-                CreateStructuredTokenParser(token).ListReferences(SecretNames);
+            if (const auto& secureParams = FindOneSecureParam(source.Ptr(), TypesCtx, "source", SecretNames)) {
+                externalSource.SetSourceName(secureParams->first);
+                externalSource.SetAuthInfo(secureParams->second);
             }
+
+            google::protobuf::Any& settings = *externalSource.MutableSettings();
+            TString& sourceType = *externalSource.MutableType();
+            dqIntegration->FillSourceSettings(source.Ref(), settings, sourceType, maxTasksPerStage);
+            YQL_ENSURE(!settings.type_url().empty(), "Data source provider \"" << dataSourceCategory << "\" didn't fill dq source settings for its dq source node");
+            YQL_ENSURE(sourceType, "Data source provider \"" << dataSourceCategory << "\" didn't fill dq source settings type for its dq source node");
         }
     }
 
-    void FillSink(const TDqSink& sink, NKqpProto::TKqpSink* protoSink, TExprContext& ctx) {
+    void FillKqpSink(const TDqSink& sink, NKqpProto::TKqpSink* protoSink, THashMap<TStringBuf, THashSet<TStringBuf>>& tablesMap) {
+        if (auto settings = sink.Settings().Maybe<TKqpTableSinkSettings>()) {
+            NKqpProto::TKqpInternalSink& internalSinkProto = *protoSink->MutableInternalSink();
+            internalSinkProto.SetType(TString(NYql::KqpTableSinkName));
+            NKikimrKqp::TKqpTableSinkSettings settingsProto;
+            FillTablesMap(settings.Table().Cast(), settings.Columns().Cast(), tablesMap);
+            FillTableId(settings.Table().Cast(), *settingsProto.MutableTable());
+
+            const auto tableMeta = TablesData->ExistingTable(Cluster, settings.Table().Cast().Path()).Metadata;
+
+            for (const auto& columnName : tableMeta->KeyColumnNames) {
+                const auto columnMeta = tableMeta->Columns.FindPtr(columnName);
+                YQL_ENSURE(columnMeta != nullptr, "Unknown column in sink: \"" + columnName + "\"");
+
+                auto keyColumnProto = settingsProto.AddKeyColumns();
+                keyColumnProto->SetId(columnMeta->Id);
+                keyColumnProto->SetName(columnName);
+                keyColumnProto->SetTypeId(columnMeta->TypeInfo.GetTypeId());
+
+                if (columnMeta->TypeInfo.GetTypeId() == NScheme::NTypeIds::Pg) {
+                    auto& typeInfo = *keyColumnProto->MutableTypeInfo();
+                    typeInfo.SetPgTypeId(NPg::PgTypeIdFromTypeDesc(columnMeta->TypeInfo.GetTypeDesc()));
+                    typeInfo.SetPgTypeMod(columnMeta->TypeMod);
+                }
+            }
+
+            for (const auto& column : settings.Columns().Cast()) {
+                const auto columnName = column.StringValue();
+                const auto columnMeta = tableMeta->Columns.FindPtr(columnName);
+                YQL_ENSURE(columnMeta != nullptr, "Unknown column in sink: \"" + columnName + "\"");
+
+                auto columnProto = settingsProto.AddColumns();
+                columnProto->SetId(columnMeta->Id);
+                columnProto->SetName(columnName);
+                columnProto->SetTypeId(columnMeta->TypeInfo.GetTypeId());
+
+                if (columnMeta->TypeInfo.GetTypeId() == NScheme::NTypeIds::Pg) {
+                    auto& typeInfo = *columnProto->MutableTypeInfo();
+                    typeInfo.SetPgTypeId(NPg::PgTypeIdFromTypeDesc(columnMeta->TypeInfo.GetTypeDesc()));
+                    typeInfo.SetPgTypeMod(columnMeta->TypeMod);
+                }
+            }
+
+            if (const auto inconsistentWrite = settings.InconsistentWrite().Cast(); inconsistentWrite.StringValue() == "true") {
+                settingsProto.SetInconsistentTx(true);
+            }
+
+            if (settings.Mode().Cast().StringValue() == "replace") {
+                settingsProto.SetType(NKikimrKqp::TKqpTableSinkSettings::MODE_REPLACE);
+            } else if (settings.Mode().Cast().StringValue() == "upsert" || settings.Mode().Cast().StringValue().empty() /* for compatibility, will be removed */) {
+                settingsProto.SetType(NKikimrKqp::TKqpTableSinkSettings::MODE_UPSERT);
+            } else if (settings.Mode().Cast().StringValue() == "insert") {
+                settingsProto.SetType(NKikimrKqp::TKqpTableSinkSettings::MODE_INSERT);
+            } else if (settings.Mode().Cast().StringValue() == "delete") {
+                settingsProto.SetType(NKikimrKqp::TKqpTableSinkSettings::MODE_DELETE);
+            } else if (settings.Mode().Cast().StringValue() == "update") {
+                settingsProto.SetType(NKikimrKqp::TKqpTableSinkSettings::MODE_UPDATE);
+            } else {
+                YQL_ENSURE(false, "Unsupported sink mode");
+            }
+
+            internalSinkProto.MutableSettings()->PackFrom(settingsProto);
+        } else {
+            YQL_ENSURE(false, "Unsupported sink type");
+        }
+    }
+
+    bool IsTableSink(const TStringBuf dataSinkCategory) const {
+        return dataSinkCategory == NYql::KikimrProviderName
+            || dataSinkCategory == NYql::YdbProviderName
+            || dataSinkCategory == NYql::KqpTableSinkName;
+    }
+
+    void FillSink(const TDqSink& sink, NKqpProto::TKqpSink* protoSink, THashMap<TStringBuf, THashSet<TStringBuf>>& tablesMap, TExprContext& ctx) {
         Y_UNUSED(ctx);
         const TStringBuf dataSinkCategory = sink.DataSink().Cast<TCoDataSink>().Category();
-        // Delegate sink filling to dq integration of specific provider
-        const auto provider = TypesCtx.DataSinkMap.find(dataSinkCategory);
-        YQL_ENSURE(provider != TypesCtx.DataSinkMap.end(), "Unsupported data sink category: \"" << dataSinkCategory << "\"");
-        NYql::IDqIntegration* dqIntegration = provider->second->GetDqIntegration();
-        YQL_ENSURE(dqIntegration, "Unsupported dq sink for provider: \"" << dataSinkCategory << "\"");
-        auto& externalSink = *protoSink->MutableExternalSink();
-        google::protobuf::Any& settings = *externalSink.MutableSettings();
-        TString& sinkType = *externalSink.MutableType();
-        dqIntegration->FillSinkSettings(sink.Ref(), settings, sinkType);
-        YQL_ENSURE(!settings.type_url().empty(), "Data sink provider \"" << dataSinkCategory << "\" did't fill dq sink settings for its dq sink node");
-        YQL_ENSURE(sinkType, "Data sink provider \"" << dataSinkCategory << "\" did't fill dq sink settings type for its dq sink node");
+        if (IsTableSink(dataSinkCategory)) {
+            FillKqpSink(sink, protoSink, tablesMap);
+        } else {
+            // Delegate sink filling to dq integration of specific provider
+            const auto provider = TypesCtx.DataSinkMap.find(dataSinkCategory);
+            YQL_ENSURE(provider != TypesCtx.DataSinkMap.end(), "Unsupported data sink category: \"" << dataSinkCategory << "\"");
+            NYql::IDqIntegration* dqIntegration = provider->second->GetDqIntegration();
+            YQL_ENSURE(dqIntegration, "Unsupported dq sink for provider: \"" << dataSinkCategory << "\"");
+            auto& externalSink = *protoSink->MutableExternalSink();
+            google::protobuf::Any& settings = *externalSink.MutableSettings();
+            TString& sinkType = *externalSink.MutableType();
+            dqIntegration->FillSinkSettings(sink.Ref(), settings, sinkType);
+            YQL_ENSURE(!settings.type_url().empty(), "Data sink provider \"" << dataSinkCategory << "\" did't fill dq sink settings for its dq sink node");
+            YQL_ENSURE(sinkType, "Data sink provider \"" << dataSinkCategory << "\" did't fill dq sink settings type for its dq sink node");
 
-        THashMap<TString, TString> secureParams;
-        NYql::NCommon::FillSecureParams(sink.Ptr(), TypesCtx, secureParams);
-        if (!secureParams.empty()) {
-            YQL_ENSURE(secureParams.size() == 1, "Only one SecureParams per sink allowed");
-            auto it = secureParams.begin();
-            externalSink.SetSinkName(it->first);
-            auto token = it->second;
-            externalSink.SetAuthInfo(CreateStructuredTokenParser(token).ToBuilder().RemoveSecrets().ToJson());
-            CreateStructuredTokenParser(token).ListReferences(SecretNames);
+            if (const auto& secureParams = FindOneSecureParam(sink.Ptr(), TypesCtx, "sink", SecretNames)) {
+                externalSink.SetSinkName(secureParams->first);
+                externalSink.SetAuthInfo(secureParams->second);
+            }
         }
     }
 
@@ -1092,7 +1243,7 @@ private:
             const auto inputItemType = inputNodeType->Cast<TListExprType>()->GetItemType();
             sequencerProto.SetInputType(NMiniKQL::SerializeNode(CompileType(pgmBuilder, *inputItemType), TypeEnv));
 
-            auto autoIncrementColumns = sequencer.AutoIncrementColumns();
+            auto autoIncrementColumns = sequencer.DefaultConstraintColumns();
             for(const auto& column : autoIncrementColumns) {
                 sequencerProto.AddAutoIncrementColumns(column.StringValue());
             }
@@ -1153,13 +1304,16 @@ private:
 
                     break;
                 }
-                case NKqpProto::EStreamLookupStrategy::JOIN: {
+                case NKqpProto::EStreamLookupStrategy::JOIN:
+                case NKqpProto::EStreamLookupStrategy::SEMI_JOIN: {
                     YQL_ENSURE(inputItemType->GetKind() == ETypeAnnotationKind::Tuple);
                     const auto inputTupleType = inputItemType->Cast<TTupleExprType>();
                     YQL_ENSURE(inputTupleType->GetSize() == 2);
 
-                    YQL_ENSURE(inputTupleType->GetItems()[0]->GetKind() == ETypeAnnotationKind::Struct);
-                    const auto& joinKeyColumns = inputTupleType->GetItems()[0]->Cast<TStructExprType>()->GetItems();
+                    YQL_ENSURE(inputTupleType->GetItems()[0]->GetKind() == ETypeAnnotationKind::Optional);
+                    const auto joinKeyType = inputTupleType->GetItems()[0]->Cast<TOptionalExprType>()->GetItemType();
+                    YQL_ENSURE(joinKeyType->GetKind() == ETypeAnnotationKind::Struct);
+                    const auto& joinKeyColumns = joinKeyType->Cast<TStructExprType>()->GetItems();
                     for (const auto keyColumn : joinKeyColumns) {
                         YQL_ENSURE(tableMeta->Columns.FindPtr(keyColumn->GetName()),
                             "Unknown column: " << keyColumn->GetName());
