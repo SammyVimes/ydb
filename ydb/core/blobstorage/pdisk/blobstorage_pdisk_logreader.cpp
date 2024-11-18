@@ -802,6 +802,21 @@ bool TLogReader::ProcessSectorSet(TSectorData *sector) {
     restorator.Restore(sector->GetData(), sector->Offset, magic, LastNonce, PDisk->Cfg->UseT1ha0HashInFooter, Owner);
 
     if (!restorator.GoodSectorFlags) {
+        {
+            TGuard<TMutex> guard(PDisk->StateMutex);
+            TOwnerData &ownerData = PDisk->OwnerData[Owner];
+
+            if (ownerData.OnQuarantine) {
+                LOG_WARN_S(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, SelfInfo()
+                        << " In ProcessSectorSet got !restorator.GoodSectorFlags with owner on quarantine."
+                        << " File# " << __FILE__
+                        << " Line# " << __LINE__
+                        << " Marker# LR019");
+                ReplyOk();
+                return true;
+            }
+        }
+
         if (IsInitial) {
             LOG_NOTICE_S(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, SelfInfo()
                     << " In ProcessSectorSet got !restorator.GoodSectorFlags !"
