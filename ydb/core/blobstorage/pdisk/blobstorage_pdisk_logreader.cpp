@@ -802,33 +802,38 @@ bool TLogReader::ProcessSectorSet(TSectorData *sector) {
     restorator.Restore(sector->GetData(), sector->Offset, magic, LastNonce, PDisk->Cfg->UseT1ha0HashInFooter, Owner);
 
     if (!restorator.GoodSectorFlags) {
-        {
-            TGuard<TMutex> guard(PDisk->StateMutex);
-            TOwnerData &ownerData = PDisk->OwnerData[Owner];
-
-            if (ownerData.OnQuarantine) {
-                LOG_WARN_S(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, SelfInfo()
-                        << " In ProcessSectorSet got !restorator.GoodSectorFlags with owner on quarantine."
-                        << " File# " << __FILE__
-                        << " Line# " << __LINE__
-                        << " Marker# LR019");
-                ReplyOk();
-                return true;
-            }
-        }
-
         if (IsInitial) {
             LOG_NOTICE_S(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, SelfInfo()
                     << " In ProcessSectorSet got !restorator.GoodSectorFlags !"
                     << " LastGoodToWriteLogPosition# " << LastGoodToWriteLogPosition
                     << " Marker# LR018");
         } else {
-           Y_VERIFY_S(ChunkIdx == LogEndChunkIdx && SectorIdx >= LogEndSectorIdx, SelfInfo()
-                   << " File# " << __FILE__
-                   << " Line# " << __LINE__
-                   << " LogEndChunkIdx# " << LogEndChunkIdx
-                   << " LogEndSectorIdx# " << LogEndSectorIdx);
-            if (!(ChunkIdx == LogEndChunkIdx && SectorIdx >= LogEndSectorIdx)) {
+            bool outsideLogEnd = ChunkIdx == LogEndChunkIdx && SectorIdx >= LogEndSectorIdx;
+            
+            if (!outsideLogEnd) {
+                // If read invalid data from the log (but not outside this owner's log bounds), check if the owner is on quarantine.
+                TGuard<TMutex> guard(PDisk->StateMutex);
+                TOwnerData &ownerData = PDisk->OwnerData[Owner];
+
+                if (ownerData.OnQuarantine) {
+                    LOG_WARN_S(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, SelfInfo()
+                            << " In ProcessSectorSet got !restorator.GoodSectorFlags with owner on quarantine."
+                            << " File# " << __FILE__
+                            << " Line# " << __LINE__
+                            << " Marker# LR019");
+                    ReplyOk();
+                    return true;
+                }
+            }
+
+            Y_VERIFY_S(outsideLogEnd, SelfInfo()
+                    << " File# " << __FILE__
+                    << " Line# " << __LINE__
+                    << " LogEndChunkIdx# " << LogEndChunkIdx
+                    << " LogEndSectorIdx# " << LogEndSectorIdx);
+
+            if (outsideLogEnd) {
+                // It's ok.
                 LOG_WARN_S(*PDisk->ActorSystem, NKikimrServices::BS_PDISK, SelfInfo()
                         << " In ProcessSectorSet got !restorator.GoodSectorFlags outside the LogEndSector."
                         << " File# " << __FILE__
