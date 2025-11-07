@@ -171,7 +171,7 @@ public:
         // todo: adaptive save-with-retry and timeouts
         // todo: cancelation
 
-        const auto handleClass = NKikimrBlobStorage::TabletLog;
+        const auto handleClass = NKikimrBlobStorage::UserData;
         for (const auto &ref : References) {
             NWilson::TTraceId innerTraceId;
 
