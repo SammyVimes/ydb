@@ -38,6 +38,7 @@ RECURSE(
     groupinfo
     incrhuge
     lwtrace_probes
+    nextstorage
     nodewarden
     other
     pdisk
@@ -47,6 +48,7 @@ RECURSE(
 )
 
 RECURSE_FOR_TESTS(
+    nextstorage
     ut_blobstorage
     ut_group
     ut_mirror3of4
