@@ -203,6 +203,8 @@ namespace NKikimr::NStorage {
         vdiskConfig->MaxActiveCompactionsPerPDisk = MaxActiveCompactionsPerPDisk;
 
         vdiskConfig->EnableLocalSyncLogDataCutting = EnableLocalSyncLogDataCutting;
+        vdiskConfig->SyncLogMaxDiskAmount = SyncLogMaxDiskAmount;
+        vdiskConfig->SyncLogMaxMemAmount = SyncLogMaxMemAmount;
         if (deviceType == NPDisk::EDeviceType::DEVICE_TYPE_ROT) {
             vdiskConfig->EnableSyncLogChunkCompression = EnableSyncLogChunkCompressionHDD;
             vdiskConfig->MaxSyncLogChunksInFlight = MaxSyncLogChunksInFlightHDD;
