@@ -4,8 +4,11 @@
 #include <ydb/core/protos/bootstrap.pb.h>
 #include <ydb/core/protos/resource_broker.pb.h>
 
+#include <ydb/library/actors/core/executor_pool_counters.h>
 #include <ydb/library/actors/util/affinity.h>
 #include <ydb/library/actors/util/cpu_topology.h>
+
+#include <util/string/cast.h>
 
 #include <optional>
 #include <utility>
@@ -53,6 +56,26 @@ NActors::EASProfile ConvertActorSystemProfile(NKikimrConfig::TActorSystemConfig:
     }
 }
 
+void PublishPlacementCpuCounters(
+        const NMonitoring::TDynamicCounterPtr& counters, const TCpuTopology& cpuTopology) {
+    if (!counters) {
+        return;
+    }
+
+    for (const auto& placementGroup : cpuTopology.PlacementGroups) {
+        auto placementCounters = counters->GetSubgroup(
+            "placement", ToString(placementGroup.Id));
+        // Keep one series per logical CPU so monitoring can join the topology
+        // with host-level per-CPU counters, not merely observe the group size.
+        for (TCpuId cpu = 0; cpu < placementGroup.Cpus.Size(); ++cpu) {
+            if (placementGroup.Cpus.IsSet(cpu)) {
+                placementCounters->GetSubgroup("cpu", ToString(cpu))
+                    ->GetCounter("PlacementCpu", false)->Set(1);
+            }
+        }
+    }
+}
+
 const TCpuTopologyGroup& GetPlacementGroup(
         const TExecutorConfig& poolConfig, const TCpuTopology& cpuTopology, ui32 poolId) {
     const ui32 groupIndex = poolConfig.GetPlacement();
@@ -89,11 +112,13 @@ void AddExecutorPool(
                 Y_ABORT_UNLESS(cpuTopology);
                 const auto& placementGroup = GetPlacementGroup(poolConfig, *cpuTopology, poolId);
                 basic.Affinity = placementGroup.Cpus;
+                basic.PlacementGroupId = placementGroup.Id;
             } else {
                 basic.Affinity = ParseAffinity(poolConfig.GetAffinity());
             }
             if (poolConfig.HasMaxAvgPingDeviation() && counters) {
-                auto poolGroup = counters->GetSubgroup("execpool", basic.PoolName);
+                auto poolGroup = NActors::GetExecutorPoolCountersGroup(
+                    counters.Get(), basic.PoolName, basic.PlacementGroupId);
                 auto& poolInfo = cpuManager.PingInfoByPool[poolId];
                 poolInfo.AvgPingCounter = poolGroup->GetCounter("SelfPingAvgUs", false);
                 poolInfo.AvgPingCounterWithSmallWindow = poolGroup->GetCounter("SelfPingAvgUsIn1s", false);
@@ -184,6 +209,10 @@ void AddExecutorPoolsImpl(
         Y_ABORT_UNLESS(result, "Failed to parse CPU topology for executor placement: %s", result.error().c_str());
         parsedCpuTopology.emplace(std::move(*result));
         cpuTopology = &*parsedCpuTopology;
+    }
+
+    if (hasPlacement) {
+        PublishPlacementCpuCounters(counters, *cpuTopology);
     }
 
     cpuManager.PingInfoByPool.resize(systemConfig.ExecutorSize());

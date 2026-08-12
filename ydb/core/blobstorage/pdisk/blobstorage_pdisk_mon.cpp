@@ -5,6 +5,75 @@
 
 namespace NKikimr {
 
+TPDiskThreadMon::TPDiskThreadMon(
+        const TIntrusivePtr<NMonitoring::TDynamicCounters>& pdiskGroup,
+        const TString& threadName)
+{
+    auto threadGroup = pdiskGroup->GetSubgroup("thread", threadName);
+    CpuMicrosec = threadGroup->GetCounter("CpuMicrosec", true);
+    SchedRuntimeMicrosec = threadGroup->GetCounter("SchedRuntimeMicrosec", true);
+    SchedWaitMicrosec = threadGroup->GetCounter("SchedWaitMicrosec", true);
+    NonvoluntaryContextSwitches = threadGroup->GetCounter("NonvoluntaryContextSwitches", true);
+}
+
+void TPDiskThreadMon::Register(ui64 threadId) {
+    ThreadId = threadId;
+    Reader.emplace(threadId, TDuration::Seconds(5), NActors::EThreadCpuTimeReadMode::Enabled);
+}
+
+void TPDiskThreadMon::Unregister(ui64 threadId) {
+    if (ThreadId == threadId) {
+        ThreadId = 0;
+        Reader.reset();
+    }
+}
+
+void TPDiskThreadMon::Update() {
+    if (!Reader) {
+        return;
+    }
+
+    NActors::TThreadSchedulerStats stats;
+    const auto result = Reader->Read(stats);
+    if (result.CpuTimeStatus == NActors::EThreadSchedulerStatsReadStatus::Updated) {
+        *CpuMicrosec = result.CpuTimeUs;
+    }
+
+    if (result.SchedulerStatsStatus == NActors::EThreadSchedulerStatsReadStatus::Updated) {
+        *SchedRuntimeMicrosec = stats.RuntimeNs / 1000;
+        *SchedWaitMicrosec = stats.WaitNs / 1000;
+        *NonvoluntaryContextSwitches = stats.NonvoluntaryContextSwitches;
+    }
+}
+
+void TPDiskMon::RegisterThread(const TString& threadName, ui64 threadId) {
+    auto& monitor = ThreadMonitors.try_emplace(threadName, PDiskGroup, threadName).first->second;
+    monitor.Register(threadId);
+    UpdateThreadCount();
+}
+
+void TPDiskMon::UnregisterThread(const TString& threadName, ui64 threadId) {
+    const auto it = ThreadMonitors.find(threadName);
+    if (it != ThreadMonitors.end()) {
+        it->second.Unregister(threadId);
+        UpdateThreadCount();
+    }
+}
+
+void TPDiskMon::UpdateThreadCount() {
+    ui64 threadCount = 0;
+    for (const auto& [_, monitor] : ThreadMonitors) {
+        threadCount += monitor.Reader.has_value();
+    }
+    PDiskThreadCount->Set(threadCount);
+}
+
+void TPDiskMon::UpdateThreadStats() {
+    for (auto& [_, monitor] : ThreadMonitors) {
+        monitor.Update();
+    }
+}
+
 TPDiskMon::TPDiskMon(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& counters, ui32 pDiskId,
         TPDiskConfig *cfg)
     : Counters(counters)
@@ -279,6 +348,12 @@ TPDiskMon::TPDiskMon(const TIntrusivePtr<::NMonitoring::TDynamicCounters>& count
     COUNTER_INIT(PDiskGroup, GetThreadCPU, true);
     COUNTER_INIT(PDiskGroup, TrimThreadCPU, true);
     COUNTER_INIT(PDiskGroup, CompletionThreadCPU, true);
+    COUNTER_INIT(PDiskGroup, PDiskThreadCount, false);
+    PDiskThreadCount->Set(0);
+}
+
+TPDiskMon::~TPDiskMon() {
+    PDiskThreadCount->Set(0);
 }
 
 ::NMonitoring::TDynamicCounters::TCounterPtr TPDiskMon::GetBusyPeriod(const TString& owner, const TString& queue) {

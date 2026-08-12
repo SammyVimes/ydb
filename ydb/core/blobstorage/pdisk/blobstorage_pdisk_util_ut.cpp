@@ -570,6 +570,35 @@ void TestPayloadOffset(ui64 firstSector, ui64 lastSector, ui64 currentSector, ui
         UNIT_ASSERT_VALUES_EQUAL(getCounterValue("Unknown", "LogBytesByOp"), 300);
     }
 
+    Y_UNIT_TEST(PDiskThreadCountTracksActiveThreads) {
+        TIntrusivePtr<::NMonitoring::TDynamicCounters> counters = new ::NMonitoring::TDynamicCounters;
+        auto threadCount = counters->GetSubgroup("subsystem", "pdisk")
+            ->GetCounter("PDiskThreadCount", false);
+        threadCount->Set(17);
+
+        {
+            TPDiskMon mon(counters, 0, nullptr);
+            UNIT_ASSERT_VALUES_EQUAL(threadCount->Val(), 0);
+
+            mon.RegisterThread("main", 1);
+            UNIT_ASSERT_VALUES_EQUAL(threadCount->Val(), 1);
+
+            mon.RegisterThread("main", 2);
+            UNIT_ASSERT_VALUES_EQUAL(threadCount->Val(), 1);
+
+            mon.RegisterThread("submit", 3);
+            UNIT_ASSERT_VALUES_EQUAL(threadCount->Val(), 2);
+
+            mon.UnregisterThread("main", 1);
+            UNIT_ASSERT_VALUES_EQUAL(threadCount->Val(), 2);
+
+            mon.UnregisterThread("main", 2);
+            UNIT_ASSERT_VALUES_EQUAL(threadCount->Val(), 1);
+        }
+
+        UNIT_ASSERT_VALUES_EQUAL(threadCount->Val(), 0);
+    }
+
     Y_UNIT_TEST(FormatSectorMap) {
         TIntrusivePtr<TSectorMap> sectorMap(new TSectorMap(1024*1024*1024));
         TIntrusivePtr<::NMonitoring::TDynamicCounters> counters = new ::NMonitoring::TDynamicCounters;

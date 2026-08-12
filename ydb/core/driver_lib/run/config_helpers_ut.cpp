@@ -157,17 +157,22 @@ Y_UNIT_TEST(BasicExecutorsUsePlacementAffinityWithoutAffectingOtherPools) {
     const auto* systemPool = FindBasicPool(cpuManager, 0);
     UNIT_ASSERT(systemPool);
     AssertCpuMasksEqual(systemPool->Affinity, expectedRegularPoolAffinity);
+    UNIT_ASSERT(!systemPool->PlacementGroupId);
 
     const auto* firstBlobStoragePool = FindBasicPool(cpuManager, 1);
     UNIT_ASSERT(firstBlobStoragePool);
     UNIT_ASSERT_VALUES_EQUAL(firstBlobStoragePool->PoolName, "BS0");
     UNIT_ASSERT_VALUES_EQUAL(firstBlobStoragePool->Threads, 3);
+    UNIT_ASSERT(firstBlobStoragePool->PlacementGroupId);
+    UNIT_ASSERT_VALUES_EQUAL(*firstBlobStoragePool->PlacementGroupId, 10);
     AssertCpuMask(firstBlobStoragePool->Affinity, "0-1");
 
     const auto* secondBlobStoragePool = FindBasicPool(cpuManager, 2);
     UNIT_ASSERT(secondBlobStoragePool);
     UNIT_ASSERT_VALUES_EQUAL(secondBlobStoragePool->PoolName, "BS1");
     UNIT_ASSERT_VALUES_EQUAL(secondBlobStoragePool->Threads, 3);
+    UNIT_ASSERT(secondBlobStoragePool->PlacementGroupId);
+    UNIT_ASSERT_VALUES_EQUAL(*secondBlobStoragePool->PlacementGroupId, 20);
     AssertCpuMask(secondBlobStoragePool->Affinity, "2-3");
 
     UNIT_ASSERT_VALUES_EQUAL(cpuManager.IO.size(), 1);
@@ -202,6 +207,36 @@ Y_UNIT_TEST(MultipleBasicExecutorsCanSharePlacement) {
     UNIT_ASSERT(interconnectSessionPool);
     AssertCpuMask(blobStoragePool->Affinity, "2-3");
     AssertCpuMask(interconnectSessionPool->Affinity, "2-3");
+}
+
+Y_UNIT_TEST(PlacementCpuCountersDescribeLogicalCpuMembership) {
+    NKikimrConfig::TActorSystemConfig systemConfig;
+
+    auto* placement = AddExecutor(systemConfig, TExecutorConfig::BASIC, "BS");
+    placement->SetThreads(1);
+    placement->SetPlacement(0);
+
+    TCpuTopology cpuTopology;
+    cpuTopology.AllCpus = TCpuMask(TString("0-3"));
+    cpuTopology.PlacementGroups = {
+        {.Id = 0, .Cpus = TCpuMask(TString("0-1"))},
+        {.Id = 1, .Cpus = TCpuMask(TString("2-3"))},
+    };
+
+    NMonitoring::TDynamicCounterPtr counters = new NMonitoring::TDynamicCounters;
+    NActors::TCpuManagerConfig cpuManager;
+    NActorSystemConfigHelpers::AddExecutorPools(cpuManager, systemConfig, counters, cpuTopology);
+
+    auto getPlacementCpu = [&](const TString& placementId, const TString& cpuId) {
+        return counters->GetSubgroup("placement", placementId)
+            ->GetSubgroup("cpu", cpuId)
+            ->GetCounter("PlacementCpu", false)->Val();
+    };
+
+    UNIT_ASSERT_VALUES_EQUAL(getPlacementCpu("0", "0"), 1);
+    UNIT_ASSERT_VALUES_EQUAL(getPlacementCpu("0", "1"), 1);
+    UNIT_ASSERT_VALUES_EQUAL(getPlacementCpu("1", "2"), 1);
+    UNIT_ASSERT_VALUES_EQUAL(getPlacementCpu("1", "3"), 1);
 }
 
 } // Y_UNIT_TEST_SUITE(ActorSystemConfigHelpers)
