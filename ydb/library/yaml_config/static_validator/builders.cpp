@@ -3,6 +3,8 @@
 #include <ydb/library/yaml_config/validator/validator_checks.h>
 #include <ydb/library/yaml_config/validator/configurators.h>
 
+#include <util/generic/hash_set.h>
+
 namespace NKikimr {
 
 using namespace NYamlConfig::NValidator;
@@ -239,6 +241,11 @@ TMapBuilder ActorSystemConfigBuilder() {
       .Optional()
       .Min(0);
     })
+    .Array("interconnect_session_executor", [](auto& interconnectSessionExecutor){
+      interconnectSessionExecutor
+      .Optional()
+      .Int64Item(nonNegative());
+    })
     .Array("service_executor", [](auto& serviceExecutor){
       serviceExecutor
       .Optional()
@@ -255,6 +262,29 @@ TMapBuilder ActorSystemConfigBuilder() {
       .Int64("resolution", nonNegative())
       .Int64("spin_threshold", nonNegative());
     })
+    .AddCheck("Executor lists must reference existing executors", [](auto& actorSystemContext){
+      auto node = actorSystemContext.Node();
+      for (const TString& field : {TString("interconnect_session_executor")}) {
+        if (!node[field].Exists()) {
+          continue;
+        }
+        if (!node["executor"].Exists()) {
+          actorSystemContext.Expect(false, field + " requires executor");
+          continue;
+        }
+
+        auto executors = node["executor"].Array();
+        auto executorIds = node[field].Array();
+        THashSet<i64> seenExecutorIds;
+        for (int i = 0; i < executorIds.Length(); ++i) {
+          const i64 executorId = executorIds[i].Int64();
+          actorSystemContext.Expect(executorId >= 0 && executorId < executors.Length(),
+            field + " contains an id outside executor range");
+          actorSystemContext.Expect(seenExecutorIds.insert(executorId).second,
+            field + " contains duplicate executor ids");
+        }
+      }
+    })
     .AddCheck("Must either be auto config or manual config", [](auto& actorSystemContext){
       bool autoConfig = false;
       auto node = actorSystemContext.Node();
@@ -266,6 +296,7 @@ TMapBuilder ActorSystemConfigBuilder() {
         actorSystemContext.Expect(node["cpu_count"].Exists(), "cpu_count must exist when using auto congfig");
 
         actorSystemContext.Expect(!node["executor"].Exists(), "executor must not exist when using auto congfig");
+        actorSystemContext.Expect(!node["interconnect_session_executor"].Exists(), "interconnect_session_executor must not exist when using auto congfig");
         actorSystemContext.Expect(!node["scheduler"].Exists(), "scheduler must not exist when using auto congfig");
       } else {
         actorSystemContext.Expect(node["executor"].Exists(), "executor must exist when not using auto congfig");
