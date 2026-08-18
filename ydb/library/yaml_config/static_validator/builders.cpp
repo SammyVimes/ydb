@@ -236,6 +236,11 @@ TMapBuilder ActorSystemConfigBuilder() {
         });
       });
     })
+    .Array("blob_storage_executor", [](auto& blobStorageExecutor){
+      blobStorageExecutor
+      .Optional()
+      .Int64Item(nonNegative());
+    })
     .Int64("sys_executor", [](auto& sysExecutor){
       sysExecutor
       .Optional()
@@ -264,7 +269,7 @@ TMapBuilder ActorSystemConfigBuilder() {
     })
     .AddCheck("Executor lists must reference existing executors", [](auto& actorSystemContext){
       auto node = actorSystemContext.Node();
-      for (const TString& field : {TString("interconnect_session_executor")}) {
+      for (const TString& field : {TString("blob_storage_executor"), TString("interconnect_session_executor")}) {
         if (!node[field].Exists()) {
           continue;
         }
@@ -296,6 +301,7 @@ TMapBuilder ActorSystemConfigBuilder() {
         actorSystemContext.Expect(node["cpu_count"].Exists(), "cpu_count must exist when using auto congfig");
 
         actorSystemContext.Expect(!node["executor"].Exists(), "executor must not exist when using auto congfig");
+        actorSystemContext.Expect(!node["blob_storage_executor"].Exists(), "blob_storage_executor must not exist when using auto congfig");
         actorSystemContext.Expect(!node["interconnect_session_executor"].Exists(), "interconnect_session_executor must not exist when using auto congfig");
         actorSystemContext.Expect(!node["scheduler"].Exists(), "scheduler must not exist when using auto congfig");
       } else {
