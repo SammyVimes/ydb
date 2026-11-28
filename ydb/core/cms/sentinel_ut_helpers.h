@@ -87,10 +87,6 @@ public:
         WaitForSentinelBoot();
     }
 
-    void SetEvictVDisksStatus(EEvictVDisksStatus status) {
-        State->Config.SentinelConfig.EvictVDisksStatus = status;
-    }
-
     void SetBscMaintenanceStatus(const TPDiskID& id, EMaintenanceStatus::E status) {
         TGuard<TMutex> guard(TFakeNodeWhiteboardService::Mutex);
         auto* config = TFakeNodeWhiteboardService::Config.MutableResponse()->MutableStatus(0)->MutableBaseConfig();

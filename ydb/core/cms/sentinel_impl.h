@@ -41,7 +41,6 @@ public:
     bool IsInitialDeploymentGracePeriod() const;
 
     void SetMaintenanceStatus(EMaintenanceStatus::E status);
-    EMaintenanceStatus::E GetRequiredMaintenanceStatus() const;
 
 private:
     const ui32& DefaultStateLimit;

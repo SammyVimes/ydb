@@ -1379,11 +1379,8 @@ Y_UNIT_TEST_SUITE(TSentinelTests) {
         observerHolder.Remove();
     }
 
-    Y_UNIT_TEST(MaintenanceStatusNotManagedWithFaultyEviction) {
+    Y_UNIT_TEST(MaintenanceStatusNotManaged) {
         CheckMaintenanceStatusIsNotManaged(NKikimrCms::TCmsConfig::TSentinelConfig::FAULTY);
-    }
-
-    Y_UNIT_TEST(MaintenanceStatusNotManagedWithEvictionDisabled) {
         CheckMaintenanceStatusIsNotManaged(NKikimrCms::TCmsConfig::TSentinelConfig::DISABLED);
     }
 
@@ -1410,32 +1407,6 @@ Y_UNIT_TEST_SUITE(TSentinelTests) {
         // in both cases.
         env.SetBscMaintenanceStatus(id, EMaintenanceStatus::LONG_TERM_MAINTENANCE_PLANNED);
         env.RestartSentinel();
-        env.SetPDiskState({id}, NKikimrBlobStorage::TPDiskState::Normal);
-        env.SimulateSleep(TDuration::Seconds(1));
-        CheckMaintenanceRequested(requested, EMaintenanceStatus::NO_REQUEST);
-
-        observerHolder.Remove();
-    }
-
-    Y_UNIT_TEST(MaintenanceStatusWithdrawnIfEvictionModeChanged) {
-        NKikimrCms::TCmsConfig cmsConfig;
-        cmsConfig.MutableSentinelConfig()->SetEvictVDisksStatus(NKikimrCms::TCmsConfig::TSentinelConfig::MAINTENANCE);
-        TTestEnv env(8, 4, cmsConfig);
-
-        const TPDiskID id = env.PDiskId(0, 0);
-
-        TVector<EMaintenanceStatus::E> requested;
-        auto observerHolder = env.ObserveMaintenanceRequests(id, requested);
-
-        // CMS requests maintenance for the PDisks of the node with the faulty marker
-        env.SetNodeFaulty(id.NodeId, true);
-        env.SetPDiskState({id}, NKikimrBlobStorage::TPDiskState::Normal);
-        env.SimulateSleep(TDuration::Seconds(1));
-        CheckMaintenanceRequested(requested, EMaintenanceStatus::LONG_TERM_MAINTENANCE_PLANNED);
-        requested.clear();
-
-        // VDisks are not evicted with the maintenance status anymore, so the request is withdrawn
-        env.SetEvictVDisksStatus(EEvictVDisksStatus::Faulty);
         env.SetPDiskState({id}, NKikimrBlobStorage::TPDiskState::Normal);
         env.SimulateSleep(TDuration::Seconds(1));
         CheckMaintenanceRequested(requested, EMaintenanceStatus::NO_REQUEST);
